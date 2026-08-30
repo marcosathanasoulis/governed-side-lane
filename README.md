@@ -9,8 +9,8 @@ This project is maintained independently by
 employer-specific account, repository, configuration, credential, or
 convention.
 
-> Pre-release staging: the public repository and marketplace entries have not
-> been published yet.
+> Public preview: the repository and direct-install marketplace are available.
+> Signed beta releases and curated marketplace submissions are still pending.
 
 ## What it does
 
@@ -46,7 +46,7 @@ or global configuration is downloaded by this package.
 
 ## Claude marketplace installation
 
-After the public repository is released:
+From Claude Code:
 
 ```text
 /plugin marketplace add marcosathanasoulis/governed-side-lane
