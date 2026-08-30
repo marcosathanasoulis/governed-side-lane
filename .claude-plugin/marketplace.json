@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "marcos-side-lane",
+  "owner": {
+    "name": "Marcos Athanasoulis"
+  },
+  "description": "Governed cross-model developer tools maintained by Marcos Athanasoulis.",
+  "plugins": [
+    {
+      "name": "governed-side-lane",
+      "source": "./plugins/governed-side-lane",
+      "description": "Isolated native Codex, Claude, and optional GLM side lanes.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Marcos Athanasoulis"
+      },
+      "homepage": "https://github.com/marcosathanasoulis/governed-side-lane",
+      "repository": "https://github.com/marcosathanasoulis/governed-side-lane",
+      "license": "Apache-2.0",
+      "category": "Developer Tools",
+      "tags": ["agents", "code-review", "worktrees"]
+    }
+  ]
+}

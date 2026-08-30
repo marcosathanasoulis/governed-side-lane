@@ -1,0 +1,35 @@
+{
+  "schema_version": 3,
+  "providers": {
+    "openai": {
+      "gateway": "native-codex",
+      "auth_method": "oauth",
+      "billable": false,
+      "routes": {
+        "review": {"codex": {"protocol": "native-codex-readonly", "models": ["gpt-5.5", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]}},
+        "execute": {"codex": {"protocol": "native-codex", "models": ["gpt-5.5", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]}}
+      }
+    },
+    "claude": {
+      "gateway": "native-claude",
+      "auth_method": "oauth",
+      "billable": false,
+      "routes": {
+        "review": {"claude": {"protocol": "native-claude-readonly", "models": ["claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-5", "claude-fable-5"]}},
+        "execute": {"claude": {"protocol": "native-claude", "models": ["claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-5", "claude-fable-5"]}}
+      }
+    },
+    "glm": {
+      "gateway": "direct-zai",
+      "auth_method": "provider-key",
+      "credential_service": "governed-side-lane-glm",
+      "base_url": "https://api.z.ai/api/anthropic",
+      "billable": true,
+      "explicit_only": true,
+      "routes": {
+        "execute": {"claude": {"protocol": "anthropic-compatible", "models": ["glm-5.3"]}}
+      }
+    }
+  },
+  "capabilities": ["workspace-write", "shell", "git-push", "gitnexus", "codegraph", "gcloud-read", "secret-use", "database-read", "workflow-write"]
+}

@@ -1,0 +1,200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Side-lane routing catalog",
+  "description": "Reviewed static evidence only. This schema does not activate or discover a provider route.",
+  "type": "object",
+  "required": ["catalog_version", "catalog_verified_on", "freshness_days", "routes"],
+  "properties": {
+    "catalog_version": {"type": "string", "minLength": 1},
+    "catalog_verified_on": {"type": "string", "format": "date"},
+    "currency": {"const": "USD"},
+    "cost_contexts": {
+      "type": "object",
+      "required": ["native_default", "native_override", "glm", "policy"],
+      "properties": {
+        "native_default": {"const": "included-oauth"},
+        "native_override": {"const": "extra-usage"},
+        "glm": {"const": "prepaid-flat-rate"},
+        "policy": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "evidence_policy": {
+      "type": "object",
+      "required": ["hard_gates", "behavioral_sources", "activation_requires", "community_role"],
+      "properties": {
+        "hard_gates": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "behavioral_sources": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "activation_requires": {"type": "array", "contains": {"const": "local-evaluation"}},
+        "community_role": {"const": "evaluation-prior-only"}
+      },
+      "additionalProperties": false
+    },
+    "rate_cards": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["unit", "applicability", "verified_on", "source", "models"],
+        "properties": {
+          "unit": {"type": "string", "minLength": 1},
+          "applicability": {"type": "string", "minLength": 1},
+          "verified_on": {"type": "string", "format": "date"},
+          "source": {"type": "string", "format": "uri"},
+          "models": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "required": ["input_per_million", "output_per_million"],
+              "properties": {
+                "input_per_million": {"type": "number", "minimum": 0},
+                "cached_input_per_million": {"type": "number", "minimum": 0},
+                "output_per_million": {"type": "number", "minimum": 0}
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "metadata_sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["scope", "verified_on", "url"],
+        "properties": {
+          "scope": {"type": "string", "minLength": 1},
+          "verified_on": {"type": "string", "format": "date"},
+          "url": {"type": "string", "format": "uri"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "freshness_days": {
+      "type": "object",
+      "required": ["price", "evidence"],
+      "properties": {
+        "price": {"type": "integer", "minimum": 1},
+        "evidence": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "routes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/route"}
+    }
+  },
+  "$defs": {
+    "evidence": {
+      "type": "object",
+      "required": ["verified", "verified_on", "source"],
+      "properties": {
+        "verified": {"const": true},
+        "verified_on": {"type": "string", "format": "date"},
+        "source": {"type": "string", "minLength": 1}
+      }
+    },
+    "route": {
+      "type": "object",
+      "required": ["id", "provider", "gateway", "auth_method", "billable", "model_vendor", "model", "host", "mode", "state", "execution_allowlisted", "protocol"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "provider": {"type": "string", "minLength": 1},
+        "gateway": {"type": "string", "minLength": 1},
+        "auth_method": {"enum": ["oauth", "provider-key"]},
+        "billable": {"type": "boolean"},
+        "explicit_only": {"type": "boolean"},
+        "model_vendor": {"enum": ["claude", "openai", "glm"]},
+        "model": {"type": "string", "minLength": 1},
+        "host": {"enum": ["codex", "claude"]},
+        "mode": {"enum": ["review", "execute"]},
+        "state": {"enum": ["discoverable", "executable"]},
+        "execution_allowlisted": {"type": "boolean"},
+        "allowlist_ref": {"type": "string", "minLength": 1},
+        "protocol": {"enum": ["native-codex", "native-codex-readonly", "native-claude", "native-claude-readonly", "anthropic-compatible", "anthropic-compatible-readonly"]},
+        "connector_retention": {"enum": ["origin-host", "worker-host"]},
+        "connector_evidence": {"$ref": "#/$defs/evidence"},
+        "privacy_classes": {"type": "array", "items": {"type": "string"}},
+        "capabilities": {
+          "type": "object",
+          "required": ["supported", "authority_roles"],
+          "properties": {
+            "supported": {"type": "array", "items": {"type": "string"}},
+            "authority_roles": {
+              "type": "array",
+              "items": {"enum": ["worker", "reviewer", "coordinator"]}
+            },
+            "modalities": {"type": "array", "items": {"type": "string"}},
+            "tools": {"type": "array", "items": {"type": "string"}},
+            "context_window_tokens": {"type": "integer", "minimum": 1},
+            "max_output_tokens": {"type": "integer", "minimum": 1}
+          },
+          "additionalProperties": false
+        },
+        "cost_model": {
+          "type": "object",
+          "required": ["basis", "verified_on", "source"],
+          "properties": {
+            "basis": {"enum": ["native-oauth", "workspace-credits", "external-billable", "prepaid-flat-rate"]},
+            "verified_on": {"type": "string", "format": "date"},
+            "source": {"type": "string", "minLength": 1}
+            ,"rates": {
+              "type": "object",
+              "required": ["unit", "input_per_million", "output_per_million"],
+              "properties": {
+                "unit": {"type": "string", "minLength": 1},
+                "input_per_million": {"type": "number", "minimum": 0},
+                "cached_input_per_million": {"type": "number", "minimum": 0},
+                "output_per_million": {"type": "number", "minimum": 0}
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "behavioral_capabilities": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["score", "evidence_types"],
+            "properties": {
+              "score": {"type": "integer", "minimum": 0, "maximum": 100},
+              "evidence_types": {
+                "type": "array",
+                "contains": {"const": "local-evaluation"},
+                "items": {"enum": ["official-spec", "independent-benchmark", "community-signal", "local-evaluation", "provider-positioning"]}
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "community_signal_refs": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "local_evaluation": {
+          "allOf": [
+            {"$ref": "#/$defs/evidence"},
+            {
+              "type": "object",
+              "required": ["task_scores", "acceptance_rate"],
+              "properties": {
+                "task_scores": {
+                  "type": "object",
+                  "additionalProperties": {"type": "integer", "minimum": 0, "maximum": 100}
+                },
+                "acceptance_rate": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
+              }
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"state": {"const": "executable"}}},
+          "then": {
+            "required": ["allowlist_ref", "connector_retention", "connector_evidence", "cost_model", "local_evaluation", "privacy_classes", "capabilities", "behavioral_capabilities"]
+          }
+        }
+      ],
+      "description": "Executable routing entries require a reviewed cost basis, worker-host connector evidence, local task evidence, and cross-checking against the separate runtime allowlist."
+    }
+  }
+}

@@ -1,0 +1,69 @@
+{
+  "catalog_version": "2026-08-29.5",
+  "catalog_verified_on": "2026-08-29",
+  "currency": "USD",
+  "freshness_days": {"price": 90, "evidence": 180},
+  "cost_contexts": {
+    "native_default": "included-oauth",
+    "native_override": "extra-usage",
+    "glm": "prepaid-flat-rate",
+    "policy": "Zero incremental cost ranks first only after exact worker-host and task-relative capability gates. Live account state is user-declared, never inspected."
+  },
+  "evidence_policy": {
+    "hard_gates": ["official-spec", "local-presence"],
+    "behavioral_sources": ["independent-benchmark", "community-signal", "local-evaluation", "provider-positioning"],
+    "activation_requires": ["local-evaluation"],
+    "community_role": "evaluation-prior-only"
+  },
+  "rate_cards": {
+    "openai-chatgpt-workspace-credits-2026-08-29": {
+      "unit": "workspace-credit",
+      "applicability": "declared-compatible-chatgpt-workspace-extra-usage",
+      "verified_on": "2026-08-29",
+      "source": "https://help.openai.com/en/articles/11481834",
+      "models": {
+        "gpt-5.5": {"input_per_million": 125, "cached_input_per_million": 12.5, "output_per_million": 750},
+        "gpt-5.6-luna": {"input_per_million": 5, "cached_input_per_million": 0.5, "output_per_million": 30},
+        "gpt-5.6-terra": {"input_per_million": 50, "cached_input_per_million": 5, "output_per_million": 300},
+        "gpt-5.6-sol": {"input_per_million": 100, "cached_input_per_million": 10, "output_per_million": 500}
+      }
+    },
+    "anthropic-api-list-price-proxy-2026-08-29": {
+      "unit": "api-list-price-usd-proxy",
+      "applicability": "comparison-proxy-not-native-oauth-spend",
+      "verified_on": "2026-08-29",
+      "source": "https://platform.claude.com/docs/en/models/overview",
+      "models": {
+        "claude-haiku-4-5-20251001": {"input_per_million": 1, "output_per_million": 5},
+        "claude-sonnet-5": {"input_per_million": 2, "output_per_million": 10},
+        "claude-opus-5": {"input_per_million": 5, "output_per_million": 25},
+        "claude-fable-5": {"input_per_million": 10, "output_per_million": 50}
+      }
+    }
+  },
+  "metadata_sources": [
+    {"scope":"openai-family","verified_on":"2026-08-29","url":"https://developers.openai.com/api/docs/models"},
+    {"scope":"claude-family","verified_on":"2026-08-29","url":"https://platform.claude.com/docs/en/about-claude/models/overview"},
+    {"scope":"glm-family","verified_on":"2026-08-29","url":"https://docs.z.ai/"}
+  ],
+  "discovery_notice": "Reviewed inventory only. Native routes require exact local evidence before recommendation. GLM remains explicit-only and is never auto-selected.",
+  "routes": [
+    {"id":"codex-review-native-gpt-5-5","provider":"openai","gateway":"native-codex","auth_method":"oauth","billable":false,"model_vendor":"openai","model":"gpt-5.5","host":"codex","mode":"review","state":"discoverable","execution_allowlisted":true,"allowlist_ref":"config/models.json#providers.openai.routes.review.codex","protocol":"native-codex-readonly"},
+    {"id":"codex-review-native-gpt-5-6-luna","provider":"openai","gateway":"native-codex","auth_method":"oauth","billable":false,"model_vendor":"openai","model":"gpt-5.6-luna","host":"codex","mode":"review","state":"discoverable","execution_allowlisted":true,"allowlist_ref":"config/models.json#providers.openai.routes.review.codex","protocol":"native-codex-readonly"},
+    {"id":"codex-review-native-gpt-5-6-terra","provider":"openai","gateway":"native-codex","auth_method":"oauth","billable":false,"model_vendor":"openai","model":"gpt-5.6-terra","host":"codex","mode":"review","state":"discoverable","execution_allowlisted":true,"allowlist_ref":"config/models.json#providers.openai.routes.review.codex","protocol":"native-codex-readonly"},
+    {"id":"codex-review-native-gpt-5-6-sol","provider":"openai","gateway":"native-codex","auth_method":"oauth","billable":false,"model_vendor":"openai","model":"gpt-5.6-sol","host":"codex","mode":"review","state":"discoverable","execution_allowlisted":true,"allowlist_ref":"config/models.json#providers.openai.routes.review.codex","protocol":"native-codex-readonly"},
+    {"id":"codex-execute-native-gpt-5-5","provider":"openai","gateway":"native-codex","auth_method":"oauth","billable":false,"model_vendor":"openai","model":"gpt-5.5","host":"codex","mode":"execute","state":"discoverable","execution_allowlisted":true,"allowlist_ref":"config/models.json#providers.openai.routes.execute.codex","protocol":"native-codex"},
+    {"id":"codex-execute-native-gpt-5-6-luna","provider":"openai","gateway":"native-codex","auth_method":"oauth","billable":false,"model_vendor":"openai","model":"gpt-5.6-luna","host":"codex","mode":"execute","state":"discoverable","execution_allowlisted":true,"allowlist_ref":"config/models.json#providers.openai.routes.execute.codex","protocol":"native-codex"},
+    {"id":"codex-execute-native-gpt-5-6-terra","provider":"openai","gateway":"native-codex","auth_method":"oauth","billable":false,"model_vendor":"openai","model":"gpt-5.6-terra","host":"codex","mode":"execute","state":"discoverable","execution_allowlisted":true,"allowlist_ref":"config/models.json#providers.openai.routes.execute.codex","protocol":"native-codex"},
+    {"id":"codex-execute-native-gpt-5-6-sol","provider":"openai","gateway":"native-codex","auth_method":"oauth","billable":false,"model_vendor":"openai","model":"gpt-5.6-sol","host":"codex","mode":"execute","state":"discoverable","execution_allowlisted":true,"allowlist_ref":"config/models.json#providers.openai.routes.execute.codex","protocol":"native-codex"},
+    {"id":"claude-review-native-haiku-4-5","provider":"claude","gateway":"native-claude","auth_method":"oauth","billable":false,"model_vendor":"claude","model":"claude-haiku-4-5-20251001","host":"claude","mode":"review","state":"discoverable","execution_allowlisted":true,"allowlist_ref":"config/models.json#providers.claude.routes.review.claude","protocol":"native-claude-readonly"},
+    {"id":"claude-review-native-sonnet-5","provider":"claude","gateway":"native-claude","auth_method":"oauth","billable":false,"model_vendor":"claude","model":"claude-sonnet-5","host":"claude","mode":"review","state":"discoverable","execution_allowlisted":true,"allowlist_ref":"config/models.json#providers.claude.routes.review.claude","protocol":"native-claude-readonly"},
+    {"id":"claude-review-native-opus-5","provider":"claude","gateway":"native-claude","auth_method":"oauth","billable":false,"model_vendor":"claude","model":"claude-opus-5","host":"claude","mode":"review","state":"discoverable","execution_allowlisted":true,"allowlist_ref":"config/models.json#providers.claude.routes.review.claude","protocol":"native-claude-readonly"},
+    {"id":"claude-review-native-fable-5","provider":"claude","gateway":"native-claude","auth_method":"oauth","billable":false,"model_vendor":"claude","model":"claude-fable-5","host":"claude","mode":"review","state":"discoverable","execution_allowlisted":true,"allowlist_ref":"config/models.json#providers.claude.routes.review.claude","protocol":"native-claude-readonly"},
+    {"id":"claude-execute-native-haiku-4-5","provider":"claude","gateway":"native-claude","auth_method":"oauth","billable":false,"model_vendor":"claude","model":"claude-haiku-4-5-20251001","host":"claude","mode":"execute","state":"discoverable","execution_allowlisted":true,"allowlist_ref":"config/models.json#providers.claude.routes.execute.claude","protocol":"native-claude"},
+    {"id":"claude-execute-native-sonnet-5","provider":"claude","gateway":"native-claude","auth_method":"oauth","billable":false,"model_vendor":"claude","model":"claude-sonnet-5","host":"claude","mode":"execute","state":"discoverable","execution_allowlisted":true,"allowlist_ref":"config/models.json#providers.claude.routes.execute.claude","protocol":"native-claude"},
+    {"id":"claude-execute-native-opus-5","provider":"claude","gateway":"native-claude","auth_method":"oauth","billable":false,"model_vendor":"claude","model":"claude-opus-5","host":"claude","mode":"execute","state":"discoverable","execution_allowlisted":true,"allowlist_ref":"config/models.json#providers.claude.routes.execute.claude","protocol":"native-claude"},
+    {"id":"claude-execute-native-fable-5","provider":"claude","gateway":"native-claude","auth_method":"oauth","billable":false,"model_vendor":"claude","model":"claude-fable-5","host":"claude","mode":"execute","state":"discoverable","execution_allowlisted":true,"allowlist_ref":"config/models.json#providers.claude.routes.execute.claude","protocol":"native-claude"},
+    {"id":"claude-execute-direct-glm-5-3","provider":"glm","gateway":"direct-zai","auth_method":"provider-key","billable":true,"explicit_only":true,"model_vendor":"glm","model":"glm-5.3","host":"claude","mode":"execute","state":"discoverable","execution_allowlisted":true,"allowlist_ref":"config/models.json#providers.glm.routes.execute.claude","protocol":"anthropic-compatible","cost_model":{"basis":"prepaid-flat-rate","verified_on":"2026-08-29","source":"user-declared subscription terms; exact model route remains unverified"}}
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "name": "marcos-side-lane",
+  "interface": {
+    "displayName": "Marcos Developer Tools"
+  },
+  "plugins": [
+    {
+      "name": "governed-side-lane",
+      "source": {
+        "source": "local",
+        "path": "./plugins/governed-side-lane"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer-Tools"
+    }
+  ]
+}

@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Side-lane offline evaluation evidence",
+  "description": "Normalized reviewed records only; this schema does not invoke or activate a model.",
+  "type": "object",
+  "required": ["evaluation_runs", "community_signals"],
+  "properties": {
+    "evaluation_runs": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/run"}
+    },
+    "community_signals": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/community"}
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "run": {
+      "type": "object",
+      "required": ["route_id", "task_id", "task_band", "fixture_version", "rubric_version", "observed_on", "accepted", "score"],
+      "properties": {
+        "route_id": {"type": "string", "minLength": 1},
+        "task_id": {"type": "string", "minLength": 1},
+        "task_band": {"type": "string", "minLength": 1},
+        "fixture_version": {"type": "string", "minLength": 1},
+        "rubric_version": {"type": "string", "minLength": 1},
+        "observed_on": {"type": "string", "format": "date"},
+        "accepted": {"type": "boolean"},
+        "score": {"type": "number", "minimum": 0, "maximum": 100},
+        "duration_ms": {"type": "integer", "minimum": 0},
+        "retries": {"type": "integer", "minimum": 0},
+        "refused": {"type": "boolean"},
+        "cost": {
+          "type": "object",
+          "required": ["value", "unit", "basis"],
+          "properties": {
+            "value": {"type": "number", "minimum": 0},
+            "unit": {"type": "string", "minLength": 1},
+            "basis": {"type": "string", "minLength": 1}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "community": {
+      "type": "object",
+      "required": ["report_id", "source_url", "observed_on", "model", "task_capability", "host_harness", "direction", "affiliation", "methodology_disclosed"],
+      "properties": {
+        "report_id": {"type": "string", "minLength": 1},
+        "source_url": {"type": "string", "format": "uri"},
+        "observed_on": {"type": "string", "format": "date"},
+        "model": {"type": "string", "minLength": 1},
+        "task_capability": {"type": "string", "minLength": 1},
+        "host_harness": {"type": "string", "minLength": 1},
+        "direction": {"enum": ["supports", "contradicts"]},
+        "affiliation": {"enum": ["independent", "vendor", "unknown"]},
+        "methodology_disclosed": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    }
+  }
+}

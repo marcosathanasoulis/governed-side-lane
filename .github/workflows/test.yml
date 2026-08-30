@@ -1,0 +1,29 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate public package
+        run: python3 scripts/validate_public_package.py
+      - name: Unit tests
+        working-directory: plugins/governed-side-lane
+        run: python3 -m unittest discover -s tests -v
+      - name: Compile
+        working-directory: plugins/governed-side-lane
+        run: python3 -m compileall -q side_lane scripts tests
+      - name: Check shell installer syntax
+        working-directory: plugins/governed-side-lane
+        run: bash -n scripts/install.sh
