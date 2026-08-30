@@ -102,6 +102,17 @@ From Claude Code:
 
 Run `/reload-plugins` when Claude requests it.
 
+## Codex marketplace installation
+
+From a terminal with a current Codex CLI:
+
+```bash
+codex plugin marketplace add marcosathanasoulis/governed-side-lane --ref main
+codex plugin add governed-side-lane@marcos-side-lane
+```
+
+Start a new Codex task after installation if plugin discovery is cached.
+
 ## Source installation
 
 ```bash
@@ -120,9 +131,8 @@ Set-Location governed-side-lane\plugins\governed-side-lane
 .\scripts\install.ps1 check codex
 ```
 
-Codex marketplace installation will be documented after validation against the
-public Codex marketplace ingestion path. The standalone skill/source install
-remains supported independently.
+The standalone skill/source install remains supported independently of either
+marketplace.
 
 ## Usage
 
