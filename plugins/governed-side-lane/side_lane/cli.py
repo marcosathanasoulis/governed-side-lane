@@ -25,7 +25,7 @@ from side_lane.worktrees import (
 )
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = PACKAGE_ROOT / "config" / "models.json"
+DEFAULT_CONFIG_PATH = PACKAGE_ROOT / "config" / "models.json"
 MAX_PROMPT_CHARS = 100_000
 MAX_PROFILE_CHARS = 100_000
 REVIEW_UNSAFE = tuple(re.compile(p, re.I) for p in (
@@ -47,7 +47,13 @@ class SideLaneError(Exception):
     pass
 
 
-def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
+def config_path() -> Path:
+    override = os.environ.get("SIDE_LANE_MODELS_PATH")
+    return Path(override).expanduser() if override else DEFAULT_CONFIG_PATH
+
+
+def load_config(path: Path | None = None) -> dict[str, Any]:
+    path = path or config_path()
     try:
         config = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:

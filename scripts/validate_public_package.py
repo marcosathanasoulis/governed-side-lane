@@ -68,10 +68,24 @@ def main() -> int:
         if path.name == "plugin.json":
             if payload.get("name") != "governed-side-lane":
                 problems.append(f"wrong plugin name: {path.relative_to(ROOT)}")
-            if payload.get("version") != "0.1.0":
+            if payload.get("version") != "0.2.0":
                 problems.append(f"wrong plugin version: {path.relative_to(ROOT)}")
             if payload.get("license") != "Apache-2.0":
                 problems.append(f"wrong plugin license: {path.relative_to(ROOT)}")
+
+    version_files = (ROOT / "VERSION", PLUGIN / "VERSION")
+    for path in version_files:
+        if path.is_file() and path.read_text(encoding="utf-8").strip() != "0.2.0":
+            problems.append(f"wrong version file: {path.relative_to(ROOT)}")
+    source_metadata = PLUGIN / ".side-lane-source.json"
+    if source_metadata.is_file():
+        try:
+            source_payload = json.loads(source_metadata.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            problems.append(f"invalid JSON {source_metadata.relative_to(ROOT)}: {exc}")
+        else:
+            if source_payload.get("version") != "0.2.0":
+                problems.append("wrong source metadata version")
 
     if problems:
         print("public package validation failed:", file=sys.stderr)

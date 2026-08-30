@@ -37,6 +37,17 @@ class SideLaneTests(unittest.TestCase):
             with self.assertRaisesRegex(cli.SideLaneError, "schema_version 3"):
                 cli.load_config(path)
 
+    def test_explicit_models_path_override_is_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "models.json"
+            path.write_text(
+                (cli.DEFAULT_CONFIG_PATH).read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            with mock.patch.dict("os.environ", {"SIDE_LANE_MODELS_PATH": str(path)}):
+                self.assertEqual(cli.config_path(), path)
+                self.assertEqual(cli.load_config()["schema_version"], 3)
+
     def test_governance_and_prompt_modes_fail_closed(self) -> None:
         repo = self.repo()
         self.assertEqual(cli.validate_governance(str(repo)), repo.resolve())

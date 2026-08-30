@@ -181,6 +181,19 @@ side-lane run --host codex --mode execute \
 GLM is optional. Configure its documented credential locally and explicitly
 approve each key-backed run; never put the key on a command line.
 
+## Downstream organization overlays
+
+This repository is the canonical generic runtime. An organization may keep a
+private, reviewed model allowlist without forking the Python package by setting
+`SIDE_LANE_MODELS_PATH` in its own launcher to an absolute `models.json` path.
+The override is explicit and fail-closed: a missing, malformed, or incompatible
+file stops the command. Do not use it to bypass the canonical governance prompt
+or worktree rules.
+
+Downstream packages should pin a public commit/version, record hashes for the
+files they consume, and keep organization names, credentials, paths, and policy
+outside this repository.
+
 ## Development
 
 From `plugins/governed-side-lane`:
