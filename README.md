@@ -1,11 +1,26 @@
 # Governed Side Lane
 
-Governed Side Lane lets you keep working from the agent app you already use—
-Codex or Claude Code—while deliberately sending a bounded task to another
-native agent for a second opinion or implementation help. You choose the exact
-host, model, and mode; the runner gives that worker the same checked-in
-repository rules and durable context, then isolates its work in a dedicated Git
-worktree.
+Governed Side Lane allows you to work within one coding agent app—Codex or
+Claude Code—and have that agent coordinate a specific task on another agent. You
+stay in the conversation and workflow you already have open instead of
+switching apps and rebuilding the context midway through the work.
+
+This is useful when you want an easy second opinion, a review from a different
+model, or help implementing part of a larger task. It can also help avoid extra
+usage costs: if you know one product is in extra usage while another still has
+included capacity, you can tell your current agent to use the other one. The
+choice is always made by you; Governed Side Lane does not inspect your account,
+check how much usage you have left, or switch providers automatically.
+
+The skill works on its own, and it also works with
+[Prompt it](https://github.com/marcosathanasoulis/prompt-it). Prompt it helps
+turn a substantial request into a researched, approved plan and recommends
+which model should do each part. Governed Side Lane can then route an approved
+review or implementation task to the agent you selected.
+
+You choose the exact host, model, and mode. The runner gives the worker the same
+checked-in repository rules and durable context, then isolates its work in a
+dedicated Git worktree.
 
 This project is maintained independently by
 [Marcos Athanasoulis](https://github.com/marcosathanasoulis). It requires no
