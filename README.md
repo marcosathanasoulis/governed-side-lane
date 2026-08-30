@@ -1,8 +1,11 @@
 # Governed Side Lane
 
-Governed Side Lane routes an approved review or implementation task to an exact
-native Codex, native Claude, or explicitly configured GLM worker. Every run
-uses a dedicated Git worktree and a checked-in canonical safety contract.
+Governed Side Lane lets you keep working from the agent app you already use—
+Codex or Claude Code—while deliberately sending a bounded task to another
+native agent for a second opinion or implementation help. You choose the exact
+host, model, and mode; the runner gives that worker the same checked-in
+repository rules and durable context, then isolates its work in a dedicated Git
+worktree.
 
 This project is maintained independently by
 [Marcos Athanasoulis](https://github.com/marcosathanasoulis). It requires no
@@ -11,6 +14,50 @@ convention.
 
 > Public preview: the repository and direct-install marketplace are available.
 > Signed beta releases and curated marketplace submissions are still pending.
+
+## Why it is useful
+
+- **Stay in one coordinator app.** Keep the main conversation in Codex or
+  Claude Code and ask it to route a clearly scoped task to the other agent.
+  The result comes back to the coordinator instead of requiring you to recreate
+  the task and context by hand in another app.
+- **Get genuine second opinions.** Ask Codex to review Claude's approach, ask
+  Claude to review Codex's change, or compare agents on the same question under
+  the same repository rules.
+- **Use included subscription capacity deliberately.** Native Codex and Claude
+  lanes use the OAuth session for the corresponding signed-in product. If you,
+  the human, know one product has entered extra usage or you want to preserve
+  its remaining allowance, explicitly choose the other native lane. The tool
+  does not inspect quotas, billing, or usage and never switches agents
+  automatically.
+- **Delegate without agents colliding.** Every review or implementation gets a
+  uniquely named branch and worktree rather than editing the coordinator's
+  checkout.
+- **Keep routing auditable.** Host, provider, model, mode, lane name, and
+  capabilities are explicit. Missing authentication and unavailable routes
+  fail closed rather than falling back to a different or potentially billable
+  provider.
+
+For example, while working in Claude Code you can request a read-only Codex
+review of a proposed change. While working in Codex you can ask Claude for an
+alternative design or delegate an implementation lane. When you know Codex is
+in extra usage, you can instruct the coordinator to use your included Claude
+subscription capacity instead—or vice versa. Optional GLM routing is separate,
+explicitly configured, key-backed, and potentially billable.
+
+## How a side lane works
+
+1. You give your current Codex or Claude coordinator a task and explicitly
+   choose a review or execute lane and its target agent.
+2. The runner validates the target repository's `AGENTS.md` and authoritative
+   `CLAUDE.md`, creates a dedicated branch/worktree, and builds the worker prompt
+   from the approved task plus the canonical lane contract.
+3. The selected native agent runs through its own installed CLI and OAuth
+   session. Durable project facts come from checked-in repository context;
+   private product memory and connectors are not treated as shared truth.
+4. A review lane returns structured findings and removes its clean temporary
+   worktree. An execute lane preserves its branch and worktree so the
+   coordinator can inspect, test, and decide whether to integrate the result.
 
 ## What it does
 
