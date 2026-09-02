@@ -70,7 +70,8 @@ def git_status(run: WorktreeRun, runner: Runner = subprocess.run) -> str:
 def write_audit(run: WorktreeRun, *, host: str, mode: str, provider: str,
                 model: str, prompt: str, exit_status: int, status: str,
                 gateway: str | None = None, auth_method: str | None = None,
-                billable: bool | None = None) -> Path:
+                billable: bool | None = None, stdout: str = "",
+                stderr: str = "") -> Path:
     result = subprocess.run(["git", "-C", str(run.repository), "rev-parse", "--git-dir"],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, check=True)
@@ -81,13 +82,14 @@ def write_audit(run: WorktreeRun, *, host: str, mode: str, provider: str,
     destination.mkdir(parents=True, exist_ok=True)
     path = destination / f"{run.branch.replace('/', '-')}.json"
     path.write_text(json.dumps({
-        "schema_version": 1, "host": host, "mode": mode,
+        "schema_version": 2, "host": host, "mode": mode,
         "provider": provider, "gateway": gateway, "auth_method": auth_method,
         "billable": billable, "model": model,
         "repository": str(run.repository), "worktree": str(run.worktree),
         "branch": run.branch,
         "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
         "exit_status": exit_status, "git_status": status,
+        "stdout": stdout, "stderr": stderr,
     }, indent=2) + "\n", encoding="utf-8")
     return path
 

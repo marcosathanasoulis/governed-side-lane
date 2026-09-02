@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -35,6 +36,23 @@ class WorktreeTests(unittest.TestCase):
             capture_output=True, text=True,
         ).stdout.strip())
         self.assertFalse((repo / "INPROCESS.md").exists())
+
+    def test_audit_persists_findings_outside_the_disposable_worktree(self) -> None:
+        repo = self.make_repo()
+        lane = worktrees.create_worktree(
+            repo, "review", now=datetime(2026, 8, 29, 12, 32, tzinfo=timezone.utc)
+        )
+        path = worktrees.write_audit(
+            lane, host="claude", mode="review", provider="claude",
+            model="claude-sonnet-5", prompt="Review", exit_status=0,
+            status="## review", stdout="finding: bug in api.py", stderr="warn",
+        )
+        worktrees.dispose_clean_worktree(lane)
+        self.assertFalse(lane.worktree.exists())
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["stdout"], "finding: bug in api.py")
+        self.assertEqual(payload["stderr"], "warn")
 
     def test_refuses_dirty_coordinator_checkout(self) -> None:
         repo = self.make_repo()
