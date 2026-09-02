@@ -98,8 +98,13 @@ def validate_repository(
         for destination in re.findall(r"\[[^\]]*\]\(([^)]+)\)", line):
             target = destination.strip().strip("<>").split("#", 1)[0]
             authoritative_links.append((repo / target).resolve())
-    if authoritative_links != [claude.resolve()]:
-        raise GovernanceError("AGENTS.md must link unambiguously to root CLAUDE.md")
+    if not authoritative_links or set(authoritative_links) != {claude.resolve()}:
+        raise GovernanceError(
+            "AGENTS.md must link unambiguously to root CLAUDE.md: include a line "
+            "that requires it and names it authoritative, with a Markdown link, "
+            'e.g. "You **must** read [CLAUDE.md](./CLAUDE.md); it is the '
+            'authoritative source of truth."'
+        )
     if claude.is_symlink() or claude.resolve().parent != repo:
         raise GovernanceError(
             "root CLAUDE.md must be a regular repository file"
