@@ -100,6 +100,27 @@ class GovernanceParityTests(unittest.TestCase):
             with self.assertRaisesRegex(GovernanceError, "regular repository file"):
                 validate_repository(repo)
 
+    def test_repository_validation_linkage_repetition_and_foreign_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self.governed_repo(Path(directory))
+            (repo / "AGENTS.md").write_text(
+                "You must read [the rules](./CLAUDE.md); they are the authoritative source of truth.\n"
+                "Reminder: [CLAUDE.md](CLAUDE.md) is required and authoritative.\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(validate_repository(repo), repo.resolve())
+            (repo / "OTHER.md").write_text("# Other\n", encoding="utf-8")
+            (repo / "AGENTS.md").write_text(
+                "You must read [the rules](./CLAUDE.md); they are the authoritative source of truth.\n"
+                "You must also read [other](./OTHER.md); it is authoritative too.\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(GovernanceError, "link unambiguously"):
+                validate_repository(repo)
+            (repo / "AGENTS.md").write_text("CLAUDE.md matters.\n", encoding="utf-8")
+            with self.assertRaisesRegex(GovernanceError, "e.g."):
+                validate_repository(repo)
+
 
 if __name__ == "__main__":
     unittest.main()
