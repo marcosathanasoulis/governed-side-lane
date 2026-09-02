@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2 - 2026-09-01
+
+- Persist review findings durably: the per-run audit record
+  (`<git-dir>/side-lane-runs/<branch>.json`, now schema_version 2) captures
+  the lane's stdout and stderr before the disposable review worktree is
+  removed, and the run summary returns it as `result_artifact`. A failed
+  artifact write aborts the run without disposing the worktree.
+
 ## 0.2.1 - 2026-09-01
 
 - Make the AGENTS.md linkage governance error actionable and stop treating

@@ -385,8 +385,10 @@ def _launch(args: argparse.Namespace, config: Mapping[str, Any], repo: Path, pro
     status = git_status(lane)
     audit = write_audit(lane, host=result.host, mode=args.mode, provider=result.provider,
         gateway=result.gateway, auth_method=result.auth_method, billable=result.billable, model=result.model,
-        prompt=prompt, exit_status=result.returncode, status=status)
-    summary.update({"branch": lane.branch, "worktree": str(lane.worktree), "git_status": status, "audit": str(audit)})
+        prompt=prompt, exit_status=result.returncode, status=status,
+        stdout=result.stdout, stderr=result.stderr)
+    summary.update({"branch": lane.branch, "worktree": str(lane.worktree), "git_status": status,
+                    "audit": str(audit), "result_artifact": str(audit)})
     if args.mode == "review":
         dispose_clean_worktree(lane)
         summary["worktree_disposed"] = True

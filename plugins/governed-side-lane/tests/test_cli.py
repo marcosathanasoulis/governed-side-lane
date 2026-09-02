@@ -127,7 +127,7 @@ class SideLaneTests(unittest.TestCase):
         worktree = repo.parent / "review-worktree"
         lane = mock.Mock(worktree=worktree, branch="side-lane/review-1")
         result = LaneResult(("claude",), 0, worktree, "claude", "claude",
-            "native-claude", "claude-sonnet-5", "oauth", False, "", "")
+            "native-claude", "claude-sonnet-5", "oauth", False, "finding: bug in api.py", "")
         args = mock.Mock(host="claude", mode="review", provider="claude",
             model="claude-sonnet-5", capability=[], lane_name="review",
             approve_billable_route=False)
@@ -135,14 +135,38 @@ class SideLaneTests(unittest.TestCase):
              mock.patch("side_lane.cli.require_native_oauth"), \
              mock.patch("side_lane.adapters.claude.launch", return_value=result) as launch, \
              mock.patch("side_lane.cli.git_status", return_value="## review"), \
-             mock.patch("side_lane.cli.write_audit", return_value=repo / ".git/audit.json"), \
+             mock.patch("side_lane.cli.write_audit", return_value=repo / ".git/audit.json") as audit, \
              mock.patch("side_lane.cli.dispose_clean_worktree") as dispose, \
              contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(cli._launch(args, cli.load_config(), repo, "Review"), 0)
         create.assert_called_once_with(repo, "review")
         self.assertEqual(launch.call_args.kwargs["worktree"], worktree)
+        self.assertEqual(audit.call_args.kwargs["stdout"], "finding: bug in api.py")
         dispose.assert_called_once_with(lane)
-        self.assertTrue(json.loads(output.getvalue())["worktree_disposed"])
+        lines = output.getvalue().splitlines()
+        summary = json.loads("\n".join(lines[1:]))
+        self.assertTrue(summary["worktree_disposed"])
+        self.assertEqual(summary["result_artifact"], str(repo / ".git/audit.json"))
+
+    def test_failed_result_persistence_preserves_the_worktree(self) -> None:
+        repo = self.repo()
+        worktree = repo.parent / "review-worktree"
+        lane = mock.Mock(worktree=worktree, branch="side-lane/review-1")
+        result = LaneResult(("claude",), 0, worktree, "claude", "claude",
+            "native-claude", "claude-sonnet-5", "oauth", False, "finding: bug", "")
+        args = mock.Mock(host="claude", mode="review", provider="claude",
+            model="claude-sonnet-5", capability=[], lane_name="review",
+            approve_billable_route=False)
+        with mock.patch("side_lane.cli.create_worktree", return_value=lane), \
+             mock.patch("side_lane.cli.require_native_oauth"), \
+             mock.patch("side_lane.adapters.claude.launch", return_value=result), \
+             mock.patch("side_lane.cli.git_status", return_value="## review"), \
+             mock.patch("side_lane.cli.write_audit", side_effect=OSError("disk full")), \
+             mock.patch("side_lane.cli.dispose_clean_worktree") as dispose, \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(OSError):
+                cli._launch(args, cli.load_config(), repo, "Review")
+        dispose.assert_not_called()
 
     def test_recommend_profile_rejects_secret_usage_and_keeps_glm_explicit(self) -> None:
         for field in ("api_key", "credential", "secret", "quota", "billing", "usage"):
