@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1 - 2026-09-01
+
+- Make the AGENTS.md linkage governance error actionable and stop treating
+  repeated authoritative links to root `CLAUDE.md` as ambiguity.
+- Ship `config/allowed_signers` and verify release tags against it, so
+  SSH-signed release tags actually verify on installed hosts (`update.py`
+  previously reported "no signed release tags available" for every release,
+  including the unsigned v0.2.0).
+
 ## 0.2.0 - 2026-08-30
 
 - Establish the public package as the canonical core consumed by downstream

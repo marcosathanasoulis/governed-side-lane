@@ -9,6 +9,7 @@ from typing import Callable, Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]
+ALLOWED_SIGNERS = ROOT / "config" / "allowed_signers"
 CANONICAL = "https://github.com/marcosathanasoulis/governed-side-lane"
 ALLOWED_REMOTES = {
     CANONICAL,
@@ -52,11 +53,20 @@ def available(runner: Callable[..., object] = subprocess.run) -> list[str]:
     verified: list[str] = []
     for tag in candidates:
         try:
-            git(["verify-tag", tag], runner)
+            verify_tag(tag, runner)
         except UpdateError:
             continue
         verified.append(tag)
     return verified
+
+
+def verify_tag(tag: str, runner: Callable[..., object] = subprocess.run) -> None:
+    signer_config = (
+        ["-c", f"gpg.ssh.allowedSignersFile={ALLOWED_SIGNERS}"]
+        if ALLOWED_SIGNERS.is_file()
+        else []
+    )
+    git([*signer_config, "verify-tag", tag], runner)
 
 
 def apply(tag: str, runner: Callable[..., object] = subprocess.run) -> None:
@@ -64,7 +74,7 @@ def apply(tag: str, runner: Callable[..., object] = subprocess.run) -> None:
         raise UpdateError("release must be an explicit semantic version tag")
     preflight(runner)
     git(["fetch", "--tags", "--prune", "origin"], runner)
-    git(["verify-tag", tag], runner)
+    verify_tag(tag, runner)
     git(["merge-base", "--is-ancestor", "HEAD", tag], runner)
     git(["merge", "--ff-only", tag], runner)
 
