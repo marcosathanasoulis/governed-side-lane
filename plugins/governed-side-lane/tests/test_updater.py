@@ -34,6 +34,14 @@ class UpdateTests(unittest.TestCase):
         with self.assertRaises(update.UpdateError):
             update.apply("latest", mock.Mock())
 
+    def test_verify_tag_pins_packaged_allowed_signers(self) -> None:
+        runner = mock.Mock(return_value=self.result("verified\n"))
+        with mock.patch.object(type(update.ALLOWED_SIGNERS), "is_file", return_value=True):
+            update.verify_tag("v1.2.3", runner)
+        command = runner.call_args_list[0].args[0]
+        self.assertIn(f"gpg.ssh.allowedSignersFile={update.ALLOWED_SIGNERS}", command)
+        self.assertIn("verify-tag", command)
+
     def test_available_returns_only_verified_tags(self) -> None:
         runner = mock.Mock(side_effect=[
             self.result("https://github.com/marcosathanasoulis/governed-side-lane\n"),
