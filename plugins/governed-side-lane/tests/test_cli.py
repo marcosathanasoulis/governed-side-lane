@@ -13,6 +13,13 @@ from side_lane.results import LaneResult
 
 
 class SideLaneTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Keep host-executable resolution hermetic: a real override in the
+        # developer's or CI environment must not steer these tests.
+        patcher = mock.patch.dict(os.environ, {"SIDE_LANE_CODEX_EXECUTABLE": "", "SIDE_LANE_CLAUDE_EXECUTABLE": ""})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def repo(self) -> Path:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -239,6 +246,13 @@ if __name__ == "__main__":
 
 
 class HostExecutableCliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Keep host-executable resolution hermetic: a real override in the
+        # developer's or CI environment must not steer these tests.
+        patcher = mock.patch.dict(os.environ, {"SIDE_LANE_CODEX_EXECUTABLE": "", "SIDE_LANE_CLAUDE_EXECUTABLE": ""})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_launch_fails_before_worktree_when_host_executable_is_missing(self) -> None:
         from side_lane import hosts
 
@@ -247,8 +261,7 @@ class HostExecutableCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
             (repo / ".git").mkdir()
-            with mock.patch.dict(os.environ, {"SIDE_LANE_CODEX_EXECUTABLE": ""}), \
-                 mock.patch("side_lane.cli.shutil.which", return_value=None), \
+            with mock.patch("side_lane.cli.shutil.which", return_value=None), \
                  mock.patch.object(hosts, "BUNDLED_CODEX_CANDIDATES", ()), \
                  mock.patch("side_lane.cli.create_worktree") as create:
                 with self.assertRaisesRegex(cli.SideLaneError, "codex executable not found"):
@@ -264,8 +277,7 @@ class HostExecutableCliTests(unittest.TestCase):
             bundled = Path(directory) / "codex"
             bundled.write_text("#!/bin/sh\n", encoding="utf-8")
             bundled.chmod(0o755)
-            with mock.patch.dict(os.environ, {"SIDE_LANE_CODEX_EXECUTABLE": ""}), \
-                 mock.patch("side_lane.cli.shutil.which", return_value=None), \
+            with mock.patch("side_lane.cli.shutil.which", return_value=None), \
                  mock.patch.object(hosts, "BUNDLED_CODEX_CANDIDATES", (str(bundled),)), \
                  mock.patch("side_lane.cli.auth_status", return_value=ready) as status, \
                  mock.patch("side_lane.cli._discover_mcp_names", return_value=set()):
