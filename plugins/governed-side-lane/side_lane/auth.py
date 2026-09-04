@@ -53,11 +53,24 @@ def _run_status(command: Sequence[str], runner: Runner) -> Any:
         return None
 
 
+def _quote_for_platform(path: str, platform: str) -> str:
+    """Quote ``path`` so the hint is pasteable in that platform's default shell.
+
+    PowerShell needs the call operator to run a quoted path (``& 'C:\\x y\\codex.exe'``)
+    and doubles embedded single quotes; POSIX shells take ``shlex.quote`` output.
+    """
+
+    if platform == "nt":
+        return "& '" + path.replace("'", "''") + "'"
+    return shlex.quote(path)
+
+
 def refresh_command(
     host: str,
     executable: str | None = None,
     *,
-    which: Callable[[str], "str | None"] = shutil.which,
+    which: Callable[[str], "str | None"] | None = None,
+    platform: str | None = None,
 ) -> str:
     """The sign-in command a human can actually run for ``host``.
 
@@ -66,14 +79,18 @@ def refresh_command(
     conventional hint is kept. When they differ (an explicit override, or the
     CLI inside a desktop-app bundle that is not on ``PATH``), a bare
     ``codex login`` would fail in exactly the environment that needed the
-    resolution, so the resolved path is shell-quoted into the hint instead.
+    resolution, so the resolved path is quoted into the hint for the current
+    platform's shell instead. ``which``/``platform`` are looked up at call time
+    (not bound as defaults) so tests and callers can substitute them.
     """
 
+    lookup = shutil.which if which is None else which
+    system = os.name if platform is None else platform
     program = host
     if executable and executable != host:
-        on_path = which(host)
+        on_path = lookup(host)
         if not on_path or os.path.abspath(on_path) != os.path.abspath(executable):
-            program = shlex.quote(executable)
+            program = _quote_for_platform(executable, system)
     return f"{program} login" if host == "codex" else f"{program} auth login"
 
 
