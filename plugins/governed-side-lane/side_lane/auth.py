@@ -53,6 +53,20 @@ def _run_status(command: Sequence[str], runner: Runner) -> Any:
         return None
 
 
+def _same_executable(left: str, right: str) -> bool:
+    """True when two paths name the same file.
+
+    ``samefile`` sees through symlinks (``~/.local/bin/codex`` → the app bundle)
+    and is case-aware where the filesystem is; when either path does not exist
+    fall back to a normalized string comparison.
+    """
+
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+
+
 def _quote_for_platform(path: str, platform: str) -> str:
     """Quote ``path`` so the hint is pasteable in that platform's default shell.
 
@@ -89,7 +103,7 @@ def refresh_command(
     program = host
     if executable and executable != host:
         on_path = lookup(host)
-        if not on_path or os.path.abspath(on_path) != os.path.abspath(executable):
+        if not on_path or not _same_executable(on_path, executable):
             program = _quote_for_platform(executable, system)
     return f"{program} login" if host == "codex" else f"{program} auth login"
 
