@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "governed-side-lane",
   "displayName": "Governed Side Lane",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Run exact native Codex, Claude, or optional GLM review and implementation lanes in dedicated Git worktrees.",
   "author": {
     "name": "Marcos Athanasoulis",

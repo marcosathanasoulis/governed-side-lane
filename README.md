@@ -90,7 +90,12 @@ lanes run with the same local-user authority as their selected host.
 
 - Git
 - Python 3.10 or newer
-- Codex CLI and/or Claude Code, already signed in for native routes
+- Codex CLI and/or Claude Code, already signed in for native routes. The
+  runner looks for each host executable on `PATH`, then (Codex only) inside
+  the Codex / ChatGPT desktop app bundle on macOS; set
+  `SIDE_LANE_CODEX_EXECUTABLE` or `SIDE_LANE_CLAUDE_EXECUTABLE` to an
+  absolute path to pin a specific binary. `side-lane check-capabilities`
+  reports the resolved path as `runtime`.
 - A target Git repository with root `AGENTS.md` and `CLAUDE.md`
 
 The target `AGENTS.md` must require and authoritatively link the root

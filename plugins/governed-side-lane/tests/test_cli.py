@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -12,6 +13,13 @@ from side_lane.results import LaneResult
 
 
 class SideLaneTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Keep host-executable resolution hermetic: a real override in the
+        # developer's or CI environment must not steer these tests.
+        patcher = mock.patch.dict(os.environ, {"SIDE_LANE_CODEX_EXECUTABLE": "", "SIDE_LANE_CLAUDE_EXECUTABLE": ""})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def repo(self) -> Path:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -117,7 +125,7 @@ class SideLaneTests(unittest.TestCase):
         args = mock.Mock(host="codex", mode="review", provider="openai", model="gpt-5.6-terra",
             capability=[], lane_name="review", approve_billable_route=False)
         lane = mock.Mock(worktree=self.repo())
-        with mock.patch("side_lane.cli.create_worktree", return_value=lane), mock.patch("side_lane.cli.dispose_clean_worktree"), mock.patch("side_lane.cli.require_native_oauth", side_effect=cli.AuthError("signed out")), mock.patch("side_lane.cli.read_credential") as read:
+        with mock.patch("side_lane.cli._require_host_executable", return_value="/opt/hosts/codex"), mock.patch("side_lane.cli.create_worktree", return_value=lane), mock.patch("side_lane.cli.dispose_clean_worktree"), mock.patch("side_lane.cli.require_native_oauth", side_effect=cli.AuthError("signed out")), mock.patch("side_lane.cli.read_credential") as read:
             with self.assertRaises(cli.AuthError):
                 cli._launch(args, cli.load_config(), self.repo(), "Review")
             read.assert_not_called()
@@ -131,7 +139,8 @@ class SideLaneTests(unittest.TestCase):
         args = mock.Mock(host="claude", mode="review", provider="claude",
             model="claude-sonnet-5", capability=[], lane_name="review",
             approve_billable_route=False)
-        with mock.patch("side_lane.cli.create_worktree", return_value=lane) as create, \
+        with mock.patch("side_lane.cli._require_host_executable", return_value="/opt/hosts/claude"), \
+             mock.patch("side_lane.cli.create_worktree", return_value=lane) as create, \
              mock.patch("side_lane.cli.require_native_oauth"), \
              mock.patch("side_lane.adapters.claude.launch", return_value=result) as launch, \
              mock.patch("side_lane.cli.git_status", return_value="## review"), \
@@ -141,6 +150,7 @@ class SideLaneTests(unittest.TestCase):
             self.assertEqual(cli._launch(args, cli.load_config(), repo, "Review"), 0)
         create.assert_called_once_with(repo, "review")
         self.assertEqual(launch.call_args.kwargs["worktree"], worktree)
+        self.assertEqual(launch.call_args.kwargs["executable"], "/opt/hosts/claude")
         self.assertEqual(audit.call_args.kwargs["stdout"], "finding: bug in api.py")
         dispose.assert_called_once_with(lane)
         lines = output.getvalue().splitlines()
@@ -157,7 +167,8 @@ class SideLaneTests(unittest.TestCase):
         args = mock.Mock(host="claude", mode="review", provider="claude",
             model="claude-sonnet-5", capability=[], lane_name="review",
             approve_billable_route=False)
-        with mock.patch("side_lane.cli.create_worktree", return_value=lane), \
+        with mock.patch("side_lane.cli._require_host_executable", return_value="/opt/hosts/claude"), \
+             mock.patch("side_lane.cli.create_worktree", return_value=lane), \
              mock.patch("side_lane.cli.require_native_oauth"), \
              mock.patch("side_lane.adapters.claude.launch", return_value=result), \
              mock.patch("side_lane.cli.git_status", return_value="## review"), \
@@ -232,3 +243,45 @@ class SideLaneTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HostExecutableCliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Keep host-executable resolution hermetic: a real override in the
+        # developer's or CI environment must not steer these tests.
+        patcher = mock.patch.dict(os.environ, {"SIDE_LANE_CODEX_EXECUTABLE": "", "SIDE_LANE_CLAUDE_EXECUTABLE": ""})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_launch_fails_before_worktree_when_host_executable_is_missing(self) -> None:
+        from side_lane import hosts
+
+        args = mock.Mock(host="codex", mode="execute", provider="openai", model="gpt-5.6-terra",
+            capability=[], lane_name="worker", approve_billable_route=False)
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / ".git").mkdir()
+            with mock.patch("side_lane.cli.shutil.which", return_value=None), \
+                 mock.patch.object(hosts, "BUNDLED_CODEX_CANDIDATES", ()), \
+                 mock.patch("side_lane.cli.create_worktree") as create:
+                with self.assertRaisesRegex(cli.SideLaneError, "codex executable not found"):
+                    cli._launch(args, cli.load_config(), repo, "task")
+                create.assert_not_called()
+
+    def test_capability_report_and_auth_status_use_resolved_bundle_executable(self) -> None:
+        from side_lane import hosts
+
+        config = cli.load_config()
+        ready = mock.Mock(ready=True, as_dict=lambda: {"state": "ready", "method": "oauth"})
+        with tempfile.TemporaryDirectory() as directory:
+            bundled = Path(directory) / "codex"
+            bundled.write_text("#!/bin/sh\n", encoding="utf-8")
+            bundled.chmod(0o755)
+            with mock.patch("side_lane.cli.shutil.which", return_value=None), \
+                 mock.patch.object(hosts, "BUNDLED_CODEX_CANDIDATES", (str(bundled),)), \
+                 mock.patch("side_lane.cli.auth_status", return_value=ready) as status, \
+                 mock.patch("side_lane.cli._discover_mcp_names", return_value=set()):
+                report = cli._capability_report(config, "codex", "execute", "openai", "gpt-5.6-terra")
+        self.assertEqual(report["runtime"], str(bundled))
+        self.assertEqual(report["capability_evidence"]["shell"]["state"], "verified")
+        status.assert_called_with("codex", executable=str(bundled))

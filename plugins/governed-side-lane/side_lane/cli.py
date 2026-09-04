@@ -14,6 +14,7 @@ from side_lane.auth import AuthError, auth_status, require_native_oauth
 from side_lane.credentials import CredentialError, credential_present, read_credential
 from side_lane.connector_metadata import json_mcp_names, toml_mcp_names
 from side_lane.governance import GovernanceError, validate_repository
+from side_lane.hosts import HostExecutableError, require_host_executable, resolve_host_executable
 from side_lane.adapters.claude import ClaudeAdapterError
 from side_lane.adapters.codex import CodexAdapterError
 from side_lane.worktrees import (
@@ -191,7 +192,7 @@ def load_recommendation_profile(path_argument: str) -> dict[str, Any]:
 
 def _ready_routes(config: Mapping[str, Any]) -> frozenset[tuple[str, str, str, str]]:
     present: set[tuple[str, str, str, str]] = set()
-    statuses = {host: auth_status(host) for host in ("codex", "claude")}
+    statuses = {host: auth_status(host, executable=_host_executable(host)) for host in ("codex", "claude")}
     for provider, item in config["providers"].items():
         if item.get("auth_method") == "oauth":
             ready_hosts = {host for host, status in statuses.items() if status.ready}
@@ -286,8 +287,24 @@ def read_keychain_secret(service: str) -> str:
     return read_credential(service)
 
 
+def _host_executable(host: str) -> str | None:
+    """Resolve the native host executable; a broken explicit override is a CLI error."""
+
+    try:
+        return resolve_host_executable(host, which=shutil.which)
+    except HostExecutableError as exc:
+        raise SideLaneError(str(exc)) from exc
+
+
+def _require_host_executable(host: str) -> str:
+    try:
+        return require_host_executable(host, which=shutil.which)
+    except HostExecutableError as exc:
+        raise SideLaneError(str(exc)) from exc
+
+
 def _capability_report(config: Mapping[str, Any], host: str, mode: str, provider: str | None, model: str | None, repo: Path | None = None) -> dict[str, Any]:
-    runtime = shutil.which(host)
+    runtime = _host_executable(host)
     mcp_names = _discover_mcp_names(host, repo)
     lowered = {name.lower() for name in mcp_names}
     evidence = {
@@ -308,7 +325,7 @@ def _capability_report(config: Mapping[str, Any], host: str, mode: str, provider
         provider_config, route = select_route(config, host, mode, provider, model)
         report.update({"route": "configured", **{key: route[key] for key in ("gateway", "auth_method", "billable")}})
         if route["auth_method"] == "oauth":
-            report["auth"] = auth_status(host).as_dict()
+            report["auth"] = auth_status(host, executable=runtime).as_dict()
         else:
             report["configured_override"] = "present" if credential_present(provider_config["credential_service"]) else "absent"
             report["requires_one_run_approval"] = True
@@ -358,20 +375,21 @@ def _launch(args: argparse.Namespace, config: Mapping[str, Any], repo: Path, pro
         raise SideLaneError("--approve-billable-route is invalid for native OAuth routes")
     if provider_config["auth_method"] == "provider-key" and not args.approve_billable_route:
         raise SideLaneError("billable route requires explicit --approve-billable-route for this run")
+    executable = _require_host_executable(args.host)
     lane = create_worktree(repo, args.lane_name)
     secret: str | None = None
     try:
         if provider_config["auth_method"] == "oauth":
-            require_native_oauth(args.host)
+            require_native_oauth(args.host, executable=executable)
         else:
             secret = read_credential(provider_config["credential_service"])
         if args.host == "codex":
             from side_lane.adapters.codex import run_codex
-            result = run_codex(executable="codex", repo=repo, worktree=lane.worktree, provider=args.provider,
+            result = run_codex(executable=executable, repo=repo, worktree=lane.worktree, provider=args.provider,
                 model=args.model, provider_config=provider_config, model_config=model_config, prompt=prompt, mode=args.mode)
         else:
             from side_lane.adapters.claude import launch
-            result = launch(executable="claude", repo=repo, worktree=lane.worktree, provider=args.provider,
+            result = launch(executable=executable, repo=repo, worktree=lane.worktree, provider=args.provider,
                 model=args.model, provider_config=provider_config, model_config=model_config, prompt=prompt,
                 mode=args.mode, secret=secret)
     except Exception:
@@ -411,7 +429,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(states, sort_keys=True) if args.json else "\n".join(f"{key}\t{value}" for key, value in states.items()))
         return 0
     if args.command == "auth-status":
-        status = auth_status(args.host)
+        status = auth_status(args.host, executable=_host_executable(args.host))
         payload = status.as_dict()
         print(json.dumps(payload, sort_keys=True) if args.json else "\n".join(f"{key}\t{value}" for key, value in payload.items()))
         return 0 if status.ready else 1
