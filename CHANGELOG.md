@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.5 - 2026-09-03
+
+- Sign-in hints for an off-`PATH` executable are quoted for the platform's
+  default shell: PowerShell gets the call-operator form (`& 'C:\\...\\codex.exe'
+  login`), POSIX shells keep `shlex` quoting. `refresh_command` looks up
+  `which`/platform at call time so they can be substituted in tests.
+
 ## 0.2.4 - 2026-09-03
 
 - The sign-in hint (`refresh_command` in `auth-status`, and the OAuth preflight

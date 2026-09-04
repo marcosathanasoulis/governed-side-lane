@@ -1,4 +1,6 @@
 import subprocess
+import tempfile
+from pathlib import Path
 import unittest
 from unittest import mock
 
@@ -45,22 +47,53 @@ class RefreshCommandTests(unittest.TestCase):
         self.assertEqual(refresh_command("codex", "/usr/local/bin/codex", which=lambda _: "/usr/local/bin/codex"), "codex login")
         self.assertEqual(refresh_command("claude", "/opt/x/../x/claude", which=lambda _: "/opt/x/claude"), "claude auth login")
 
-    def test_off_path_executable_is_quoted_into_the_hint(self) -> None:
+    def test_symlinked_path_entry_to_the_resolved_binary_keeps_the_bare_hint(self) -> None:
         from side_lane.auth import refresh_command
 
-        self.assertEqual(refresh_command("codex", self.bundle, which=lambda _: None), f"{self.bundle} login")
-        self.assertEqual(refresh_command("codex", self.bundle, which=lambda _: "/usr/local/bin/codex"), f"{self.bundle} login")
-        self.assertEqual(refresh_command("claude", "/Users/me/My Tools/claude", which=lambda _: None), "'/Users/me/My Tools/claude' auth login")
+        with tempfile.TemporaryDirectory() as directory:
+            real = Path(directory) / "bundle" / "codex"
+            real.parent.mkdir()
+            real.write_text("#!/bin/sh\n", encoding="utf-8")
+            link = Path(directory) / "bin" / "codex"
+            link.parent.mkdir()
+            link.symlink_to(real)
+            # PATH yields the symlink, the resolver reports the target (or vice versa).
+            self.assertEqual(refresh_command("codex", str(real), which=lambda _: str(link), platform="posix"), "codex login")
+            self.assertEqual(refresh_command("codex", str(link), which=lambda _: str(real), platform="posix"), "codex login")
+            other = Path(directory) / "other-codex"
+            other.write_text("#!/bin/sh\n", encoding="utf-8")
+            self.assertEqual(refresh_command("codex", str(real), which=lambda _: str(other), platform="posix"), f"{real} login")
+
+    def test_off_path_executable_is_quoted_for_posix_shells(self) -> None:
+        from side_lane.auth import refresh_command
+
+        self.assertEqual(refresh_command("codex", self.bundle, which=lambda _: None, platform="posix"), f"{self.bundle} login")
+        self.assertEqual(refresh_command("codex", self.bundle, which=lambda _: "/usr/local/bin/codex", platform="posix"), f"{self.bundle} login")
+        self.assertEqual(refresh_command("claude", "/Users/me/My Tools/claude", which=lambda _: None, platform="posix"), "'/Users/me/My Tools/claude' auth login")
+
+    def test_off_path_executable_uses_the_powershell_call_operator_on_windows(self) -> None:
+        from side_lane.auth import refresh_command
+
+        exe = "C:\\Tools\\codex.exe"
+        self.assertEqual(refresh_command("codex", exe, which=lambda _: None, platform="nt"), f"& '{exe}' login")
+        spaced = "C:\\Program Files\\Codex\\codex.exe"
+        self.assertEqual(refresh_command("codex", spaced, which=lambda _: None, platform="nt"), f"& '{spaced}' login")
+        quoted = "C:\\Users\\O'Brien\\claude.exe"
+        self.assertEqual(refresh_command("claude", quoted, which=lambda _: None, platform="nt"), "& 'C:\\Users\\O''Brien\\claude.exe' auth login")
+        self.assertEqual(refresh_command("codex", exe, which=lambda _: exe, platform="nt"), "codex login")
 
     def test_status_and_failure_carry_the_runnable_hint(self) -> None:
         signed_out = mock.Mock(return_value=subprocess.CompletedProcess([], 1, "", "signed out"))
-        with mock.patch("side_lane.auth.shutil.which", return_value=None):
+        # which/platform are looked up at call time, so patching the module works.
+        with mock.patch("side_lane.auth.shutil.which", return_value=None), mock.patch("side_lane.auth.os.name", "posix"):
             status = auth_status("codex", executable=self.bundle, runner=signed_out)
             self.assertEqual(status.refresh_command, f"{self.bundle} login")
             with self.assertRaisesRegex(AuthError, "ChatGPT.app/Contents/Resources/codex login"):
                 require_native_oauth("codex", executable=self.bundle, runner=signed_out)
             missing = mock.Mock(side_effect=OSError("no such file"))
             self.assertEqual(auth_status("claude", executable="/opt/claude", runner=missing).refresh_command, "/opt/claude auth login")
+        with mock.patch("side_lane.auth.shutil.which", return_value=self.bundle):
+            self.assertEqual(auth_status("codex", executable=self.bundle, runner=signed_out).refresh_command, "codex login")
 
 
 if __name__ == "__main__":
