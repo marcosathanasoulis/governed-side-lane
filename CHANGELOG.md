@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.3 - 2026-09-03
+
+- Resolve the native host executable explicitly instead of assuming a bare
+  `codex` / `claude` on `PATH`. Lookup order is an explicit
+  `SIDE_LANE_CODEX_EXECUTABLE` / `SIDE_LANE_CLAUDE_EXECUTABLE` override (which
+  fails closed if set but unusable), then `PATH`, then — for Codex only — the
+  CLI shipped inside the Codex / ChatGPT desktop app bundle on macOS. The
+  resolved path is reported as `runtime` in `check-capabilities`, used for
+  `auth-status` and the OAuth preflight, and appears as `argv[0]` in the run
+  summary. A missing executable now fails before a lane worktree is created,
+  with an actionable message. Fixes "codex not found" from non-interactive
+  agent shells on machines where only the desktop app is installed.
+
 ## 0.2.2 - 2026-09-01
 
 - Persist review findings durably: the per-run audit record

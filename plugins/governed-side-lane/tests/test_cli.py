@@ -232,3 +232,38 @@ class SideLaneTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HostExecutableCliTests(unittest.TestCase):
+    def test_launch_fails_before_worktree_when_host_executable_is_missing(self) -> None:
+        from side_lane import hosts
+
+        args = mock.Mock(host="codex", mode="execute", provider="openai", model="gpt-5.6-terra",
+            capability=[], lane_name="worker", approve_billable_route=False)
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / ".git").mkdir()
+            with mock.patch("side_lane.cli.shutil.which", return_value=None), \
+                 mock.patch.object(hosts, "BUNDLED_CODEX_CANDIDATES", ()), \
+                 mock.patch("side_lane.cli.create_worktree") as create:
+                with self.assertRaisesRegex(cli.SideLaneError, "codex executable not found"):
+                    cli._launch(args, cli.load_config(), repo, "task")
+                create.assert_not_called()
+
+    def test_capability_report_and_auth_status_use_resolved_bundle_executable(self) -> None:
+        from side_lane import hosts
+
+        config = cli.load_config()
+        ready = mock.Mock(ready=True, as_dict=lambda: {"state": "ready", "method": "oauth"})
+        with tempfile.TemporaryDirectory() as directory:
+            bundled = Path(directory) / "codex"
+            bundled.write_text("#!/bin/sh\n", encoding="utf-8")
+            bundled.chmod(0o755)
+            with mock.patch("side_lane.cli.shutil.which", return_value=None), \
+                 mock.patch.object(hosts, "BUNDLED_CODEX_CANDIDATES", (str(bundled),)), \
+                 mock.patch("side_lane.cli.auth_status", return_value=ready) as status, \
+                 mock.patch("side_lane.cli._discover_mcp_names", return_value=set()):
+                report = cli._capability_report(config, "codex", "execute", "openai", "gpt-5.6-terra")
+        self.assertEqual(report["runtime"], str(bundled))
+        self.assertEqual(report["capability_evidence"]["shell"]["state"], "verified")
+        status.assert_called_with("codex", executable=str(bundled))
