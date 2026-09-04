@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.4 - 2026-09-03
+
+- The sign-in hint (`refresh_command` in `auth-status`, and the OAuth preflight
+  error) is now built from the resolved host executable. When the CLI was found
+  only through an override or a desktop-app bundle, a bare `codex login` could
+  not run in the very environment that needed the resolution; the hint now
+  quotes the resolved path instead. Bare `codex login` / `claude auth login`
+  are kept whenever the resolved path is the one `PATH` yields.
+
 ## 0.2.3 - 2026-09-03
 
 - Resolve the native host executable explicitly instead of assuming a bare
