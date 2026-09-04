@@ -7,7 +7,7 @@
   only through an override or a desktop-app bundle, a bare `codex login` could
   not run in the very environment that needed the resolution; the hint now
   quotes the resolved path instead. Bare `codex login` / `claude auth login`
-  are unchanged when the executable came from `PATH`.
+  are kept whenever the resolved path is the one `PATH` yields.
 
 ## 0.2.3 - 2026-09-03
 

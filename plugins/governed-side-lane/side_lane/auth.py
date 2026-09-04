@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 import shlex
+import shutil
 import subprocess
 from typing import Any, Callable, Sequence
 
@@ -51,16 +53,27 @@ def _run_status(command: Sequence[str], runner: Runner) -> Any:
         return None
 
 
-def refresh_command(host: str, executable: str | None = None) -> str:
+def refresh_command(
+    host: str,
+    executable: str | None = None,
+    *,
+    which: Callable[[str], "str | None"] = shutil.which,
+) -> str:
     """The sign-in command a human can actually run for ``host``.
 
-    When the executable was resolved to a path (an explicit override, or the CLI
-    inside a desktop-app bundle that is not on ``PATH``), a bare ``codex login``
-    would fail in exactly the environment that needed the resolution, so the
-    resolved path is quoted into the hint instead.
+    The resolver always hands back an absolute path, so "came from PATH" is
+    detected by comparing it with ``which(host)``: when they agree the bare,
+    conventional hint is kept. When they differ (an explicit override, or the
+    CLI inside a desktop-app bundle that is not on ``PATH``), a bare
+    ``codex login`` would fail in exactly the environment that needed the
+    resolution, so the resolved path is shell-quoted into the hint instead.
     """
 
-    program = shlex.quote(executable) if executable and executable != host else host
+    program = host
+    if executable and executable != host:
+        on_path = which(host)
+        if not on_path or os.path.abspath(on_path) != os.path.abspath(executable):
+            program = shlex.quote(executable)
     return f"{program} login" if host == "codex" else f"{program} auth login"
 
 
