@@ -117,7 +117,7 @@ class SideLaneTests(unittest.TestCase):
         args = mock.Mock(host="codex", mode="review", provider="openai", model="gpt-5.6-terra",
             capability=[], lane_name="review", approve_billable_route=False)
         lane = mock.Mock(worktree=self.repo())
-        with mock.patch("side_lane.cli.create_worktree", return_value=lane), mock.patch("side_lane.cli.dispose_clean_worktree"), mock.patch("side_lane.cli.require_native_oauth", side_effect=cli.AuthError("signed out")), mock.patch("side_lane.cli.read_credential") as read:
+        with mock.patch("side_lane.cli._require_host_executable", return_value="/opt/hosts/codex"), mock.patch("side_lane.cli.create_worktree", return_value=lane), mock.patch("side_lane.cli.dispose_clean_worktree"), mock.patch("side_lane.cli.require_native_oauth", side_effect=cli.AuthError("signed out")), mock.patch("side_lane.cli.read_credential") as read:
             with self.assertRaises(cli.AuthError):
                 cli._launch(args, cli.load_config(), self.repo(), "Review")
             read.assert_not_called()
@@ -131,7 +131,8 @@ class SideLaneTests(unittest.TestCase):
         args = mock.Mock(host="claude", mode="review", provider="claude",
             model="claude-sonnet-5", capability=[], lane_name="review",
             approve_billable_route=False)
-        with mock.patch("side_lane.cli.create_worktree", return_value=lane) as create, \
+        with mock.patch("side_lane.cli._require_host_executable", return_value="/opt/hosts/claude"), \
+             mock.patch("side_lane.cli.create_worktree", return_value=lane) as create, \
              mock.patch("side_lane.cli.require_native_oauth"), \
              mock.patch("side_lane.adapters.claude.launch", return_value=result) as launch, \
              mock.patch("side_lane.cli.git_status", return_value="## review"), \
@@ -141,6 +142,7 @@ class SideLaneTests(unittest.TestCase):
             self.assertEqual(cli._launch(args, cli.load_config(), repo, "Review"), 0)
         create.assert_called_once_with(repo, "review")
         self.assertEqual(launch.call_args.kwargs["worktree"], worktree)
+        self.assertEqual(launch.call_args.kwargs["executable"], "/opt/hosts/claude")
         self.assertEqual(audit.call_args.kwargs["stdout"], "finding: bug in api.py")
         dispose.assert_called_once_with(lane)
         lines = output.getvalue().splitlines()
@@ -157,7 +159,8 @@ class SideLaneTests(unittest.TestCase):
         args = mock.Mock(host="claude", mode="review", provider="claude",
             model="claude-sonnet-5", capability=[], lane_name="review",
             approve_billable_route=False)
-        with mock.patch("side_lane.cli.create_worktree", return_value=lane), \
+        with mock.patch("side_lane.cli._require_host_executable", return_value="/opt/hosts/claude"), \
+             mock.patch("side_lane.cli.create_worktree", return_value=lane), \
              mock.patch("side_lane.cli.require_native_oauth"), \
              mock.patch("side_lane.adapters.claude.launch", return_value=result), \
              mock.patch("side_lane.cli.git_status", return_value="## review"), \
