@@ -21,6 +21,17 @@ class HostExecutableTests(unittest.TestCase):
         found = resolve_host_executable("codex", env={}, which=lambda name: f"/usr/local/bin/{name}")
         self.assertEqual(found, "/usr/local/bin/codex")
 
+    def test_results_are_always_absolute(self) -> None:
+        found = resolve_host_executable("codex", env={}, which=lambda _: "bin/codex")
+        self.assertTrue(os.path.isabs(found))
+        self.assertEqual(found, os.path.abspath("bin/codex"))
+        with tempfile.TemporaryDirectory() as directory:
+            binary = _make_executable(Path(directory))
+            relative = os.path.relpath(binary)
+            found = resolve_host_executable("codex", env={"SIDE_LANE_CODEX_EXECUTABLE": relative}, which=lambda _: None)
+        self.assertTrue(os.path.isabs(found))
+        self.assertEqual(found, os.path.abspath(relative))
+
     def test_explicit_override_is_used_and_must_be_executable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             binary = _make_executable(Path(directory))

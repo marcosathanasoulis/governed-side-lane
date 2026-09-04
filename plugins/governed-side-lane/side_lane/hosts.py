@@ -49,6 +49,12 @@ class HostExecutableError(RuntimeError):
     """A native host executable could not be located or an override is invalid."""
 
 
+def _absolute(path: Path) -> Path:
+    """Anchor a path to the current directory without resolving symlinks."""
+
+    return Path(os.path.abspath(path))
+
+
 def _is_executable_file(path: Path) -> bool:
     return path.is_file() and os.access(path, os.X_OK)
 
@@ -61,6 +67,11 @@ def resolve_host_executable(
 ) -> str | None:
     """Return the absolute executable for ``host`` or ``None`` when absent.
 
+    The result is always absolute (relative overrides and relative ``PATH``
+    entries are anchored to the current directory once, here) so later steps
+    never depend on the working directory. Symlinks are preserved so the
+    reported path is the one the operator installed.
+
     Raises ``HostExecutableError`` when an explicit override is set but unusable,
     so a misconfigured override never degrades into a different binary.
     """
@@ -70,7 +81,7 @@ def resolve_host_executable(
     environment = os.environ if env is None else env
     override = environment.get(EXECUTABLE_ENV[host], "")
     if override:
-        candidate = Path(override).expanduser()
+        candidate = _absolute(Path(override).expanduser())
         if not _is_executable_file(candidate):
             raise HostExecutableError(
                 f"{EXECUTABLE_ENV[host]} is set but is not an executable file: {candidate}"
@@ -78,10 +89,10 @@ def resolve_host_executable(
         return str(candidate)
     found = which(host)
     if found:
-        return found
+        return str(_absolute(Path(found)))
     if host == "codex":
         for raw in BUNDLED_CODEX_CANDIDATES:
-            candidate = Path(raw).expanduser()
+            candidate = _absolute(Path(raw).expanduser())
             if _is_executable_file(candidate):
                 return str(candidate)
     return None
