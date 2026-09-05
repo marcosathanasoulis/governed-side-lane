@@ -151,7 +151,8 @@ class WorktreeRootTests(WorktreeTests):
         self.assertEqual(lane.worktree.parent.resolve(), root.resolve())
         self.assertTrue((lane.worktree / ".git").exists())
         self.assertFalse((repo / ".side-lanes").exists())
-        self.assertFalse((repo / ".git" / "info" / "exclude").exists())
+        exclude = repo / ".git" / "info" / "exclude"
+        self.assertNotIn(".side-lanes/", exclude.read_text(encoding="utf-8") if exclude.exists() else "")
         self.assertEqual(subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
                                         check=True, capture_output=True, text=True).stdout, "")
 

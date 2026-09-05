@@ -20,3 +20,9 @@ gets an allowlist and always hides MCP servers. See the public repository
 README for install, usage, security, and contribution details.
 
 Licensed under Apache-2.0.
+
+Worktree placement: lane worktrees default to `<repo>/.side-lanes/worktrees`,
+kept out of `git status` by an entry in `.git/info/exclude`. Repositories that
+forbid nested checkouts pass `--worktree-root ../lanes` (relative to the
+repository root) or set `SIDE_LANE_WORKTREE_ROOT`; other in-repository
+locations are refused.
