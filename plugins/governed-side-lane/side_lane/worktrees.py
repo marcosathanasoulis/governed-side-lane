@@ -100,11 +100,17 @@ def resolve_worktree_root(repo: Path, override: str | None = None, *,
     candidate = Path(os.path.normpath(candidate))
     if candidate == default:
         return default
-    # Compare real paths so a symlink (or symlinked segment) that points back
-    # into the repository cannot create an un-excluded nested checkout.
+    # Reject both a lexically nested root (even if it is a symlink out of the
+    # repository, it is still an in-repo entry indexers walk) and a root whose
+    # real path resolves back into the repository through a symlink.
     real_candidate = Path(os.path.realpath(candidate))
     real_repo = Path(os.path.realpath(repo))
-    if real_candidate == real_repo or real_candidate.is_relative_to(real_repo):
+    if (
+        candidate == repo
+        or candidate.is_relative_to(repo)
+        or real_candidate == real_repo
+        or real_candidate.is_relative_to(real_repo)
+    ):
         raise WorktreeError(
             f"worktree root must be outside the repository (or the default {default}): {candidate}"
         )

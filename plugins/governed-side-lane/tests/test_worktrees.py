@@ -203,6 +203,11 @@ class WorktreeRootTests(WorktreeTests):
         (repo.parent / "real-outside").mkdir()
         outside.symlink_to(repo.parent / "real-outside")
         self.assertEqual(worktrees.resolve_worktree_root(repo, str(outside)), outside)
+        # Lexically in-repo entry that points outside is still refused.
+        inner_link = repo / "lanes-out"
+        inner_link.symlink_to(repo.parent / "real-outside")
+        with self.assertRaisesRegex(worktrees.WorktreeError, "outside the repository"):
+            worktrees.resolve_worktree_root(repo, "lanes-out")
 
 
 if __name__ == "__main__":
