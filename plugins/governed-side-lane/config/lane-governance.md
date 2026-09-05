@@ -43,3 +43,80 @@ loading.
   selected worker host's connector and report exactly what changed.
 - Stop and report when an action exceeds these boundaries or its authority is
   uncertain.
+
+## Execute tool allowlist
+
+The Claude host adapter renders this section, and only this section, into
+`--allowedTools` / `--disallowedTools` for execute lanes. Review lanes never
+receive an allowlist. Each subsection names the capabilities that unlock its
+rules; `always` applies to every execute lane. Rules are ordinary developer
+commands; nothing here may match deploy, IAM, credential, cloud, merge, or
+release tooling, which stay forbidden by the Common rules above.
+
+### always
+
+- `Read`
+- `Edit`
+- `Write`
+- `Glob`
+- `Grep`
+
+### shell, workspace-write, git-push
+
+- `Bash(pnpm *)`
+- `Bash(npx *)`
+- `Bash(npm *)`
+- `Bash(node *)`
+- `Bash(./node_modules/.bin/*)`
+- `Bash(yarn *)`
+- `Bash(uv *)`
+- `Bash(uvx *)`
+- `Bash(python3 *)`
+- `Bash(python3.11 *)`
+- `Bash(python3.12 *)`
+- `Bash(pytest *)`
+- `Bash(bash -n *)`
+- `Bash(git status *)`
+- `Bash(git diff *)`
+- `Bash(git log *)`
+- `Bash(git show *)`
+- `Bash(git add *)`
+- `Bash(git commit *)`
+- `Bash(git checkout *)`
+- `Bash(git switch *)`
+- `Bash(git restore *)`
+- `Bash(git stash *)`
+- `Bash(git worktree list *)`
+- `Bash(gh pr view *)`
+- `Bash(gh pr list *)`
+- `Bash(gh pr diff *)`
+- `Bash(gh pr checks *)`
+- `Bash(gh run view *)`
+- `Bash(gh run list *)`
+- `Bash(ln *)`
+- `Bash(cp *)`
+- `Bash(mv *)`
+- `Bash(mkdir *)`
+- `Bash(rm *)`
+- `Bash(ls *)`
+- `Bash(cat *)`
+- `Bash(head *)`
+- `Bash(tail *)`
+- `Bash(grep *)`
+- `Bash(find *)`
+- `Bash(sed *)`
+- `Bash(wc *)`
+- `Bash(echo *)`
+- `Bash(pwd)`
+- `Bash(which *)`
+- `Bash(env)`
+
+### git-push
+
+- `Bash(git push *)`
+
+### git-push (denied)
+
+- `Bash(git push --force*)`
+- `Bash(git push -f*)`
+- `Bash(git push * --force*)`

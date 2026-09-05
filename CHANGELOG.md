@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.1 - 2026-09-04
+
+- The execute-lane tool allowlist is now a section of the canonical
+  `config/lane-governance.md` ("Execute tool allowlist"); the Claude adapter
+  parses and renders that section instead of carrying its own rule lists, and
+  the skill points at the section rather than restating it. Malformed sections
+  fail closed.
+- AGENTS.md linkage ignores negated declarations ("is not the source of
+  truth", "never ... authoritative"), which previously satisfied the check.
+- `side-lane run --worktree-root <dir>` (or `SIDE_LANE_WORKTREE_ROOT`) places
+  lane worktrees outside the governed repository, for repositories whose policy
+  forbids nested checkouts (sibling-directory conventions). A relative value is
+  anchored to the repository root (`../lanes`). The default stays
+  `<repo>/.side-lanes/worktrees` with the `.git/info/exclude` entry; any other
+  location inside the repository is refused so a typo cannot create an
+  un-excluded nested checkout. The exclude entry is only written for the
+  default location.
+
 ## 0.3.0 - 2026-09-04
 
 - Execute-mode Claude-host lanes (native Claude and GLM) now receive explicit

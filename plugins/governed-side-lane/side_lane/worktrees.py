@@ -73,13 +73,63 @@ def ensure_lane_exclusion(repo: Path, *, runner: Runner = subprocess.run) -> Pat
     return exclude
 
 
+WORKTREE_ROOT_ENV = "SIDE_LANE_WORKTREE_ROOT"
+
+
+def resolve_worktree_root(repo: Path, override: str | None = None, *,
+                          env: "dict[str, str] | None" = None) -> Path:
+    """Directory that receives lane worktrees.
+
+    Default is ``<repo>/.side-lanes/worktrees`` (kept out of ``git status`` via
+    ``.git/info/exclude``). Repositories whose policy forbids nested checkouts
+    pass ``--worktree-root`` or set ``SIDE_LANE_WORKTREE_ROOT``; a relative
+    value is anchored to the repository root (``../lanes`` is a sibling dir).
+    The override may not point inside the repository except at the default
+    location, so a typo cannot quietly create an un-excluded nested checkout.
+    """
+
+    import os
+
+    raw = override if override else (os.environ if env is None else env).get(WORKTREE_ROOT_ENV, "")
+    default = repo / LANE_ROOT / "worktrees"
+    if not raw or not raw.strip():
+        return default
+    candidate = Path(raw.strip()).expanduser()
+    if not candidate.is_absolute():
+        candidate = repo / candidate
+    candidate = Path(os.path.normpath(candidate))
+    if candidate == default:
+        return default
+    # Reject both a lexically nested root (even if it is a symlink out of the
+    # repository, it is still an in-repo entry indexers walk) and a root whose
+    # real path resolves back into the repository through a symlink.
+    real_candidate = Path(os.path.realpath(candidate))
+    real_repo = Path(os.path.realpath(repo))
+    if real_candidate == Path(os.path.realpath(default)):
+        return default
+    if (
+        candidate == repo
+        or candidate.is_relative_to(repo)
+        or real_candidate == real_repo
+        or real_candidate.is_relative_to(real_repo)
+    ):
+        raise WorktreeError(
+            f"worktree root must be outside the repository (or the default {default}): {candidate}"
+        )
+    return candidate
+
+
 def create_worktree(repo: Path, lane_name: str, *, runner: Runner = subprocess.run,
-                    now: datetime | None = None) -> WorktreeRun:
+                    now: datetime | None = None, worktree_root: str | Path | None = None,
+                    ) -> WorktreeRun:
     repo = repo.resolve()
     top = Path(_git(repo, ["rev-parse", "--show-toplevel"], runner)).resolve()
     if top != repo:
         raise WorktreeError("execute mode requires the repository root")
-    ensure_lane_exclusion(repo, runner=runner)
+    root = resolve_worktree_root(repo, None if worktree_root is None else str(worktree_root))
+    nested = root == repo / LANE_ROOT / "worktrees"
+    if nested:
+        ensure_lane_exclusion(repo, runner=runner)
     if _git(repo, ["status", "--porcelain"], runner):
         raise WorktreeError("coordinator checkout is dirty; commit or stash before lane creation")
     if not _git(repo, ["branch", "--show-current"], runner):
@@ -88,10 +138,14 @@ def create_worktree(repo: Path, lane_name: str, *, runner: Runner = subprocess.r
     starting_commit = _git(repo, ["rev-parse", "HEAD"], runner)
     stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%d%H%M%S")
     branch = f"side-lane/{safe}-{stamp}"
-    worktree = repo / LANE_ROOT / "worktrees" / f"{safe}-{stamp}"
+    worktree = root / f"{safe}-{stamp}"
     _git(repo, ["check-ref-format", "--branch", branch], runner)
     if worktree.exists():
         raise WorktreeError(f"worktree destination already exists: {worktree}")
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise WorktreeError(f"cannot create worktree root {root}: {exc}") from exc
     _git(repo, ["worktree", "add", "-b", branch, str(worktree), "HEAD"], runner)
     return WorktreeRun(repo, worktree, branch, safe, starting_commit)
 

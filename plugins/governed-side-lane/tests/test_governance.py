@@ -54,7 +54,11 @@ class GovernanceParityTests(unittest.TestCase):
             text = (ROOT / relative).read_text(encoding="utf-8")
             self.assertNotIn("REVIEW_PROMPT", text)
             self.assertNotIn("EXECUTE_PROMPT", text)
+            self.assertNotIn("Bash(", text, f"{relative} copies allowlist rules instead of loading governance")
         self.assertTrue((ROOT / "config/lane-governance.md").is_file())
+        skill = (ROOT / "skills/side-lane/SKILL.md").read_text(encoding="utf-8")
+        self.assertNotIn("Bash(", skill)
+        self.assertIn("Execute tool allowlist", skill)
 
     def test_direct_session_entrypoint_marks_private_memory_non_authoritative(self) -> None:
         text = (ROOT / "config/agent-context.md").read_text(encoding="utf-8")
@@ -151,6 +155,75 @@ class LinkageWordingTests(unittest.TestCase):
         repo = self.governed("[CLAUDE.md](./CLAUDE.md) is authoritative.\n")
         with self.assertRaisesRegex(GovernanceError, "unambiguously"):
             validate_repository(repo)
+
+
+class ToolPolicyTests(unittest.TestCase):
+    def test_canonical_allowlist_parses_and_drives_the_adapter(self) -> None:
+        from side_lane.governance import known_capabilities, tool_policy
+        policy = tool_policy()
+        self.assertEqual(policy.always[:5], ("Read", "Edit", "Write", "Glob", "Grep"))
+        self.assertIn("Bash(pnpm *)", policy.allowed["shell"])
+        self.assertEqual(policy.allowed["shell"], policy.allowed["workspace-write"])
+        self.assertIn("Bash(git push *)", policy.allowed["git-push"])
+        self.assertEqual(policy.denied["git-push"], ("Bash(git push --force*)", "Bash(git push -f*)", "Bash(git push * --force*)"))
+        self.assertTrue(policy.capabilities <= known_capabilities())
+        for rules in list(policy.allowed.values()) + [policy.always]:
+            for rule in rules:
+                self.assertNotRegex(rule, r"gcloud|deploy|merge|iam|secret|force")
+        self.assertEqual(claude.allowed_tools("execute", ("shell",)), policy.always + policy.allowed["shell"])
+
+    def test_malformed_allowlist_fails_closed(self) -> None:
+        from side_lane.governance import tool_policy
+        base = (ROOT / "config/lane-governance.md").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "gov.md"
+            path.write_text(base.replace("### always\n", "### sometimes\n"), encoding="utf-8")
+            with self.assertRaisesRegex(GovernanceError, "always"):
+                tool_policy(path)
+            path.write_text(base + "\n### Shell Bad\n\n- `Bash(x)`\n", encoding="utf-8")
+            with self.assertRaisesRegex(GovernanceError, "invalid capability name"):
+                tool_policy(path)
+            path.write_text(base + "\n### always\n\n- `Bash(*)`\n", encoding="utf-8")
+            with self.assertRaisesRegex(GovernanceError, "more than once"):
+                tool_policy(path)
+            path.write_text(base.split("## Execute tool allowlist")[0], encoding="utf-8")
+            with self.assertRaisesRegex(GovernanceError, "missing sections"):
+                tool_policy(path)
+
+
+class NegatedLinkageTests(LinkageWordingTests):
+    def test_negated_declarations_are_not_linkage(self) -> None:
+        for text in ("[CLAUDE.md](./CLAUDE.md) is not the source of truth.\n",
+                     "[CLAUDE.md](./CLAUDE.md) is no longer the source of truth.\n",
+                     "You must never treat [CLAUDE.md](./CLAUDE.md) as authoritative.\n"):
+            repo = self.governed(text)
+            with self.assertRaisesRegex(GovernanceError, "unambiguously"):
+                validate_repository(repo)
+
+    def test_affirmative_claim_with_trailing_negation_is_linkage(self) -> None:
+        repo = self.governed("[CLAUDE.md](./CLAUDE.md) is the source of truth, not this file.\n")
+        self.assertEqual(validate_repository(repo), repo.resolve())
+        for text in ("You must read [CLAUDE.md](./CLAUDE.md); it is authoritative and is not optional.\n",
+                     "You must read [CLAUDE.md](./CLAUDE.md); it is not optional and is authoritative.\n",
+                     "You must read [CLAUDE.md](./CLAUDE.md); it is not only authoritative but required.\n",
+                     "[CLAUDE.md](./CLAUDE.md) is the source of truth; do not skip it.\n"):
+            repo = self.governed(text)
+            self.assertEqual(validate_repository(repo), repo.resolve(), text)
+
+    def test_known_capabilities_rejects_non_object_allowlist(self) -> None:
+        from side_lane.governance import known_capabilities
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "models.json"
+            for bad in ("[]", '{"capabilities": "shell"}', '{"capabilities": ["", "x"]}', "not json"):
+                path.write_text(bad, encoding="utf-8")
+                with self.assertRaises(GovernanceError):
+                    known_capabilities(path)
+
+    def test_adapter_type_hints_resolve(self) -> None:
+        import typing
+        hints = typing.get_type_hints(claude.launch)
+        self.assertIn("runner", hints)
+        self.assertIn("capabilities", hints)
 
 
 if __name__ == "__main__":

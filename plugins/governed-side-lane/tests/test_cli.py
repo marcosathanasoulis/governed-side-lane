@@ -100,7 +100,7 @@ class SideLaneTests(unittest.TestCase):
 
     def test_billable_confirmation_is_checked_before_credential_lookup(self) -> None:
         args = mock.Mock(host="claude", mode="execute", provider="glm", model="glm-5.3",
-            capability=[], lane_name="review", approve_billable_route=False)
+            capability=[], lane_name="review", approve_billable_route=False, worktree_root=None)
         with mock.patch("side_lane.cli.read_credential") as read:
             with self.assertRaisesRegex(cli.SideLaneError, "explicit --approve"):
                 cli._launch(args, cli.load_config(), self.repo(), "Review")
@@ -115,7 +115,7 @@ class SideLaneTests(unittest.TestCase):
 
     def test_required_capability_fails_before_auth_or_key(self) -> None:
         args = mock.Mock(host="codex", mode="execute", provider="openai", model="gpt-5.6-terra",
-            capability=["gitnexus"], lane_name="worker", approve_billable_route=False)
+            capability=["gitnexus"], lane_name="worker", approve_billable_route=False, worktree_root=None)
         with mock.patch("side_lane.cli._capability_report", return_value={"capability_evidence": {"gitnexus": {"state": "unknown"}}, "capabilities": {"gitnexus": False}}), mock.patch("side_lane.cli.require_native_oauth") as auth:
             with self.assertRaisesRegex(cli.SideLaneError, "required capabilities unavailable"):
                 cli._launch(args, cli.load_config(), self.repo(), "Implement")
@@ -123,7 +123,7 @@ class SideLaneTests(unittest.TestCase):
 
     def test_native_oauth_failure_never_falls_back_to_key(self) -> None:
         args = mock.Mock(host="codex", mode="review", provider="openai", model="gpt-5.6-terra",
-            capability=[], lane_name="review", approve_billable_route=False)
+            capability=[], lane_name="review", approve_billable_route=False, worktree_root=None)
         lane = mock.Mock(worktree=self.repo())
         with mock.patch("side_lane.cli._require_host_executable", return_value="/opt/hosts/codex"), mock.patch("side_lane.cli.create_worktree", return_value=lane), mock.patch("side_lane.cli.dispose_clean_worktree"), mock.patch("side_lane.cli.require_native_oauth", side_effect=cli.AuthError("signed out")), mock.patch("side_lane.cli.read_credential") as read:
             with self.assertRaises(cli.AuthError):
@@ -138,7 +138,7 @@ class SideLaneTests(unittest.TestCase):
             "native-claude", "claude-sonnet-5", "oauth", False, "finding: bug in api.py", "")
         args = mock.Mock(host="claude", mode="review", provider="claude",
             model="claude-sonnet-5", capability=[], lane_name="review",
-            approve_billable_route=False)
+            approve_billable_route=False, worktree_root=None)
         with mock.patch("side_lane.cli._require_host_executable", return_value="/opt/hosts/claude"), \
              mock.patch("side_lane.cli.create_worktree", return_value=lane) as create, \
              mock.patch("side_lane.cli.require_native_oauth"), \
@@ -148,7 +148,7 @@ class SideLaneTests(unittest.TestCase):
              mock.patch("side_lane.cli.dispose_clean_worktree") as dispose, \
              contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(cli._launch(args, cli.load_config(), repo, "Review"), 0)
-        create.assert_called_once_with(repo, "review")
+        create.assert_called_once_with(repo, "review", worktree_root=None)
         self.assertEqual(launch.call_args.kwargs["worktree"], worktree)
         self.assertEqual(launch.call_args.kwargs["executable"], "/opt/hosts/claude")
         self.assertEqual(audit.call_args.kwargs["stdout"], "finding: bug in api.py")
@@ -166,7 +166,7 @@ class SideLaneTests(unittest.TestCase):
             "native-claude", "claude-sonnet-5", "oauth", False, "finding: bug", "")
         args = mock.Mock(host="claude", mode="review", provider="claude",
             model="claude-sonnet-5", capability=[], lane_name="review",
-            approve_billable_route=False)
+            approve_billable_route=False, worktree_root=None)
         with mock.patch("side_lane.cli._require_host_executable", return_value="/opt/hosts/claude"), \
              mock.patch("side_lane.cli.create_worktree", return_value=lane), \
              mock.patch("side_lane.cli.require_native_oauth"), \
@@ -264,7 +264,7 @@ class ExecuteLanePermissionTests(SideLaneTests):
             capabilities=("shell",), allowed_tools=("Read", "Bash(pnpm *)"))
         args = mock.Mock(host="claude", mode="execute", provider="claude",
             model="claude-sonnet-5", capability=["shell", "shell"], lane_name="task",
-            approve_billable_route=False)
+            approve_billable_route=False, worktree_root=None)
         readiness = {"capability_evidence": {"shell": {"state": "verified"}}, "capabilities": {"shell": True}}
         with mock.patch("side_lane.cli._require_host_executable", return_value="/opt/hosts/claude"), \
              mock.patch("side_lane.cli._capability_report", return_value=readiness), \
@@ -288,7 +288,7 @@ class ExecuteLanePermissionTests(SideLaneTests):
         lane = mock.Mock(worktree=worktree, branch="side-lane/task-2")
         result = LaneResult(("codex",), 0, worktree, "codex", "openai", "native-codex", "gpt-5.6-sol", "oauth", False, "", "")
         args = mock.Mock(host="codex", mode="execute", provider="openai", model="gpt-5.6-sol",
-            capability=[], lane_name="task", approve_billable_route=False)
+            capability=[], lane_name="task", approve_billable_route=False, worktree_root=None)
         with mock.patch("side_lane.cli._require_host_executable", return_value="/bundle/codex"), \
              mock.patch("side_lane.cli.host_support_dir", return_value="/bundle") as support, \
              mock.patch("side_lane.cli.create_worktree", return_value=lane), \
@@ -305,7 +305,7 @@ class ExecuteLanePermissionTests(SideLaneTests):
 class LaunchCapabilityGateTests(SideLaneTests):
     def _args(self, capability):
         return mock.Mock(host="claude", mode="execute", provider="claude", model="claude-sonnet-5",
-                         capability=capability, lane_name="task", approve_billable_route=False)
+                         capability=capability, lane_name="task", approve_billable_route=False, worktree_root=None)
 
     def test_present_evidence_is_enough_to_launch_but_unknown_is_not(self) -> None:
         report = {"capability_evidence": {
@@ -338,7 +338,7 @@ class HostExecutableCliTests(unittest.TestCase):
         from side_lane import hosts
 
         args = mock.Mock(host="codex", mode="execute", provider="openai", model="gpt-5.6-terra",
-            capability=[], lane_name="worker", approve_billable_route=False)
+            capability=[], lane_name="worker", approve_billable_route=False, worktree_root=None)
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
             (repo / ".git").mkdir()

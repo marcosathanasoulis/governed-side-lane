@@ -143,5 +143,77 @@ class SideLaneExclusionTests(WorktreeTests):
         self.assertEqual(exclude.read_text(encoding="utf-8"), "*.log\n.side-lanes/\n")
 
 
+class WorktreeRootTests(WorktreeTests):
+    def make_repo(self) -> Path:
+        # Sibling-root tests write next to the repository, so give each test its
+        # own container instead of leaking into the system temp directory.
+        container = tempfile.TemporaryDirectory()
+        self.addCleanup(container.cleanup)
+        repo = Path(container.name) / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+        (repo / "file.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "file.txt"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-m", "base"], check=True, capture_output=True)
+        return repo
+
+    def test_sibling_root_is_used_and_needs_no_exclusion(self) -> None:
+        repo = self.make_repo()
+        root = repo.parent / "lanes"
+        lane = worktrees.create_worktree(repo, "task", worktree_root=str(root))
+        self.assertEqual(lane.worktree.parent.resolve(), root.resolve())
+        self.assertTrue((lane.worktree / ".git").exists())
+        self.assertFalse((repo / ".side-lanes").exists())
+        exclude = repo / ".git" / "info" / "exclude"
+        self.assertNotIn(".side-lanes/", exclude.read_text(encoding="utf-8") if exclude.exists() else "")
+        self.assertEqual(subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
+                                        check=True, capture_output=True, text=True).stdout, "")
+
+    def test_relative_root_is_anchored_to_the_repository(self) -> None:
+        repo = self.make_repo()
+        lane = worktrees.create_worktree(repo, "task", worktree_root="../side-lanes-elsewhere")
+        self.assertEqual(lane.worktree.parent.resolve(), (repo.parent / "side-lanes-elsewhere").resolve())
+
+    def test_environment_override_and_default(self) -> None:
+        repo = self.make_repo()
+        self.assertEqual(worktrees.resolve_worktree_root(repo, env={}), repo / ".side-lanes" / "worktrees")
+        self.assertEqual(worktrees.resolve_worktree_root(repo, env={"SIDE_LANE_WORKTREE_ROOT": "../x"}), (repo.parent / "x"))
+        self.assertEqual(worktrees.resolve_worktree_root(repo, "", env={"SIDE_LANE_WORKTREE_ROOT": "../x"}), (repo.parent / "x"))
+        self.assertEqual(worktrees.resolve_worktree_root(repo, ".side-lanes/worktrees"), repo / ".side-lanes" / "worktrees")
+        # The default reached through a symlinked checkout path is still the default.
+        alias = repo.parent / "repo-alias"
+        alias.symlink_to(repo)
+        self.assertEqual(worktrees.resolve_worktree_root(repo, str(alias / ".side-lanes" / "worktrees")),
+                         repo / ".side-lanes" / "worktrees")
+
+    def test_nested_non_default_root_is_refused(self) -> None:
+        repo = self.make_repo()
+        for bad in ("lanes", ".", str(repo / "sub"), ".side-lanes/other"):
+            with self.assertRaisesRegex(worktrees.WorktreeError, "outside the repository"):
+                worktrees.resolve_worktree_root(repo, bad)
+
+    def test_symlink_back_into_the_repository_is_refused(self) -> None:
+        repo = self.make_repo()
+        link = repo.parent / "lanes-link"
+        link.symlink_to(repo / "nested-lanes")
+        with self.assertRaisesRegex(worktrees.WorktreeError, "outside the repository"):
+            worktrees.resolve_worktree_root(repo, str(link))
+        via_parent = repo.parent / "parent-link"
+        via_parent.symlink_to(repo)
+        with self.assertRaisesRegex(worktrees.WorktreeError, "outside the repository"):
+            worktrees.resolve_worktree_root(repo, str(via_parent / "sub"))
+        outside = repo.parent / "outside-link"
+        (repo.parent / "real-outside").mkdir()
+        outside.symlink_to(repo.parent / "real-outside")
+        self.assertEqual(worktrees.resolve_worktree_root(repo, str(outside)), outside)
+        # Lexically in-repo entry that points outside is still refused.
+        inner_link = repo / "lanes-out"
+        inner_link.symlink_to(repo.parent / "real-outside")
+        with self.assertRaisesRegex(worktrees.WorktreeError, "outside the repository"):
+            worktrees.resolve_worktree_root(repo, "lanes-out")
+
+
 if __name__ == "__main__":
     unittest.main()
