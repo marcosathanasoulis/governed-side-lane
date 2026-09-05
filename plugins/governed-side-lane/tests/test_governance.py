@@ -203,8 +203,12 @@ class NegatedLinkageTests(LinkageWordingTests):
     def test_affirmative_claim_with_trailing_negation_is_linkage(self) -> None:
         repo = self.governed("[CLAUDE.md](./CLAUDE.md) is the source of truth, not this file.\n")
         self.assertEqual(validate_repository(repo), repo.resolve())
-        repo = self.governed("You must read [CLAUDE.md](./CLAUDE.md); it is authoritative and is not optional.\n")
-        self.assertEqual(validate_repository(repo), repo.resolve())
+        for text in ("You must read [CLAUDE.md](./CLAUDE.md); it is authoritative and is not optional.\n",
+                     "You must read [CLAUDE.md](./CLAUDE.md); it is not optional and is authoritative.\n",
+                     "You must read [CLAUDE.md](./CLAUDE.md); it is not only authoritative but required.\n",
+                     "[CLAUDE.md](./CLAUDE.md) is the source of truth; do not skip it.\n"):
+            repo = self.governed(text)
+            self.assertEqual(validate_repository(repo), repo.resolve(), text)
 
     def test_known_capabilities_rejects_non_object_allowlist(self) -> None:
         from side_lane.governance import known_capabilities

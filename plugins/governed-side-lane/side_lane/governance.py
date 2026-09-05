@@ -18,6 +18,12 @@ from typing import Callable
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 GOVERNANCE_PATH = PACKAGE_ROOT / "config" / "lane-governance.md"
 MODELS_PATH = PACKAGE_ROOT / "config" / "models.json"
+NEGATED_CLAIM = re.compile(
+    r"(?:\b(?:is|are|remains?|be|being|been)\s+(?:not|no longer)|\b(?:isn't|aren't|not))"
+    r"\s+(?:the\s+|an?\s+)?(?:authoritative|source of truth)\b"
+    r"|\bnever\b(?:\s+\S+){0,3}?\s+(?:as\s+)?(?:the\s+)?(?:authoritative|source of truth)\b",
+    re.I,
+)
 REQUIRED_SECTIONS = ("Common", "Review mode", "Execute mode", "Execute tool allowlist")
 ALLOWLIST_SECTION = "Execute tool allowlist"
 ALWAYS = "always"
@@ -175,14 +181,12 @@ def validate_repository(
         source_of_truth = re.search(r"\bsource of truth\b", line, re.I)
         if not (source_of_truth or (requires and authoritative)):
             continue
-        # A negated declaration is not a linkage claim: a negation within a
-        # few words before "authoritative"/"source of truth" ("is not the
-        # source of truth", "never treat ... as authoritative"). A trailing
-        # "..., not X" after an affirmative claim is still a claim.
-        if re.search(
-            r"\b(?:not|never|no longer|isn't|aren't)\b(?:\s+\S+){0,4}?\s+(?:the\s+)?(?:authoritative|source of truth)\b",
-            line, re.I,
-        ):
+        # A negated declaration is not a linkage claim. Only a negation bound
+        # to the claim itself counts ("is not the source of truth", "isn't
+        # authoritative", "never ... as authoritative"); unrelated negations
+        # ("not optional", "not only authoritative", "..., not this file") do
+        # not disqualify an otherwise affirmative line.
+        if NEGATED_CLAIM.search(line):
             continue
         for destination in re.findall(r"\[[^\]]*\]\(([^)]+)\)", line):
             target = destination.strip().strip("<>").split("#", 1)[0]
