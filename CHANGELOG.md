@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.2 - 2026-09-05
+
+- Test-only: the adapter type-alias test no longer calls
+  `typing.get_type_hints` on Python 3.9, where PEP 604 unions in the
+  adapter's other annotations cannot be evaluated; it asserts the aliases are
+  real `Union`/`Callable` types on every supported version instead.
+
 ## 0.3.1 - 2026-09-04
 
 - The execute-lane tool allowlist is now a section of the canonical

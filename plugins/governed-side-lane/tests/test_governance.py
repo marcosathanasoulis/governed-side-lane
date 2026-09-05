@@ -219,11 +219,16 @@ class NegatedLinkageTests(LinkageWordingTests):
                 with self.assertRaises(GovernanceError):
                     known_capabilities(path)
 
-    def test_adapter_type_hints_resolve(self) -> None:
+    def test_adapter_type_aliases_are_real_types(self) -> None:
+        import sys
         import typing
-        hints = typing.get_type_hints(claude.launch)
-        self.assertIn("runner", hints)
-        self.assertIn("capabilities", hints)
+        self.assertIs(typing.get_origin(claude.Capabilities), typing.Union)
+        self.assertIs(typing.get_origin(claude.Runner), getattr(__import__("collections.abc").abc, "Callable"))
+        self.assertEqual(claude.launch.__annotations__["runner"], "Runner")
+        if sys.version_info >= (3, 10):  # PEP 604 unions in other annotations need 3.10+
+            hints = typing.get_type_hints(claude.launch)
+            self.assertIn("runner", hints)
+            self.assertIn("capabilities", hints)
 
 
 if __name__ == "__main__":
