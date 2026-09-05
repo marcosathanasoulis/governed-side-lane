@@ -105,6 +105,8 @@ def resolve_worktree_root(repo: Path, override: str | None = None, *,
     # real path resolves back into the repository through a symlink.
     real_candidate = Path(os.path.realpath(candidate))
     real_repo = Path(os.path.realpath(repo))
+    if real_candidate == Path(os.path.realpath(default)):
+        return default
     if (
         candidate == repo
         or candidate.is_relative_to(repo)

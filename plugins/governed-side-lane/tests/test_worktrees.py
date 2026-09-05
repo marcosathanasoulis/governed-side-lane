@@ -182,6 +182,11 @@ class WorktreeRootTests(WorktreeTests):
         self.assertEqual(worktrees.resolve_worktree_root(repo, env={"SIDE_LANE_WORKTREE_ROOT": "../x"}), (repo.parent / "x"))
         self.assertEqual(worktrees.resolve_worktree_root(repo, "", env={"SIDE_LANE_WORKTREE_ROOT": "../x"}), (repo.parent / "x"))
         self.assertEqual(worktrees.resolve_worktree_root(repo, ".side-lanes/worktrees"), repo / ".side-lanes" / "worktrees")
+        # The default reached through a symlinked checkout path is still the default.
+        alias = repo.parent / "repo-alias"
+        alias.symlink_to(repo)
+        self.assertEqual(worktrees.resolve_worktree_root(repo, str(alias / ".side-lanes" / "worktrees")),
+                         repo / ".side-lanes" / "worktrees")
 
     def test_nested_non_default_root_is_refused(self) -> None:
         repo = self.make_repo()
