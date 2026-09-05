@@ -45,8 +45,128 @@ GLM_QUOTA_PAUSE = re.compile(
 )
 
 
+# Capability-gated permission rules for headless execute lanes.
+#
+# ``claude -p`` cannot ask a human for approval, so every Bash command that no
+# allow rule covers is denied. Execute lanes therefore receive an explicit
+# ``--allowedTools`` list derived from the capabilities the coordinator granted
+# on the command line. Review lanes never receive one: their argv stays
+# byte-identical to the strict read-only form.
+#
+# The lists are deliberately ordinary developer commands. Nothing here matches
+# deploy, IAM, credential, cloud, or merge tooling; those remain forbidden by
+# ``config/lane-governance.md`` and the CLI's execute-mode prompt filter.
+FILE_TOOLS: tuple[str, ...] = ("Read", "Edit", "Write", "Glob", "Grep")
+SHELL_TOOLS: tuple[str, ...] = (
+    "Bash(pnpm *)",
+    "Bash(npx *)",
+    "Bash(npm *)",
+    "Bash(node *)",
+    "Bash(./node_modules/.bin/*)",
+    "Bash(yarn *)",
+    "Bash(uv *)",
+    "Bash(uvx *)",
+    "Bash(python3 *)",
+    "Bash(python3.11 *)",
+    "Bash(python3.12 *)",
+    "Bash(pytest *)",
+    "Bash(bash -n *)",
+    "Bash(git status *)",
+    "Bash(git diff *)",
+    "Bash(git log *)",
+    "Bash(git show *)",
+    "Bash(git add *)",
+    "Bash(git commit *)",
+    "Bash(git checkout *)",
+    "Bash(git switch *)",
+    "Bash(git restore *)",
+    "Bash(git stash *)",
+    "Bash(git worktree list *)",
+    "Bash(gh pr view *)",
+    "Bash(gh pr list *)",
+    "Bash(gh pr diff *)",
+    "Bash(gh pr checks *)",
+    "Bash(gh run view *)",
+    "Bash(gh run list *)",
+    "Bash(ln *)",
+    "Bash(cp *)",
+    "Bash(mv *)",
+    "Bash(mkdir *)",
+    "Bash(rm *)",
+    "Bash(ls *)",
+    "Bash(cat *)",
+    "Bash(head *)",
+    "Bash(tail *)",
+    "Bash(grep *)",
+    "Bash(find *)",
+    "Bash(sed *)",
+    "Bash(wc *)",
+    "Bash(echo *)",
+    "Bash(pwd)",
+    "Bash(which *)",
+    "Bash(env)",
+)
+GIT_PUSH_TOOLS: tuple[str, ...] = ("Bash(git push *)",)
+GIT_PUSH_DENIED: tuple[str, ...] = (
+    "Bash(git push --force*)",
+    "Bash(git push -f*)",
+    "Bash(git push * --force*)",
+)
+SHELL_CAPABILITIES = frozenset({"shell", "workspace-write"})
+KNOWN_CAPABILITIES = frozenset(
+    {
+        "workspace-write",
+        "shell",
+        "git-push",
+        "gitnexus",
+        "codegraph",
+        "gcloud-read",
+        "secret-use",
+        "database-read",
+        "workflow-write",
+        "playwright",
+    }
+)
+
+
 class ClaudeAdapterError(RuntimeError):
     """A Claude route cannot be safely launched."""
+
+
+def _capability_set(capabilities: "tuple[str, ...] | list[str] | frozenset[str]") -> frozenset[str]:
+    granted = frozenset(capabilities)
+    unknown = sorted(granted - KNOWN_CAPABILITIES)
+    if unknown:
+        raise ClaudeAdapterError(f"unknown capability: {', '.join(unknown)}")
+    return granted
+
+
+def allowed_tools(mode: str, capabilities: "tuple[str, ...] | list[str] | frozenset[str]" = ()) -> tuple[str, ...]:
+    """Deterministic ``--allowedTools`` rules for the granted capabilities.
+
+    Capability names are validated first and unknown names raise in every
+    mode; review mode then returns an empty tuple. ``git-push`` implies the
+    ordinary shell set so a lane can stage and commit what it pushes.
+    """
+
+    granted = _capability_set(capabilities)
+    if mode != "execute":
+        return ()
+    tools: list[str] = list(FILE_TOOLS)
+    if granted & SHELL_CAPABILITIES or "git-push" in granted:
+        tools.extend(SHELL_TOOLS)
+    if "git-push" in granted:
+        tools.extend(GIT_PUSH_TOOLS)
+    return tuple(tools)
+
+
+def disallowed_tools(mode: str, capabilities: "tuple[str, ...] | list[str] | frozenset[str]" = ()) -> tuple[str, ...]:
+    """Deny rules that must accompany an allow rule (deny wins in Claude Code)."""
+
+    granted = _capability_set(capabilities)
+    if mode != "execute" or "git-push" not in granted:
+        return ()
+    return GIT_PUSH_DENIED
 
 
 Runner = Callable[..., Any]
@@ -144,6 +264,7 @@ def build_command(
     model_config: Mapping[str, Any],
     prompt: str,
     mode: str = "execute",
+    capabilities: "tuple[str, ...] | list[str] | frozenset[str]" = (),
 ) -> list[str]:
     executable = _nonempty(executable, "Claude executable")
     repo_path = validate_worktree(repo)
@@ -191,6 +312,10 @@ def build_command(
                 "text",
             )
         )
+        for tool in allowed_tools(mode, capabilities):
+            command.extend(("--allowedTools", tool))
+        for tool in disallowed_tools(mode, capabilities):
+            command.extend(("--disallowedTools", tool))
     command.extend(("--append-system-prompt", lane_system_prompt(mode, repo_path)))
     return command
 
@@ -211,12 +336,14 @@ def launch(
     model_config: Mapping[str, Any],
     prompt: str,
     mode: str = "execute",
+    capabilities: "tuple[str, ...] | list[str] | frozenset[str]" = (),
     env: Mapping[str, str] | None = None,
     secret: str | None = None,
     runner: Runner = subprocess.run,
 ) -> LaneResult:
     repo_path = validate_worktree(repo)
     worktree_path = validate_worktree(worktree)
+    granted = tuple(sorted(_capability_set(capabilities)))
     command = build_command(
         executable=executable,
         repo=repo_path,
@@ -227,6 +354,7 @@ def launch(
         model_config=model_config,
         prompt=prompt,
         mode=mode,
+        capabilities=granted,
     )
     runtime_model, gateway, auth_method, billable = _route_metadata(
         provider, model, provider_config, model_config, mode
@@ -274,4 +402,7 @@ def launch(
         stdout=stdout,
         stderr=stderr,
         availability=availability,
+        capabilities=granted,
+        allowed_tools=allowed_tools(mode, granted),
+        disallowed_tools=disallowed_tools(mode, granted),
     )

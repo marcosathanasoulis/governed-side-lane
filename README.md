@@ -78,10 +78,20 @@ explicitly configured, key-backed, and potentially billable.
 
 - Read-only review lanes disable MCP/connectors, secrets, and writes.
 - Execute lanes retain normal host tools but can edit, test, commit, and push
-  only their dedicated lane branch.
+  only their dedicated lane branch. On Claude-host execute lanes, the tool
+  allowlist is derived from the granted `--capability` flags (file tools
+  always; ordinary dev-shell commands with `shell`/`workspace-write`; `git
+  push` only with `git-push`, with force pushes explicitly denied); review
+  mode never receives an allowlist.
+- Execute lanes see the host's configured MCP servers (for example
+  Playwright, tracked as the `playwright` capability); review mode always
+  hides MCP servers regardless of capability.
 - Native Codex and Claude routes use each host's own OAuth session.
 - Optional GLM is execute-only, explicit, key-backed, and never a fallback.
 - Host-private memory and connectors are never presented as synchronized.
+- Lane worktrees live under the coordinator repo's own `.side-lanes/`
+  directory, which the runner auto-excludes from that repo's `git status` so
+  earlier lanes never block the next launch.
 
 A worktree isolates Git edits; it is not an operating-system sandbox. Execute
 lanes run with the same local-user authority as their selected host.
@@ -95,7 +105,10 @@ lanes run with the same local-user authority as their selected host.
   the Codex / ChatGPT desktop app bundle on macOS; set
   `SIDE_LANE_CODEX_EXECUTABLE` or `SIDE_LANE_CLAUDE_EXECUTABLE` to an
   absolute path to pin a specific binary. `side-lane check-capabilities`
-  reports the resolved path as `runtime`.
+  reports the resolved path as `runtime`, and, for Codex, the sibling
+  directory holding its `codex-code-mode-host` helper (codex-cli 0.152+ from
+  the desktop app bundle) as `host_support_dir`, prepended onto the lane
+  child's `PATH` when present.
 - A target Git repository with root `AGENTS.md` and `CLAUDE.md`
 
 The target `AGENTS.md` must require and authoritatively link the root
@@ -107,6 +120,15 @@ The target `AGENTS.md` must require and authoritatively link the root
 You **must** read [CLAUDE.md](./CLAUDE.md); it is the authoritative source of
 truth for repository rules.
 ```
+
+A line that instead states the link is the source of truth is also accepted,
+for example:
+
+```markdown
+**[`CLAUDE.md`](./CLAUDE.md) is the source of truth for this repo's rules.**
+```
+
+Either way, links on that line may only point at root `CLAUDE.md`.
 
 The target owns the contents of `CLAUDE.md`. No organization-specific template
 or global configuration is downloaded by this package.

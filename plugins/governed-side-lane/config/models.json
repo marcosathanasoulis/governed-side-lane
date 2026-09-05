@@ -31,5 +31,5 @@
       }
     }
   },
-  "capabilities": ["workspace-write", "shell", "git-push", "gitnexus", "codegraph", "gcloud-read", "secret-use", "database-read", "workflow-write"]
+  "capabilities": ["workspace-write", "shell", "git-push", "gitnexus", "codegraph", "gcloud-read", "secret-use", "database-read", "workflow-write", "playwright"]
 }

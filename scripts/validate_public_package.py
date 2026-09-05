@@ -9,6 +9,7 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
+EXPECTED_VERSION = "0.3.0"
 PLUGIN = ROOT / "plugins" / "governed-side-lane"
 BANNED = (
     "credible" + "mind",
@@ -68,14 +69,14 @@ def main() -> int:
         if path.name == "plugin.json":
             if payload.get("name") != "governed-side-lane":
                 problems.append(f"wrong plugin name: {path.relative_to(ROOT)}")
-            if payload.get("version") != "0.2.5":
+            if payload.get("version") != EXPECTED_VERSION:
                 problems.append(f"wrong plugin version: {path.relative_to(ROOT)}")
             if payload.get("license") != "Apache-2.0":
                 problems.append(f"wrong plugin license: {path.relative_to(ROOT)}")
 
     version_files = (ROOT / "VERSION", PLUGIN / "VERSION")
     for path in version_files:
-        if path.is_file() and path.read_text(encoding="utf-8").strip() != "0.2.5":
+        if path.is_file() and path.read_text(encoding="utf-8").strip() != EXPECTED_VERSION:
             problems.append(f"wrong version file: {path.relative_to(ROOT)}")
     source_metadata = PLUGIN / ".side-lane-source.json"
     if source_metadata.is_file():
@@ -84,7 +85,7 @@ def main() -> int:
         except (OSError, json.JSONDecodeError) as exc:
             problems.append(f"invalid JSON {source_metadata.relative_to(ROOT)}: {exc}")
         else:
-            if source_payload.get("version") != "0.2.5":
+            if source_payload.get("version") != EXPECTED_VERSION:
                 problems.append("wrong source metadata version")
 
     if problems:

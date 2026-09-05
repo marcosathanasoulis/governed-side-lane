@@ -122,5 +122,36 @@ class GovernanceParityTests(unittest.TestCase):
                 validate_repository(repo)
 
 
+
+class LinkageWordingTests(unittest.TestCase):
+    def governed(self, agents_text: str) -> Path:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        repo = Path(temporary.name)
+        subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+        (repo / "CLAUDE.md").write_text("# Rules\n", encoding="utf-8")
+        (repo / "AGENTS.md").write_text(agents_text, encoding="utf-8")
+        return repo
+
+    def test_bold_backticked_source_of_truth_line_is_accepted(self) -> None:
+        repo = self.governed(
+            "# AGENTS.md\n\n**[`CLAUDE.md`](./CLAUDE.md) is the source of truth for this repo's rules.**\n"
+        )
+        self.assertEqual(validate_repository(repo), repo.resolve())
+
+    def test_source_of_truth_line_still_needs_a_link_to_root_claude_md(self) -> None:
+        repo = self.governed("CLAUDE.md is the source of truth.\n[the rules](./OTHER.md)\n")
+        with self.assertRaisesRegex(GovernanceError, "unambiguously"):
+            validate_repository(repo)
+        repo = self.governed("[`CLAUDE.md`](./docs/CLAUDE.md) is the source of truth.\n")
+        with self.assertRaisesRegex(GovernanceError, "unambiguously"):
+            validate_repository(repo)
+
+    def test_authoritative_alone_without_requirement_word_is_still_rejected(self) -> None:
+        repo = self.governed("[CLAUDE.md](./CLAUDE.md) is authoritative.\n")
+        with self.assertRaisesRegex(GovernanceError, "unambiguously"):
+            validate_repository(repo)
+
+
 if __name__ == "__main__":
     unittest.main()

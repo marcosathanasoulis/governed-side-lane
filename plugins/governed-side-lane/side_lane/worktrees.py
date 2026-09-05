@@ -41,12 +41,45 @@ def safe_lane_name(value: str) -> str:
     return normalized
 
 
+LANE_ROOT = ".side-lanes"
+LANE_EXCLUDE_PATTERN = f"{LANE_ROOT}/"
+
+
+def ensure_lane_exclusion(repo: Path, *, runner: Runner = subprocess.run) -> Path:
+    """Exclude ``.side-lanes/`` from ``git status`` in the coordinator checkout.
+
+    Lane worktrees live under the governed repository so their path is
+    predictable and audited, but they are never committed. Without this entry
+    the first lane leaves an untracked directory behind and every later launch
+    fails the dirty-checkout check. ``.git/info/exclude`` is local, untracked,
+    and idempotent to update, so no repository file changes.
+    """
+
+    # `--path-format=absolute` needs Git 2.31+; anchor a relative answer here instead.
+    git_dir = Path(_git(repo, ["rev-parse", "--git-common-dir"], runner))
+    if not git_dir.is_absolute():
+        git_dir = repo / git_dir
+    exclude = git_dir / "info" / "exclude"
+    try:
+        existing = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+        if LANE_EXCLUDE_PATTERN in {line.strip() for line in existing.splitlines()}:
+            return exclude
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        prefix = "" if not existing or existing.endswith("\n") else "\n"
+        with exclude.open("a", encoding="utf-8") as handle:
+            handle.write(f"{prefix}{LANE_EXCLUDE_PATTERN}\n")
+    except OSError as exc:
+        raise WorktreeError(f"cannot exclude lane worktrees in {exclude}: {exc}") from exc
+    return exclude
+
+
 def create_worktree(repo: Path, lane_name: str, *, runner: Runner = subprocess.run,
                     now: datetime | None = None) -> WorktreeRun:
     repo = repo.resolve()
     top = Path(_git(repo, ["rev-parse", "--show-toplevel"], runner)).resolve()
     if top != repo:
         raise WorktreeError("execute mode requires the repository root")
+    ensure_lane_exclusion(repo, runner=runner)
     if _git(repo, ["status", "--porcelain"], runner):
         raise WorktreeError("coordinator checkout is dirty; commit or stash before lane creation")
     if not _git(repo, ["branch", "--show-current"], runner):
@@ -55,7 +88,7 @@ def create_worktree(repo: Path, lane_name: str, *, runner: Runner = subprocess.r
     starting_commit = _git(repo, ["rev-parse", "HEAD"], runner)
     stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%d%H%M%S")
     branch = f"side-lane/{safe}-{stamp}"
-    worktree = repo / ".side-lanes" / "worktrees" / f"{safe}-{stamp}"
+    worktree = repo / LANE_ROOT / "worktrees" / f"{safe}-{stamp}"
     _git(repo, ["check-ref-format", "--branch", branch], runner)
     if worktree.exists():
         raise WorktreeError(f"worktree destination already exists: {worktree}")

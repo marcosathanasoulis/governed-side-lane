@@ -14,7 +14,12 @@ from side_lane.auth import AuthError, auth_status, require_native_oauth
 from side_lane.credentials import CredentialError, credential_present, read_credential
 from side_lane.connector_metadata import json_mcp_names, toml_mcp_names
 from side_lane.governance import GovernanceError, validate_repository
-from side_lane.hosts import HostExecutableError, require_host_executable, resolve_host_executable
+from side_lane.hosts import (
+    HostExecutableError,
+    host_support_dir,
+    require_host_executable,
+    resolve_host_executable,
+)
 from side_lane.adapters.claude import ClaudeAdapterError
 from side_lane.adapters.codex import CodexAdapterError
 from side_lane.worktrees import (
@@ -42,6 +47,9 @@ EXECUTE_UNSAFE = tuple(re.compile(p, re.I) for p in (
     r"\b(?:insert|update|delete|drop|alter|truncate|create)\s+(?:into\s+|table\s+|database\s+)",
     r"\b(?:change|grant|revoke|rotate|delete)\s+(?:iam|credentials?|secrets?|cloud resources?)\b",
 ))
+
+
+LAUNCHABLE_STATES = frozenset({"verified", "present"})
 
 
 class SideLaneError(Exception):
@@ -317,8 +325,9 @@ def _capability_report(config: Mapping[str, Any], host: str, mode: str, provider
         "secret-use": {"state": "unknown", "basis": "credential values and access are never tested during preflight"},
         "database-read": {"state": "present" if shutil.which("psql") else "unavailable", "basis": "psql executable; database access not tested"},
         "workflow-write": {"state": "present" if any(marker in name for name in lowered for marker in ("asana", "slack", "teams", "github")) else "unknown", "basis": "connector-name metadata only; write authority not tested"},
+        "playwright": {"state": "present" if any("playwright" in name for name in lowered) else "unavailable", "basis": "connector-name metadata only; browser launch not tested; review mode hides all MCP servers"},
     }
-    report: dict[str, Any] = {"host": host, "mode": mode, "runtime": runtime, "route": "not-requested", "mcp_connectors": sorted(mcp_names)}
+    report: dict[str, Any] = {"host": host, "mode": mode, "runtime": runtime, "host_support_dir": host_support_dir(host, runtime), "route": "not-requested", "mcp_connectors": sorted(mcp_names)}
     if bool(provider) != bool(model):
         raise SideLaneError("provider and model must be supplied together")
     if provider and model:
@@ -361,10 +370,17 @@ def _launch(args: argparse.Namespace, config: Mapping[str, Any], repo: Path, pro
     if unknown:
         raise SideLaneError(f"unknown capabilities: {', '.join(unknown)}")
     if args.capability:
-        readiness = _capability_report(
+        # Launch needs evidence that the capability exists on this host
+        # ("verified" or "present"); "unknown"/"unavailable" fail closed. The
+        # stricter boolean `capabilities` map (verified only) is what
+        # `recommend` uses to rank routes, not what gates a launch.
+        evidence = _capability_report(
             config, args.host, args.mode, args.provider, args.model, repo
-        )["capabilities"]
-        missing = [name for name in args.capability if not readiness.get(name)]
+        )["capability_evidence"]
+        missing = [
+            name for name in args.capability
+            if evidence.get(name, {}).get("state") not in LAUNCHABLE_STATES
+        ]
         if missing:
             raise SideLaneError(
                 f"required capabilities unavailable: {', '.join(missing)}"
@@ -376,6 +392,7 @@ def _launch(args: argparse.Namespace, config: Mapping[str, Any], repo: Path, pro
     if provider_config["auth_method"] == "provider-key" and not args.approve_billable_route:
         raise SideLaneError("billable route requires explicit --approve-billable-route for this run")
     executable = _require_host_executable(args.host)
+    capabilities = tuple(sorted(set(args.capability)))
     lane = create_worktree(repo, args.lane_name)
     secret: str | None = None
     try:
@@ -386,12 +403,13 @@ def _launch(args: argparse.Namespace, config: Mapping[str, Any], repo: Path, pro
         if args.host == "codex":
             from side_lane.adapters.codex import run_codex
             result = run_codex(executable=executable, repo=repo, worktree=lane.worktree, provider=args.provider,
-                model=args.model, provider_config=provider_config, model_config=model_config, prompt=prompt, mode=args.mode)
+                model=args.model, provider_config=provider_config, model_config=model_config, prompt=prompt, mode=args.mode,
+                capabilities=capabilities, support_dir=host_support_dir(args.host, executable))
         else:
             from side_lane.adapters.claude import launch
             result = launch(executable=executable, repo=repo, worktree=lane.worktree, provider=args.provider,
                 model=args.model, provider_config=provider_config, model_config=model_config, prompt=prompt,
-                mode=args.mode, secret=secret)
+                mode=args.mode, capabilities=capabilities, secret=secret)
     except Exception:
         dispose_clean_worktree(lane)
         raise

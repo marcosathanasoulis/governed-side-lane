@@ -110,5 +110,38 @@ class WorktreeTests(unittest.TestCase):
         self.assertTrue(lane.worktree.exists())
 
 
+
+class SideLaneExclusionTests(WorktreeTests):
+    def test_untracked_lane_worktrees_do_not_count_as_dirty(self) -> None:
+        repo = self.make_repo()
+        first = worktrees.create_worktree(repo, "first")
+        self.assertTrue(first.worktree.is_dir())
+        self.assertEqual(first.worktree.parent.parent, repo.resolve() / ".side-lanes")
+        exclude = repo / ".git" / "info" / "exclude"
+        self.assertEqual(exclude.read_text(encoding="utf-8").count(".side-lanes/"), 1)
+        self.assertEqual(subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
+                                        check=True, capture_output=True, text=True).stdout, "")
+        second = worktrees.create_worktree(repo, "second")
+        self.assertNotEqual(first.worktree, second.worktree)
+        self.assertEqual(exclude.read_text(encoding="utf-8").count(".side-lanes/"), 1)
+
+    def test_other_untracked_files_still_block_lane_creation(self) -> None:
+        repo = self.make_repo()
+        worktrees.create_worktree(repo, "first")
+        (repo / "scratch.txt").write_text("untracked\n", encoding="utf-8")
+        with self.assertRaisesRegex(worktrees.WorktreeError, "dirty"):
+            worktrees.create_worktree(repo, "second")
+
+    def test_existing_exclude_entries_are_preserved(self) -> None:
+        repo = self.make_repo()
+        exclude = repo / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("*.log\n", encoding="utf-8")
+        worktrees.ensure_lane_exclusion(repo)
+        self.assertEqual(exclude.read_text(encoding="utf-8"), "*.log\n.side-lanes/\n")
+        worktrees.ensure_lane_exclusion(repo)
+        self.assertEqual(exclude.read_text(encoding="utf-8"), "*.log\n.side-lanes/\n")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -51,3 +51,35 @@ For durable context that must survive movement between direct Codex, direct
 Claude Code, and side lanes, follow the installed pointer to
 `config/agent-context.md`. Host-private memory and connector sessions are hints,
 not synchronized authoritative project memory.
+
+## Execute-lane permissions
+
+Execute-mode Claude-host lanes (native Claude and GLM) receive an explicit
+`--allowedTools` list derived from the `--capability` flags passed to the
+runner. Review mode never receives an allowlist — its argv stays the strict
+read-only form regardless of any capability. An unknown capability name fails
+closed rather than being ignored.
+
+| Capabilities granted             | Allowed tools                                                              |
+| --------------------------------- | --------------------------------------------------------------------------- |
+| none                               | `Read`, `Edit`, `Write`, `Glob`, `Grep` only                                 |
+| `shell` or `workspace-write`       | the above, plus the ordinary dev-command set (pnpm/npx/npm/node/yarn, uv/uvx/python3/pytest, read-only `git`/`gh pr`/`gh run` inspection, and common file/shell utilities) |
+| `git-push`                        | the `shell` set, plus `Bash(git push *)`, with `--disallowedTools` denying any `--force`/`-f` push |
+
+Execute lanes also inherit the host's configured MCP servers (for example,
+Playwright, when the `playwright` capability reports as present via
+`check-capabilities`). Review mode hides every MCP server with
+`--strict-mcp-config`, so no capability makes a connector available there.
+
+## AGENTS.md linkage
+
+Root `AGENTS.md` must contain a line with a Markdown link to root `CLAUDE.md`
+in one of two accepted forms (verbatim wording may vary as long as the
+required words are present):
+
+- "You **must** read [CLAUDE.md](./CLAUDE.md); it is the authoritative source
+  of truth."
+- "**[`CLAUDE.md`](./CLAUDE.md) is the source of truth for this repo's
+  rules.**"
+
+Links on such a line may only point at root `CLAUDE.md`.

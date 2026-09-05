@@ -58,5 +58,27 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertNotIn("OPENAI_API_KEY", runner.call_args.kwargs["env"])
 
 
+
+class CodexSupportDirTests(unittest.TestCase):
+    execute = {"runtime_model": "gpt-5.6-sol", "protocol": "native-codex"}
+    native = {"gateway": "native-codex", "auth_method": "oauth", "billable": False}
+
+    def test_run_codex_prepends_support_dir_to_child_path(self) -> None:
+        runner = mock.Mock(return_value=mock.Mock(returncode=0, stdout="", stderr=""))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = root / "repo", root / "lane"
+            for path in (repo, lane):
+                path.mkdir()
+                (path / ".git").mkdir()
+            codex.run_codex(executable="/bundle/codex", repo=repo, worktree=lane, provider="openai",
+                model="gpt-5.6-sol", provider_config=self.native, model_config=self.execute,
+                prompt="task", env={"PATH": "/usr/bin", "OPENAI_API_KEY": "never"},
+                support_dir="/bundle", runner=runner)
+        child = runner.call_args.kwargs["env"]
+        self.assertEqual(child["PATH"], "/bundle:/usr/bin")
+        self.assertNotIn("OPENAI_API_KEY", child)
+
+
 if __name__ == "__main__":
     unittest.main()
