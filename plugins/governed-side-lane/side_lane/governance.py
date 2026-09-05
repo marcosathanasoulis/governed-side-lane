@@ -21,7 +21,10 @@ MODELS_PATH = PACKAGE_ROOT / "config" / "models.json"
 NEGATED_CLAIM = re.compile(
     r"(?:\b(?:is|are|remains?|be|being|been)\s+(?:not|no longer)|\b(?:isn't|aren't|not))"
     r"\s+(?:the\s+|an?\s+)?(?:authoritative|source of truth)\b"
-    r"|\bnever\b(?:\s+\S+){0,3}?\s+(?:as\s+)?(?:the\s+)?(?:authoritative|source of truth)\b",
+    # "never treat ... as authoritative", "must not treat ... as the source of truth",
+    # "should not consider ... authoritative", "do not read ... as authoritative"
+    r"|\b(?:never|(?:must|should|shall|do|does|did|will|would|can|cannot|could|may)\s*(?:not|n't))\b"
+    r"(?:\s+\S+){0,5}?\s+(?:as\s+)?(?:the\s+)?(?:authoritative|source of truth)\b",
     re.I,
 )
 REQUIRED_SECTIONS = ("Common", "Review mode", "Execute mode", "Execute tool allowlist")

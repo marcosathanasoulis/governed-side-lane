@@ -195,7 +195,10 @@ class NegatedLinkageTests(LinkageWordingTests):
     def test_negated_declarations_are_not_linkage(self) -> None:
         for text in ("[CLAUDE.md](./CLAUDE.md) is not the source of truth.\n",
                      "[CLAUDE.md](./CLAUDE.md) is no longer the source of truth.\n",
-                     "You must never treat [CLAUDE.md](./CLAUDE.md) as authoritative.\n"):
+                     "You must never treat [CLAUDE.md](./CLAUDE.md) as authoritative.\n",
+                     "You must not treat [CLAUDE.md](./CLAUDE.md) as authoritative.\n",
+                     "You should not consider [CLAUDE.md](./CLAUDE.md) the source of truth.\n",
+                     "Do not read [CLAUDE.md](./CLAUDE.md) as the authoritative source of truth.\n"):
             repo = self.governed(text)
             with self.assertRaisesRegex(GovernanceError, "unambiguously"):
                 validate_repository(repo)
@@ -220,10 +223,11 @@ class NegatedLinkageTests(LinkageWordingTests):
                     known_capabilities(path)
 
     def test_adapter_type_aliases_are_real_types(self) -> None:
+        import collections.abc
         import sys
         import typing
         self.assertIs(typing.get_origin(claude.Capabilities), typing.Union)
-        self.assertIs(typing.get_origin(claude.Runner), getattr(__import__("collections.abc").abc, "Callable"))
+        self.assertIs(typing.get_origin(claude.Runner), collections.abc.Callable)
         self.assertEqual(claude.launch.__annotations__["runner"], "Runner")
         if sys.version_info >= (3, 10):  # PEP 604 unions in other annotations need 3.10+
             hints = typing.get_type_hints(claude.launch)
