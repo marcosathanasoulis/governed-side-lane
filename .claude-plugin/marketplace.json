@@ -10,7 +10,7 @@
       "name": "governed-side-lane",
       "source": "./plugins/governed-side-lane",
       "description": "Isolated native Codex, Claude, and optional GLM side lanes.",
-      "version": "0.3.4",
+      "version": "0.3.5",
       "author": {
         "name": "Marcos Athanasoulis"
       },

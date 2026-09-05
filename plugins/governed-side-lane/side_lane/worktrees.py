@@ -43,6 +43,7 @@ def safe_lane_name(value: str) -> str:
 
 LANE_ROOT = ".side-lanes"
 LANE_EXCLUDE_PATTERN = f"/{LANE_ROOT}/"  # root-anchored: nested .side-lanes dirs stay visible
+LEGACY_EXCLUDE_PATTERN = f"{LANE_ROOT}/"  # written by 0.3.0-0.3.3; also hid nested dirs
 
 
 def ensure_lane_exclusion(repo: Path, *, runner: Runner = subprocess.run) -> Path:
@@ -62,7 +63,19 @@ def ensure_lane_exclusion(repo: Path, *, runner: Runner = subprocess.run) -> Pat
     exclude = git_dir / "info" / "exclude"
     try:
         existing = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
-        if LANE_EXCLUDE_PATTERN in {line.strip() for line in existing.splitlines()}:
+        lines = existing.splitlines()
+        if any(line.strip() == LEGACY_EXCLUDE_PATTERN for line in lines):
+            # Upgrade the unanchored entry in place so nested directories of the
+            # same name become visible to the dirty check again.
+            lines = [LANE_EXCLUDE_PATTERN if line.strip() == LEGACY_EXCLUDE_PATTERN else line for line in lines]
+            deduped: list[str] = []
+            for line in lines:
+                if line.strip() == LANE_EXCLUDE_PATTERN and LANE_EXCLUDE_PATTERN in {item.strip() for item in deduped}:
+                    continue
+                deduped.append(line)
+            exclude.write_text("\n".join(deduped) + "\n", encoding="utf-8")
+            return exclude
+        if LANE_EXCLUDE_PATTERN in {line.strip() for line in lines}:
             return exclude
         exclude.parent.mkdir(parents=True, exist_ok=True)
         prefix = "" if not existing or existing.endswith("\n") else "\n"
