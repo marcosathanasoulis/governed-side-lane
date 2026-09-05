@@ -144,6 +144,21 @@ class SideLaneExclusionTests(WorktreeTests):
 
 
 class WorktreeRootTests(WorktreeTests):
+    def make_repo(self) -> Path:
+        # Sibling-root tests write next to the repository, so give each test its
+        # own container instead of leaking into the system temp directory.
+        container = tempfile.TemporaryDirectory()
+        self.addCleanup(container.cleanup)
+        repo = Path(container.name) / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+        (repo / "file.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "file.txt"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-m", "base"], check=True, capture_output=True)
+        return repo
+
     def test_sibling_root_is_used_and_needs_no_exclusion(self) -> None:
         repo = self.make_repo()
         root = repo.parent / "lanes"

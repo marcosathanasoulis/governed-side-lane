@@ -58,6 +58,7 @@ class ClaudeAdapterError(RuntimeError):
 
 
 Capabilities = Union[tuple[str, ...], list[str], frozenset[str]]
+Runner = Callable[..., Any]
 
 
 def _capability_set(capabilities: Capabilities) -> frozenset[str]:

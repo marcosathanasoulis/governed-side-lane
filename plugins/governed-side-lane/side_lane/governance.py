@@ -122,9 +122,10 @@ def known_capabilities(path: Path = MODELS_PATH) -> frozenset[str]:
     """Capability names declared by the runtime allowlist (``config/models.json``)."""
 
     try:
-        names = json.loads(path.read_text(encoding="utf-8")).get("capabilities", [])
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise GovernanceError(f"cannot load capability allowlist: {exc}") from exc
+    names = payload.get("capabilities") if isinstance(payload, dict) else None
     if not isinstance(names, list) or not all(isinstance(name, str) and name for name in names):
         raise GovernanceError("capability allowlist is invalid")
     return frozenset(names)
@@ -172,8 +173,14 @@ def validate_repository(
         source_of_truth = re.search(r"\bsource of truth\b", line, re.I)
         if not (source_of_truth or (requires and authoritative)):
             continue
-        # A negated declaration is not a linkage claim.
-        if re.search(r"\b(?:not|never|no longer|isn't|is not|aren't)\b", line, re.I):
+        # A negated declaration is not a linkage claim: a negation within a
+        # few words before "authoritative"/"source of truth" ("is not the
+        # source of truth", "never treat ... as authoritative"). A trailing
+        # "..., not X" after an affirmative claim is still a claim.
+        if re.search(
+            r"\b(?:not|never|no longer|isn't|aren't)\b(?:\s+\S+){0,4}?\s+(?:the\s+)?(?:authoritative|source of truth)\b",
+            line, re.I,
+        ):
             continue
         for destination in re.findall(r"\[[^\]]*\]\(([^)]+)\)", line):
             target = destination.strip().strip("<>").split("#", 1)[0]

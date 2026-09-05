@@ -197,6 +197,27 @@ class NegatedLinkageTests(LinkageWordingTests):
             with self.assertRaisesRegex(GovernanceError, "unambiguously"):
                 validate_repository(repo)
 
+    def test_affirmative_claim_with_trailing_negation_is_linkage(self) -> None:
+        repo = self.governed("[CLAUDE.md](./CLAUDE.md) is the source of truth, not this file.\n")
+        self.assertEqual(validate_repository(repo), repo.resolve())
+        repo = self.governed("You must read [CLAUDE.md](./CLAUDE.md); it is authoritative and is not optional.\n")
+        self.assertEqual(validate_repository(repo), repo.resolve())
+
+    def test_known_capabilities_rejects_non_object_allowlist(self) -> None:
+        from side_lane.governance import known_capabilities
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "models.json"
+            for bad in ("[]", '{"capabilities": "shell"}', '{"capabilities": ["", "x"]}', "not json"):
+                path.write_text(bad, encoding="utf-8")
+                with self.assertRaises(GovernanceError):
+                    known_capabilities(path)
+
+    def test_adapter_type_hints_resolve(self) -> None:
+        import typing
+        hints = typing.get_type_hints(claude.launch)
+        self.assertIn("runner", hints)
+        self.assertIn("capabilities", hints)
+
 
 if __name__ == "__main__":
     unittest.main()
