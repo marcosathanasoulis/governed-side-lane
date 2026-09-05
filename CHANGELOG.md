@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.5 - 2026-09-05
+
+- `ensure_lane_exclusion` upgrades a legacy unanchored `.side-lanes/` entry
+  written by 0.3.0-0.3.3 to the root-anchored `/.side-lanes/` in place (and
+  drops a duplicate), so nested directories of that name become visible to the
+  dirty-checkout check after upgrading.
+
 ## 0.3.4 - 2026-09-05
 
 - The `.git/info/exclude` entry for lane worktrees is root-anchored

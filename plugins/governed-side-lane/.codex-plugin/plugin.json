@@ -1,6 +1,6 @@
 {
   "name": "governed-side-lane",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "Run exact native Codex, Claude, or optional GLM review and implementation lanes in dedicated Git worktrees.",
   "author": {
     "name": "Marcos Athanasoulis",

@@ -142,6 +142,31 @@ class SideLaneExclusionTests(WorktreeTests):
         worktrees.ensure_lane_exclusion(repo)
         self.assertEqual(exclude.read_text(encoding="utf-8"), "*.log\n/.side-lanes/\n")
 
+    def test_legacy_unanchored_entry_is_upgraded_in_place(self) -> None:
+        repo = self.make_repo()
+        exclude = repo / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("*.log\n.side-lanes/\nbuild/\n", encoding="utf-8")
+        worktrees.ensure_lane_exclusion(repo)
+        self.assertEqual(exclude.read_text(encoding="utf-8"), "*.log\n/.side-lanes/\nbuild/\n")
+        exclude.write_text("/.side-lanes/\n.side-lanes/\n", encoding="utf-8")
+        worktrees.ensure_lane_exclusion(repo)
+        self.assertEqual(exclude.read_text(encoding="utf-8"), "/.side-lanes/\n")
+        # A user-authored line with leading whitespace is a different pattern: untouched,
+        # and the real entry is still added.
+        exclude.write_text("  .side-lanes/\n", encoding="utf-8")
+        worktrees.ensure_lane_exclusion(repo)
+        self.assertEqual(exclude.read_text(encoding="utf-8"), "  .side-lanes/\n/.side-lanes/\n")
+        # Trailing whitespace on the tool entry is tolerated.
+        exclude.write_text(".side-lanes/ \t\n", encoding="utf-8")
+        worktrees.ensure_lane_exclusion(repo)
+        self.assertEqual(exclude.read_text(encoding="utf-8"), "/.side-lanes/\n")
+        nested = repo / "src" / ".side-lanes"
+        nested.mkdir(parents=True)
+        (nested / "file").write_text("x\n", encoding="utf-8")
+        with self.assertRaisesRegex(worktrees.WorktreeError, "dirty"):
+            worktrees.create_worktree(repo, "task")
+
     def test_nested_side_lanes_directory_still_counts_as_dirty(self) -> None:
         repo = self.make_repo()
         worktrees.create_worktree(repo, "first")
