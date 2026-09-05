@@ -55,7 +55,10 @@ def ensure_lane_exclusion(repo: Path, *, runner: Runner = subprocess.run) -> Pat
     and idempotent to update, so no repository file changes.
     """
 
-    git_dir = Path(_git(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"], runner))
+    # `--path-format=absolute` needs Git 2.31+; anchor a relative answer here instead.
+    git_dir = Path(_git(repo, ["rev-parse", "--git-common-dir"], runner))
+    if not git_dir.is_absolute():
+        git_dir = repo / git_dir
     exclude = git_dir / "info" / "exclude"
     try:
         existing = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""

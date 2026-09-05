@@ -144,9 +144,9 @@ def _capability_set(capabilities: "tuple[str, ...] | list[str] | frozenset[str]"
 def allowed_tools(mode: str, capabilities: "tuple[str, ...] | list[str] | frozenset[str]" = ()) -> tuple[str, ...]:
     """Deterministic ``--allowedTools`` rules for the granted capabilities.
 
-    Review mode returns an empty tuple regardless of input. ``git-push``
-    implies the ordinary shell set so a lane can stage and commit what it
-    pushes. Unknown capability names fail closed.
+    Capability names are validated first and unknown names raise in every
+    mode; review mode then returns an empty tuple. ``git-push`` implies the
+    ordinary shell set so a lane can stage and commit what it pushes.
     """
 
     granted = _capability_set(capabilities)

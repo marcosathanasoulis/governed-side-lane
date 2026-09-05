@@ -116,7 +116,7 @@ class SideLaneTests(unittest.TestCase):
     def test_required_capability_fails_before_auth_or_key(self) -> None:
         args = mock.Mock(host="codex", mode="execute", provider="openai", model="gpt-5.6-terra",
             capability=["gitnexus"], lane_name="worker", approve_billable_route=False)
-        with mock.patch("side_lane.cli._capability_report", return_value={"capabilities": {"gitnexus": False}}), mock.patch("side_lane.cli.require_native_oauth") as auth:
+        with mock.patch("side_lane.cli._capability_report", return_value={"capability_evidence": {"gitnexus": {"state": "unknown"}}, "capabilities": {"gitnexus": False}}), mock.patch("side_lane.cli.require_native_oauth") as auth:
             with self.assertRaisesRegex(cli.SideLaneError, "required capabilities unavailable"):
                 cli._launch(args, cli.load_config(), self.repo(), "Implement")
             auth.assert_not_called()
@@ -265,7 +265,7 @@ class ExecuteLanePermissionTests(SideLaneTests):
         args = mock.Mock(host="claude", mode="execute", provider="claude",
             model="claude-sonnet-5", capability=["shell", "shell"], lane_name="task",
             approve_billable_route=False)
-        readiness = {"capabilities": {"shell": True}}
+        readiness = {"capability_evidence": {"shell": {"state": "verified"}}, "capabilities": {"shell": True}}
         with mock.patch("side_lane.cli._require_host_executable", return_value="/opt/hosts/claude"), \
              mock.patch("side_lane.cli._capability_report", return_value=readiness), \
              mock.patch("side_lane.cli.create_worktree", return_value=lane), \
@@ -300,6 +300,26 @@ class ExecuteLanePermissionTests(SideLaneTests):
             self.assertEqual(cli._launch(args, cli.load_config(), repo, "Implement"), 0)
         support.assert_any_call("codex", "/bundle/codex")
         self.assertEqual(run_codex.call_args.kwargs["support_dir"], "/bundle")
+
+
+class LaunchCapabilityGateTests(SideLaneTests):
+    def _args(self, capability):
+        return mock.Mock(host="claude", mode="execute", provider="claude", model="claude-sonnet-5",
+                         capability=capability, lane_name="task", approve_billable_route=False)
+
+    def test_present_evidence_is_enough_to_launch_but_unknown_is_not(self) -> None:
+        report = {"capability_evidence": {
+            "playwright": {"state": "present"}, "git-push": {"state": "present"},
+            "shell": {"state": "verified"}, "secret-use": {"state": "unknown"},
+            "gitnexus": {"state": "unavailable"}}, "capabilities": {"shell": True}}
+        with mock.patch("side_lane.cli._capability_report", return_value=report), \
+             mock.patch("side_lane.cli._require_host_executable", side_effect=cli.SideLaneError("stop here")):
+            with self.assertRaisesRegex(cli.SideLaneError, "stop here"):
+                cli._launch(self._args(["playwright", "git-push", "shell"]), cli.load_config(), self.repo(), "Implement")
+            with self.assertRaisesRegex(cli.SideLaneError, "unavailable: secret-use"):
+                cli._launch(self._args(["secret-use"]), cli.load_config(), self.repo(), "Implement")
+            with self.assertRaisesRegex(cli.SideLaneError, "unavailable: gitnexus"):
+                cli._launch(self._args(["gitnexus"]), cli.load_config(), self.repo(), "Implement")
 
 
 if __name__ == "__main__":

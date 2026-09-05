@@ -143,8 +143,9 @@ class AllowedToolsTests(unittest.TestCase):
         self.assertEqual(claude.disallowed_tools("execute", ("shell",)), ())
 
     def test_unknown_capability_fails_closed(self) -> None:
-        with self.assertRaisesRegex(claude.ClaudeAdapterError, "unknown capability"):
-            claude.allowed_tools("execute", ("sudo",))
+        for mode in ("execute", "review"):
+            with self.assertRaisesRegex(claude.ClaudeAdapterError, "unknown capability"):
+                claude.allowed_tools(mode, ("sudo",))
 
     def test_execute_argv_carries_each_tool_separately(self) -> None:
         command = self.command("execute", ("shell", "git-push"))

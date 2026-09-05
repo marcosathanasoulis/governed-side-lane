@@ -49,6 +49,9 @@ EXECUTE_UNSAFE = tuple(re.compile(p, re.I) for p in (
 ))
 
 
+LAUNCHABLE_STATES = frozenset({"verified", "present"})
+
+
 class SideLaneError(Exception):
     pass
 
@@ -367,10 +370,17 @@ def _launch(args: argparse.Namespace, config: Mapping[str, Any], repo: Path, pro
     if unknown:
         raise SideLaneError(f"unknown capabilities: {', '.join(unknown)}")
     if args.capability:
-        readiness = _capability_report(
+        # Launch needs evidence that the capability exists on this host
+        # ("verified" or "present"); "unknown"/"unavailable" fail closed. The
+        # stricter boolean `capabilities` map (verified only) is what
+        # `recommend` uses to rank routes, not what gates a launch.
+        evidence = _capability_report(
             config, args.host, args.mode, args.provider, args.model, repo
-        )["capabilities"]
-        missing = [name for name in args.capability if not readiness.get(name)]
+        )["capability_evidence"]
+        missing = [
+            name for name in args.capability
+            if evidence.get(name, {}).get("state") not in LAUNCHABLE_STATES
+        ]
         if missing:
             raise SideLaneError(
                 f"required capabilities unavailable: {', '.join(missing)}"
