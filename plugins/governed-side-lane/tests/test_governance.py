@@ -198,7 +198,9 @@ class NegatedLinkageTests(LinkageWordingTests):
                      "You must never treat [CLAUDE.md](./CLAUDE.md) as authoritative.\n",
                      "You must not treat [CLAUDE.md](./CLAUDE.md) as authoritative.\n",
                      "You should not consider [CLAUDE.md](./CLAUDE.md) the source of truth.\n",
-                     "Do not read [CLAUDE.md](./CLAUDE.md) as the authoritative source of truth.\n"):
+                     "Do not read [CLAUDE.md](./CLAUDE.md) as the authoritative source of truth.\n",
+                     "[CLAUDE.md](./CLAUDE.md) cannot be treated as authoritative.\n",
+                     "You can't rely on [CLAUDE.md](./CLAUDE.md) as the source of truth.\n"):
             repo = self.governed(text)
             with self.assertRaisesRegex(GovernanceError, "unambiguously"):
                 validate_repository(repo)

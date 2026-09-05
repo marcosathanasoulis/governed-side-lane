@@ -23,7 +23,8 @@ NEGATED_CLAIM = re.compile(
     r"\s+(?:the\s+|an?\s+)?(?:authoritative|source of truth)\b"
     # "never treat ... as authoritative", "must not treat ... as the source of truth",
     # "should not consider ... authoritative", "do not read ... as authoritative"
-    r"|\b(?:never|(?:must|should|shall|do|does|did|will|would|can|cannot|could|may)\s*(?:not|n't))\b"
+    r"|\b(?:never|cannot|can't|won't|don't|doesn't|didn't|shouldn't|couldn't|wouldn't|mustn't|shan't"
+    r"|(?:must|should|shall|do|does|did|will|would|can|could|may)\s+not)\b"
     r"(?:\s+\S+){0,5}?\s+(?:as\s+)?(?:the\s+)?(?:authoritative|source of truth)\b",
     re.I,
 )
