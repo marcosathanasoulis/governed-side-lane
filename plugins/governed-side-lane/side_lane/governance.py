@@ -105,6 +105,8 @@ def tool_policy(path: Path = GOVERNANCE_PATH) -> ToolPolicy:
         if not rules:
             raise GovernanceError(f"tool allowlist subsection has no rules: {heading}")
         if heading == ALWAYS:
+            if always:
+                raise GovernanceError("tool allowlist declares `always` more than once")
             always = rules
             continue
         target = denied if heading.endswith(DENIED_SUFFIX) else allowed

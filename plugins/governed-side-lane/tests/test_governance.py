@@ -183,6 +183,9 @@ class ToolPolicyTests(unittest.TestCase):
             path.write_text(base + "\n### Shell Bad\n\n- `Bash(x)`\n", encoding="utf-8")
             with self.assertRaisesRegex(GovernanceError, "invalid capability name"):
                 tool_policy(path)
+            path.write_text(base + "\n### always\n\n- `Bash(*)`\n", encoding="utf-8")
+            with self.assertRaisesRegex(GovernanceError, "more than once"):
+                tool_policy(path)
             path.write_text(base.split("## Execute tool allowlist")[0], encoding="utf-8")
             with self.assertRaisesRegex(GovernanceError, "missing sections"):
                 tool_policy(path)
