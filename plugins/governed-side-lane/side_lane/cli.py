@@ -326,7 +326,7 @@ def _capability_report(config: Mapping[str, Any], host: str, mode: str, provider
         "secret-use": {"state": "unknown", "basis": "credential values and access are never tested during preflight"},
         "database-read": {"state": "present" if shutil.which("psql") else "unavailable", "basis": "psql executable; database access not tested"},
         "workflow-write": {"state": "present" if any(marker in name for name in lowered for marker in ("asana", "slack", "teams", "github")) else "unknown", "basis": "connector-name metadata only; write authority not tested"},
-        "playwright": {"state": "present" if any("playwright" in name for name in lowered) else "unavailable", "basis": "connector-name metadata only; browser launch not tested; review mode hides all MCP servers"},
+        "playwright": {"state": "present" if any("playwright" in name for name in lowered) else "unavailable", "basis": "connector-name metadata only, from the host's user config (may include entries scoped to other projects) and this repository's project config; browser launch not tested; review mode hides all MCP servers"},
     }
     report: dict[str, Any] = {"host": host, "mode": mode, "runtime": runtime, "host_support_dir": host_support_dir(host, runtime), "route": "not-requested", "mcp_connectors": sorted(mcp_names)}
     if bool(provider) != bool(model):

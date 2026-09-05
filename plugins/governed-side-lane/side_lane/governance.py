@@ -18,6 +18,11 @@ from typing import Callable
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 GOVERNANCE_PATH = PACKAGE_ROOT / "config" / "lane-governance.md"
 MODELS_PATH = PACKAGE_ROOT / "config" / "models.json"
+# Linkage validation is a completeness check on a repository-owned file, not a
+# defence against adversarial wording: AGENTS.md is written by the repository's
+# own maintainers. The negation list below catches common negative phrasings so
+# an honest "not the source of truth" line is not mistaken for a linkage claim;
+# it is not exhaustive and is not meant to be.
 NEGATED_CLAIM = re.compile(
     # "is not currently/really/yet the source of truth": allow one qualifying
     # adverb between the negation and the claim, but never "only" ("not only
@@ -28,6 +33,7 @@ NEGATED_CLAIM = re.compile(
     # "never treat ... as authoritative", "must not treat ... as the source of truth",
     # "should not consider ... authoritative", "do not read ... as authoritative"
     r"|\b(?:never|cannot|can't|won't|don't|doesn't|didn't|shouldn't|couldn't|wouldn't|mustn't|shan't"
+    r"|under no circumstances|in no (?:case|way)|by no means|at no (?:time|point)|no one should"
     r"|(?:must|should|shall|do|does|did|will|would|can|could|may)\s+not)\b"
     r"(?:\s+\S+){0,5}?\s+(?:as\s+)?(?:the\s+)?(?:authoritative|source of truth)\b",
     re.I,
@@ -91,12 +97,20 @@ class ToolPolicy:
         return frozenset(self.allowed) | frozenset(self.denied)
 
 
-def _rules(block: str) -> tuple[str, ...]:
+def _rules(block: str, heading: str) -> tuple[str, ...]:
+    """Rule bullets of one subsection; any other non-blank line is malformed."""
+
     rules = []
-    for line in block.splitlines():
-        match = re.match(r"^- `([^`]+)`\s*$", line.strip())
-        if match:
-            rules.append(match.group(1))
+    for raw in block.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        match = re.match(r"^- `([^`]+)`$", line)
+        if not match:
+            raise GovernanceError(
+                f"tool allowlist subsection {heading!r} has a malformed line: {line!r}"
+            )
+        rules.append(match.group(1))
     return tuple(rules)
 
 
@@ -115,7 +129,7 @@ def tool_policy(path: Path = GOVERNANCE_PATH) -> ToolPolicy:
     denied: dict[str, list[str]] = {}
     for index in range(1, len(parts) - 1, 2):
         heading, block = parts[index].strip(), parts[index + 1]
-        rules = _rules(block)
+        rules = _rules(block, heading)
         if not rules:
             raise GovernanceError(f"tool allowlist subsection has no rules: {heading}")
         if heading == ALWAYS:

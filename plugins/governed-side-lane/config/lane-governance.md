@@ -131,3 +131,9 @@ pushed onward. Do not describe the allowlist as preventing those actions.
 - `Bash(git push -f*)`
 - `Bash(git push * --force*)`
 - `Bash(git push * -f*)`
+- `Bash(git push --force-with-lease*)`
+- `Bash(git push * --force-with-lease*)`
+- `Bash(git push --mirror*)`
+- `Bash(git push * --mirror*)`
+- `Bash(git push +*)`
+- `Bash(git push * +*)`

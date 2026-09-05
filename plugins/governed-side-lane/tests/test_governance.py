@@ -165,7 +165,7 @@ class ToolPolicyTests(unittest.TestCase):
         self.assertIn("Bash(pnpm *)", policy.allowed["shell"])
         self.assertEqual(policy.allowed["shell"], policy.allowed["workspace-write"])
         self.assertIn("Bash(git push *)", policy.allowed["git-push"])
-        self.assertEqual(policy.denied["git-push"], ("Bash(git push --force*)", "Bash(git push -f*)", "Bash(git push * --force*)", "Bash(git push * -f*)"))
+        self.assertEqual(policy.denied["git-push"], ("Bash(git push --force*)", "Bash(git push -f*)", "Bash(git push * --force*)", "Bash(git push * -f*)", "Bash(git push --force-with-lease*)", "Bash(git push * --force-with-lease*)", "Bash(git push --mirror*)", "Bash(git push * --mirror*)", "Bash(git push +*)", "Bash(git push * +*)"))
         self.assertTrue(policy.capabilities <= known_capabilities())
         for rules in list(policy.allowed.values()) + [policy.always]:
             for rule in rules:
@@ -182,6 +182,9 @@ class ToolPolicyTests(unittest.TestCase):
                 tool_policy(path)
             path.write_text(base + "\n### Shell Bad\n\n- `Bash(x)`\n", encoding="utf-8")
             with self.assertRaisesRegex(GovernanceError, "invalid capability name"):
+                tool_policy(path)
+            path.write_text(base.replace("- `Bash(git push * -f*)`", "- Bash(git push * -f*)"), encoding="utf-8")
+            with self.assertRaisesRegex(GovernanceError, "malformed line"):
                 tool_policy(path)
             path.write_text(base + "\n### always\n\n- `Bash(*)`\n", encoding="utf-8")
             with self.assertRaisesRegex(GovernanceError, "more than once"):
@@ -201,6 +204,8 @@ class NegatedLinkageTests(LinkageWordingTests):
                      "Do not read [CLAUDE.md](./CLAUDE.md) as the authoritative source of truth.\n",
                      "[CLAUDE.md](./CLAUDE.md) cannot be treated as authoritative.\n",
                      "[CLAUDE.md](./CLAUDE.md) is not currently the source of truth.\n",
+                     "You must under no circumstances treat [CLAUDE.md](./CLAUDE.md) as authoritative.\n",
+                     "In no case is [CLAUDE.md](./CLAUDE.md) the source of truth.\n",
                      "[CLAUDE.md](./CLAUDE.md) is not really the authoritative file.\n",
                      "You can't rely on [CLAUDE.md](./CLAUDE.md) as the source of truth.\n"):
             repo = self.governed(text)

@@ -42,7 +42,7 @@ def safe_lane_name(value: str) -> str:
 
 
 LANE_ROOT = ".side-lanes"
-LANE_EXCLUDE_PATTERN = f"{LANE_ROOT}/"
+LANE_EXCLUDE_PATTERN = f"/{LANE_ROOT}/"  # root-anchored: nested .side-lanes dirs stay visible
 
 
 def ensure_lane_exclusion(repo: Path, *, runner: Runner = subprocess.run) -> Path:

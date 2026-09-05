@@ -139,7 +139,7 @@ class AllowedToolsTests(unittest.TestCase):
         self.assertIn("Bash(git push *)", tools)
         self.assertIn("Bash(git add *)", tools)
         self.assertEqual(claude.disallowed_tools("execute", ("git-push",)),
-                         ("Bash(git push --force*)", "Bash(git push -f*)", "Bash(git push * --force*)", "Bash(git push * -f*)"))
+                         ("Bash(git push --force*)", "Bash(git push -f*)", "Bash(git push * --force*)", "Bash(git push * -f*)", "Bash(git push --force-with-lease*)", "Bash(git push * --force-with-lease*)", "Bash(git push --mirror*)", "Bash(git push * --mirror*)", "Bash(git push +*)", "Bash(git push * +*)"))
         self.assertEqual(claude.disallowed_tools("execute", ("shell",)), ())
 
     def test_unknown_capability_fails_closed(self) -> None:
