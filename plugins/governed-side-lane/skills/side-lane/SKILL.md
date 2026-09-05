@@ -64,11 +64,9 @@ runner. Review mode never receives an allowlist — its argv stays the strict
 read-only form regardless of any capability. An unknown capability name fails
 closed rather than being ignored.
 
-| Capabilities granted             | Allowed tools                                                              |
-| --------------------------------- | --------------------------------------------------------------------------- |
-| none                               | `Read`, `Edit`, `Write`, `Glob`, `Grep` only                                 |
-| `shell` or `workspace-write`       | the above, plus the ordinary dev-command set (pnpm/npx/npm/node/yarn, uv/uvx/python3/pytest, read-only `git`/`gh pr`/`gh run` inspection, and common file/shell utilities) |
-| `git-push`                        | the `shell` set, plus `Bash(git push *)`, with `--disallowedTools` denying any `--force`/`-f` push |
+The effective rules per capability are the "Execute tool allowlist" section of
+`config/lane-governance.md`; the adapter renders that section and nothing else,
+so do not restate or extend the list in a prompt or skill.
 
 Execute lanes also inherit the host's configured MCP servers (for example,
 Playwright, when the `playwright` capability reports as present via

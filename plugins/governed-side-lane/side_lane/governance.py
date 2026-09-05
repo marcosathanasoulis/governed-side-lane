@@ -7,6 +7,8 @@ rendering one checked-in Markdown source for every invocation.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -15,7 +17,11 @@ from typing import Callable
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 GOVERNANCE_PATH = PACKAGE_ROOT / "config" / "lane-governance.md"
-REQUIRED_SECTIONS = ("Common", "Review mode", "Execute mode")
+MODELS_PATH = PACKAGE_ROOT / "config" / "models.json"
+REQUIRED_SECTIONS = ("Common", "Review mode", "Execute mode", "Execute tool allowlist")
+ALLOWLIST_SECTION = "Execute tool allowlist"
+ALWAYS = "always"
+DENIED_SUFFIX = " (denied)"
 
 
 class GovernanceError(ValueError):
@@ -56,6 +62,72 @@ def lane_system_prompt(
         + sections[active]
     )
     return rendered.replace("{{MAIN_CHECKOUT}}", str(repo))
+
+
+@dataclass(frozen=True)
+class ToolPolicy:
+    """Execute-lane tool rules parsed from the canonical governance document."""
+
+    always: tuple[str, ...]
+    allowed: dict[str, tuple[str, ...]]  # capability -> rules it unlocks
+    denied: dict[str, tuple[str, ...]]   # capability -> rules it must deny
+
+    @property
+    def capabilities(self) -> frozenset[str]:
+        return frozenset(self.allowed) | frozenset(self.denied)
+
+
+def _rules(block: str) -> tuple[str, ...]:
+    rules = []
+    for line in block.splitlines():
+        match = re.match(r"^- `([^`]+)`\s*$", line.strip())
+        if match:
+            rules.append(match.group(1))
+    return tuple(rules)
+
+
+def tool_policy(path: Path = GOVERNANCE_PATH) -> ToolPolicy:
+    """Parse the ``Execute tool allowlist`` section.
+
+    Subsection headings name comma-separated capabilities (or ``always``); a
+    heading ending in ``(denied)`` lists rules that must accompany the allow
+    rules for that capability. Rules are single inline-code bullets.
+    """
+
+    section = _sections(path)[ALLOWLIST_SECTION]
+    parts = re.split(r"^### ([^\n]+)\n", section, flags=re.M)
+    always: tuple[str, ...] = ()
+    allowed: dict[str, list[str]] = {}
+    denied: dict[str, list[str]] = {}
+    for index in range(1, len(parts) - 1, 2):
+        heading, block = parts[index].strip(), parts[index + 1]
+        rules = _rules(block)
+        if not rules:
+            raise GovernanceError(f"tool allowlist subsection has no rules: {heading}")
+        if heading == ALWAYS:
+            always = rules
+            continue
+        target = denied if heading.endswith(DENIED_SUFFIX) else allowed
+        names = [name.strip() for name in heading.removesuffix(DENIED_SUFFIX).split(",")]
+        for name in names:
+            if not re.fullmatch(r"[a-z][a-z0-9-]*", name):
+                raise GovernanceError(f"invalid capability name in tool allowlist: {name!r}")
+            target.setdefault(name, []).extend(rules)
+    if not always:
+        raise GovernanceError("tool allowlist is missing the `always` subsection")
+    return ToolPolicy(always, {k: tuple(v) for k, v in allowed.items()}, {k: tuple(v) for k, v in denied.items()})
+
+
+def known_capabilities(path: Path = MODELS_PATH) -> frozenset[str]:
+    """Capability names declared by the runtime allowlist (``config/models.json``)."""
+
+    try:
+        names = json.loads(path.read_text(encoding="utf-8")).get("capabilities", [])
+    except (OSError, ValueError) as exc:
+        raise GovernanceError(f"cannot load capability allowlist: {exc}") from exc
+    if not isinstance(names, list) or not all(isinstance(name, str) and name for name in names):
+        raise GovernanceError("capability allowlist is invalid")
+    return frozenset(names)
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
@@ -99,6 +171,9 @@ def validate_repository(
         authoritative = re.search(r"\bauthoritative\b", line, re.I)
         source_of_truth = re.search(r"\bsource of truth\b", line, re.I)
         if not (source_of_truth or (requires and authoritative)):
+            continue
+        # A negated declaration is not a linkage claim.
+        if re.search(r"\b(?:not|never|no longer|isn't|is not|aren't)\b", line, re.I):
             continue
         for destination in re.findall(r"\[[^\]]*\]\(([^)]+)\)", line):
             target = destination.strip().strip("<>").split("#", 1)[0]
