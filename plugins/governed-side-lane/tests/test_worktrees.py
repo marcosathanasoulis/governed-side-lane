@@ -118,12 +118,12 @@ class SideLaneExclusionTests(WorktreeTests):
         self.assertTrue(first.worktree.is_dir())
         self.assertEqual(first.worktree.parent.parent, repo.resolve() / ".side-lanes")
         exclude = repo / ".git" / "info" / "exclude"
-        self.assertEqual(exclude.read_text(encoding="utf-8").count(".side-lanes/"), 1)
+        self.assertEqual(exclude.read_text(encoding="utf-8").count("/.side-lanes/"), 1)
         self.assertEqual(subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
                                         check=True, capture_output=True, text=True).stdout, "")
         second = worktrees.create_worktree(repo, "second")
         self.assertNotEqual(first.worktree, second.worktree)
-        self.assertEqual(exclude.read_text(encoding="utf-8").count(".side-lanes/"), 1)
+        self.assertEqual(exclude.read_text(encoding="utf-8").count("/.side-lanes/"), 1)
 
     def test_other_untracked_files_still_block_lane_creation(self) -> None:
         repo = self.make_repo()
@@ -138,9 +138,18 @@ class SideLaneExclusionTests(WorktreeTests):
         exclude.parent.mkdir(parents=True, exist_ok=True)
         exclude.write_text("*.log\n", encoding="utf-8")
         worktrees.ensure_lane_exclusion(repo)
-        self.assertEqual(exclude.read_text(encoding="utf-8"), "*.log\n.side-lanes/\n")
+        self.assertEqual(exclude.read_text(encoding="utf-8"), "*.log\n/.side-lanes/\n")
         worktrees.ensure_lane_exclusion(repo)
-        self.assertEqual(exclude.read_text(encoding="utf-8"), "*.log\n.side-lanes/\n")
+        self.assertEqual(exclude.read_text(encoding="utf-8"), "*.log\n/.side-lanes/\n")
+
+    def test_nested_side_lanes_directory_still_counts_as_dirty(self) -> None:
+        repo = self.make_repo()
+        worktrees.create_worktree(repo, "first")
+        nested = repo / "src" / ".side-lanes"
+        nested.mkdir(parents=True)
+        (nested / "file").write_text("x\n", encoding="utf-8")
+        with self.assertRaisesRegex(worktrees.WorktreeError, "dirty"):
+            worktrees.create_worktree(repo, "second")
 
 
 class WorktreeRootTests(WorktreeTests):
@@ -167,7 +176,7 @@ class WorktreeRootTests(WorktreeTests):
         self.assertTrue((lane.worktree / ".git").exists())
         self.assertFalse((repo / ".side-lanes").exists())
         exclude = repo / ".git" / "info" / "exclude"
-        self.assertNotIn(".side-lanes/", exclude.read_text(encoding="utf-8") if exclude.exists() else "")
+        self.assertNotIn("/.side-lanes/", exclude.read_text(encoding="utf-8") if exclude.exists() else "")
         self.assertEqual(subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
                                         check=True, capture_output=True, text=True).stdout, "")
 

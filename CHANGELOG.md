@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.4 - 2026-09-05
+
+- The `.git/info/exclude` entry for lane worktrees is root-anchored
+  (`/.side-lanes/`), so a nested directory of the same name still makes the
+  coordinator checkout dirty.
+- `git-push (denied)` also covers `--force-with-lease`, `--mirror`, and
+  forced refspecs (`+HEAD:main`).
+- `tool_policy()` fails closed on any non-blank line in an allowlist subsection
+  that is not a rule bullet, instead of silently skipping it.
+- Linkage negation adds "under no circumstances", "in no case/way", "by no
+  means", "at no time/point"; the module documents that the check validates a
+  maintainer-owned file for completeness and is not an adversarial-wording
+  defence.
+- The `playwright` evidence basis states that host user config may include
+  connectors scoped to other projects.
+
 ## 0.3.3 - 2026-09-05
 
 - AGENTS.md linkage negation also catches qualified forms ("is not currently

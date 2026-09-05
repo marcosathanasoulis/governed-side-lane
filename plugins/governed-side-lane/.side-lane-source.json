@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
   "canonical_repository": "https://github.com/marcosathanasoulis/governed-side-lane",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "update_command": "python scripts/update.py check"
 }
