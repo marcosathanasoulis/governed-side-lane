@@ -90,20 +90,27 @@ def validate_repository(
     text = agents.read_text(encoding="utf-8")
     authoritative_links: list[Path] = []
     for line in text.splitlines():
-        if not (
-            re.search(r"\b(?:must|required)\b", line, re.I)
-            and re.search(r"\b(?:authoritative|source of truth)\b", line, re.I)
-        ):
+        # Two accepted wordings: an explicit requirement that names the file
+        # authoritative ("You must read [CLAUDE.md](./CLAUDE.md); it is the
+        # authoritative ..."), or the plain declaration "[CLAUDE.md](./CLAUDE.md)
+        # is the source of truth". "Authoritative" alone is too weak without a
+        # requirement word; "source of truth" already states the obligation.
+        requires = re.search(r"\b(?:must|required)\b", line, re.I)
+        authoritative = re.search(r"\bauthoritative\b", line, re.I)
+        source_of_truth = re.search(r"\bsource of truth\b", line, re.I)
+        if not (source_of_truth or (requires and authoritative)):
             continue
         for destination in re.findall(r"\[[^\]]*\]\(([^)]+)\)", line):
             target = destination.strip().strip("<>").split("#", 1)[0]
             authoritative_links.append((repo / target).resolve())
     if not authoritative_links or set(authoritative_links) != {claude.resolve()}:
         raise GovernanceError(
-            "AGENTS.md must link unambiguously to root CLAUDE.md: include a line "
-            "that requires it and names it authoritative, with a Markdown link, "
-            'e.g. "You **must** read [CLAUDE.md](./CLAUDE.md); it is the '
-            'authoritative source of truth."'
+            "AGENTS.md must link unambiguously to root CLAUDE.md: include one line "
+            "with a Markdown link to it that either says it is the source of truth, "
+            'e.g. "[`CLAUDE.md`](./CLAUDE.md) is the source of truth for this repo", '
+            'or requires it and names it authoritative, e.g. "You **must** read '
+            '[CLAUDE.md](./CLAUDE.md); it is the authoritative source of truth." '
+            "Links on such lines may point only at root CLAUDE.md."
         )
     if claude.is_symlink() or claude.resolve().parent != repo:
         raise GovernanceError(

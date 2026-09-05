@@ -68,3 +68,34 @@ class HostExecutableTests(unittest.TestCase):
     def test_unsupported_host_is_rejected(self) -> None:
         with self.assertRaises(HostExecutableError):
             resolve_host_executable("gemini", env={}, which=lambda _: None)
+
+
+
+class HostSupportDirTests(unittest.TestCase):
+    def test_codex_support_dir_is_the_real_directory_holding_the_code_mode_host(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory) / "Resources"
+            bundle.mkdir()
+            codex = _make_executable(bundle, "codex")
+            _make_executable(bundle, "codex-code-mode-host")
+            link_dir = Path(directory) / "bin"
+            link_dir.mkdir()
+            link = link_dir / "codex"
+            link.symlink_to(codex)
+            self.assertEqual(hosts.host_support_dir("codex", str(link)), str(bundle.resolve()))
+            self.assertEqual(hosts.host_support_dir("codex", str(codex)), str(bundle.resolve()))
+
+    def test_support_dir_is_none_without_the_sibling_or_for_claude(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            codex = _make_executable(Path(directory), "codex")
+            self.assertIsNone(hosts.host_support_dir("codex", str(codex)))
+            _make_executable(Path(directory), "codex-code-mode-host")
+            self.assertIsNone(hosts.host_support_dir("claude", str(codex)))
+            self.assertIsNone(hosts.host_support_dir("codex", None))
+
+    def test_prepend_path_puts_support_dir_first_once(self) -> None:
+        env = hosts.with_support_dir({"PATH": "/usr/bin:/bin"}, "/opt/bundle")
+        self.assertEqual(env["PATH"], "/opt/bundle:/usr/bin:/bin")
+        self.assertEqual(hosts.with_support_dir(env, "/opt/bundle")["PATH"], "/opt/bundle:/usr/bin:/bin")
+        self.assertEqual(hosts.with_support_dir({"PATH": "/bin"}, None), {"PATH": "/bin"})
+        self.assertEqual(hosts.with_support_dir({}, "/opt/bundle")["PATH"], "/opt/bundle")

@@ -37,6 +37,15 @@ BUNDLED_CODEX_CANDIDATES: tuple[str, ...] = (
     "~/Applications/ChatGPT.app/Contents/Resources/codex",
 )
 
+# Helper binaries a host spawns from its own directory. codex-cli 0.152+ launches
+# ``codex-code-mode-host`` as a sibling of the ``codex`` executable; when the
+# CLI is reached through a symlink elsewhere the sibling lookup fails. The
+# lane exports the real directory on the child's ``PATH`` so the host finds it.
+HOST_SUPPORT_BINARIES = {
+    "codex": ("codex-code-mode-host",),
+    "claude": (),
+}
+
 INSTALL_HINTS = {
     "codex": "install the Codex CLI (`npm install -g @openai/codex`), or the Codex desktop app",
     "claude": "install Claude Code (`npm install -g @anthropic-ai/claude-code`)",
@@ -114,3 +123,37 @@ def require_host_executable(
         + (" or in a Codex/ChatGPT desktop app bundle" if host == "codex" else "")
         + f"; {INSTALL_HINTS[host]}, or set {EXECUTABLE_ENV[host]} to its absolute path"
     )
+
+
+def host_support_dir(host: str, executable: str | None) -> str | None:
+    """Return the real directory of ``executable`` when it holds the host's helpers.
+
+    Symlinks are resolved here (and only here) because the helper lives next to
+    the real binary, not next to the operator's symlink. ``None`` means no helper
+    is needed or none was found; nothing is substituted in either case.
+    """
+
+    if host not in SUPPORTED_HOSTS:
+        raise HostExecutableError(f"unsupported native host: {host}")
+    if not executable or not HOST_SUPPORT_BINARIES[host]:
+        return None
+    try:
+        real_dir = Path(executable).expanduser().resolve(strict=True).parent
+    except OSError:
+        return None
+    if all(_is_executable_file(real_dir / name) for name in HOST_SUPPORT_BINARIES[host]):
+        return str(real_dir)
+    return None
+
+
+def with_support_dir(env: Mapping[str, str], support_dir: str | None) -> dict[str, str]:
+    """Prepend ``support_dir`` to ``PATH`` exactly once; never reorder otherwise."""
+
+    child = dict(env)
+    if not support_dir:
+        return child
+    entries = [entry for entry in child.get("PATH", "").split(os.pathsep) if entry]
+    if entries[:1] == [support_dir]:
+        return child
+    child["PATH"] = os.pathsep.join([support_dir, *(entry for entry in entries if entry != support_dir)])
+    return child

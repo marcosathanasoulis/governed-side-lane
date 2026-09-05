@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.0 - 2026-09-04
+
+- Execute-mode Claude-host lanes (native Claude and GLM) now receive explicit
+  `--allowedTools` rules derived from `--capability` flags: always
+  Read/Edit/Write/Glob/Grep; with `shell` or `workspace-write` (or
+  `git-push`) the ordinary dev-command set `SHELL_TOOLS`; `git-push`
+  additionally allows `Bash(git push *)` and passes `--disallowedTools`
+  denying force pushes. Review mode argv is unchanged (no allowlist ever).
+  Unknown capability names fail closed. The run summary JSON now includes
+  `capabilities`, `allowed_tools`, `disallowed_tools`.
+- `.side-lanes/` is added to the coordinator repo's `.git/info/exclude`
+  before the dirty-checkout check, so earlier lane worktrees no longer block
+  the next launch.
+- Codex host: `hosts.host_support_dir` resolves the real directory of the
+  `codex` executable; if `codex-code-mode-host` sits beside it (codex-cli
+  0.152+ from the desktop app bundle), that directory is prepended to the
+  lane child's PATH. `check-capabilities` reports it as `host_support_dir`.
+- AGENTS.md linkage now also accepts a "source of truth" line with a
+  Markdown link to root CLAUDE.md, in addition to the existing "You **must**
+  read [CLAUDE.md](./CLAUDE.md)" form. Links on such lines may only point at
+  root CLAUDE.md.
+- New capability `playwright` in config/models.json; `check-capabilities`
+  reports it present when an MCP server name containing "playwright" is
+  configured for the host. Review mode still hides all MCP servers via
+  `--strict-mcp-config`; execute mode inherits the user's/project's MCP
+  servers, so Playwright is usable in execute lanes.
+
 ## 0.2.5 - 2026-09-03
 
 - Sign-in hints for an off-`PATH` executable are quoted for the platform's

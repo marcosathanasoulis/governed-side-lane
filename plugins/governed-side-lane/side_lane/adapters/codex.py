@@ -8,6 +8,7 @@ import subprocess
 from typing import Any, Callable, Mapping
 
 from side_lane.governance import lane_system_prompt
+from side_lane.hosts import with_support_dir
 from side_lane.results import LaneResult
 
 
@@ -149,7 +150,9 @@ def run_codex(
     model_config: Mapping[str, Any],
     prompt: str,
     mode: str = "execute",
+    capabilities: "tuple[str, ...] | list[str]" = (),
     env: Mapping[str, str] | None = None,
+    support_dir: str | None = None,
     runner: Runner = subprocess.run,
 ) -> LaneResult:
     repo_path = _validate_worktree(repo)
@@ -165,7 +168,7 @@ def run_codex(
         prompt,
         mode=mode,
     )
-    child_env = build_child_env(os.environ if env is None else env)
+    child_env = with_support_dir(build_child_env(os.environ if env is None else env), support_dir)
     try:
         completed = runner(
             argv,
@@ -190,4 +193,5 @@ def run_codex(
         billable=False,
         stdout=getattr(completed, "stdout", "") or "",
         stderr=getattr(completed, "stderr", "") or "",
+        capabilities=tuple(sorted(set(capabilities))),
     )

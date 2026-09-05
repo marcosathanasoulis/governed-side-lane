@@ -89,5 +89,88 @@ class ClaudeAdapterTests(unittest.TestCase):
         runner.assert_called_once()
 
 
+
+class AllowedToolsTests(unittest.TestCase):
+    native = {"gateway": "native-claude", "auth_method": "oauth", "billable": False}
+
+    def command(self, mode: str, capabilities=()) -> list[str]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "fixed"
+            repo, lane = root / "repo", root / "lane"
+            for path in (repo, lane):
+                path.mkdir(parents=True)
+                (path / ".git").write_text("gitdir: /tmp/example\n", encoding="utf-8")
+            protocol = "native-claude-readonly" if mode == "review" else "native-claude"
+            return claude.build_command(executable="claude", repo=repo, worktree=lane,
+                provider="claude", model="claude-sonnet-5", provider_config=self.native,
+                model_config={"runtime_model": "claude-sonnet-5", "protocol": protocol},
+                prompt="task", mode=mode, capabilities=capabilities)
+
+    def test_review_never_receives_an_allowlist(self) -> None:
+        self.assertEqual(claude.allowed_tools("review", ("shell", "git-push")), ())
+        self.assertEqual(claude.disallowed_tools("review", ("git-push",)), ())
+        command = self.command("review", ("shell",))
+        self.assertNotIn("--allowedTools", command)
+        self.assertNotIn("--disallowedTools", command)
+        strip = lambda argv: [item for item in argv if not item.startswith("/")]
+        self.assertEqual(strip(command), strip(self.command("review")))
+
+    def test_execute_without_shell_gets_only_file_tools(self) -> None:
+        tools = claude.allowed_tools("execute", ())
+        self.assertEqual(tools, ("Read", "Edit", "Write", "Glob", "Grep"))
+        self.assertFalse(any(tool.startswith("Bash(") for tool in tools))
+
+    def test_shell_or_workspace_write_adds_ordinary_dev_commands_not_push(self) -> None:
+        for capability in ("shell", "workspace-write"):
+            tools = claude.allowed_tools("execute", (capability,))
+            for expected in ("Bash(pnpm *)", "Bash(npx *)", "Bash(npm *)", "Bash(node *)",
+                             "Bash(./node_modules/.bin/*)", "Bash(uv *)", "Bash(uvx *)",
+                             "Bash(python3 *)", "Bash(python3.11 *)", "Bash(git add *)",
+                             "Bash(git commit *)", "Bash(ln *)", "Bash(cp *)", "Bash(mkdir *)",
+                             "Bash(ls *)", "Bash(cat *)", "Bash(gh pr view *)", "Bash(gh pr list *)",
+                             "Bash(gh pr diff *)", "Bash(gh run view *)"):
+                self.assertIn(expected, tools)
+            self.assertNotIn("Bash(git push *)", tools)
+            self.assertFalse(any("gcloud" in tool or "gh pr merge" in tool or "deploy" in tool for tool in tools))
+        self.assertEqual(claude.allowed_tools("execute", ("shell",)), claude.allowed_tools("execute", ("shell", "shell")))
+
+    def test_git_push_requires_shell_and_denies_force(self) -> None:
+        tools = claude.allowed_tools("execute", ("git-push",))
+        self.assertIn("Bash(git push *)", tools)
+        self.assertIn("Bash(git add *)", tools)
+        self.assertEqual(claude.disallowed_tools("execute", ("git-push",)),
+                         ("Bash(git push --force*)", "Bash(git push -f*)", "Bash(git push * --force*)"))
+        self.assertEqual(claude.disallowed_tools("execute", ("shell",)), ())
+
+    def test_unknown_capability_fails_closed(self) -> None:
+        with self.assertRaisesRegex(claude.ClaudeAdapterError, "unknown capability"):
+            claude.allowed_tools("execute", ("sudo",))
+
+    def test_execute_argv_carries_each_tool_separately(self) -> None:
+        command = self.command("execute", ("shell", "git-push"))
+        allowed = [command[index + 1] for index, flag in enumerate(command) if flag == "--allowedTools"]
+        self.assertEqual(tuple(allowed), claude.allowed_tools("execute", ("shell", "git-push")))
+        denied = [command[index + 1] for index, flag in enumerate(command) if flag == "--disallowedTools"]
+        self.assertEqual(tuple(denied), claude.disallowed_tools("execute", ("git-push",)))
+        self.assertIn("acceptEdits", command)
+        self.assertIn("Injected canonical side-lane governance", command[-1])
+
+    def test_launch_forwards_capabilities(self) -> None:
+        runner = mock.Mock(return_value=mock.Mock(returncode=0, stdout="ok", stderr=""))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = root / "repo", root / "lane"
+            for path in (repo, lane):
+                path.mkdir()
+                (path / ".git").write_text("gitdir: /tmp/example\n", encoding="utf-8")
+            result = claude.launch(executable="claude", repo=repo, worktree=lane, provider="claude",
+                model="claude-sonnet-5", provider_config=self.native,
+                model_config={"runtime_model": "claude-sonnet-5", "protocol": "native-claude"},
+                prompt="task", mode="execute", capabilities=("shell",), env={"PATH": "/bin"}, runner=runner)
+        self.assertIn("Bash(pnpm *)", result.argv)
+        self.assertEqual(result.allowed_tools, claude.allowed_tools("execute", ("shell",)))
+        self.assertIn("allowed_tools", result.as_dict())
+
+
 if __name__ == "__main__":
     unittest.main()

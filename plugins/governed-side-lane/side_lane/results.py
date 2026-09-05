@@ -20,6 +20,9 @@ class LaneResult:
     stdout: str
     stderr: str
     availability: str = "completed"
+    capabilities: tuple[str, ...] = ()
+    allowed_tools: tuple[str, ...] = ()
+    disallowed_tools: tuple[str, ...] = ()
 
     @property
     def worktree(self) -> Path:
@@ -36,4 +39,7 @@ class LaneResult:
             "cwd": str(self.cwd),
             "exit_status": self.returncode,
             "availability": self.availability,
+            "capabilities": list(self.capabilities),
+            "allowed_tools": list(self.allowed_tools),
+            "disallowed_tools": list(self.disallowed_tools),
         }
