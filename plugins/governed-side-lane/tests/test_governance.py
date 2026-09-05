@@ -165,7 +165,7 @@ class ToolPolicyTests(unittest.TestCase):
         self.assertIn("Bash(pnpm *)", policy.allowed["shell"])
         self.assertEqual(policy.allowed["shell"], policy.allowed["workspace-write"])
         self.assertIn("Bash(git push *)", policy.allowed["git-push"])
-        self.assertEqual(policy.denied["git-push"], ("Bash(git push --force*)", "Bash(git push -f*)", "Bash(git push * --force*)"))
+        self.assertEqual(policy.denied["git-push"], ("Bash(git push --force*)", "Bash(git push -f*)", "Bash(git push * --force*)", "Bash(git push * -f*)"))
         self.assertTrue(policy.capabilities <= known_capabilities())
         for rules in list(policy.allowed.values()) + [policy.always]:
             for rule in rules:
@@ -200,6 +200,8 @@ class NegatedLinkageTests(LinkageWordingTests):
                      "You should not consider [CLAUDE.md](./CLAUDE.md) the source of truth.\n",
                      "Do not read [CLAUDE.md](./CLAUDE.md) as the authoritative source of truth.\n",
                      "[CLAUDE.md](./CLAUDE.md) cannot be treated as authoritative.\n",
+                     "[CLAUDE.md](./CLAUDE.md) is not currently the source of truth.\n",
+                     "[CLAUDE.md](./CLAUDE.md) is not really the authoritative file.\n",
                      "You can't rely on [CLAUDE.md](./CLAUDE.md) as the source of truth.\n"):
             repo = self.governed(text)
             with self.assertRaisesRegex(GovernanceError, "unambiguously"):

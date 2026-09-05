@@ -130,3 +130,4 @@ pushed onward. Do not describe the allowlist as preventing those actions.
 - `Bash(git push --force*)`
 - `Bash(git push -f*)`
 - `Bash(git push * --force*)`
+- `Bash(git push * -f*)`

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.3 - 2026-09-05
+
+- AGENTS.md linkage negation also catches qualified forms ("is not currently
+  the source of truth", "is not really authoritative").
+- The `git-push` deny rules add `Bash(git push * -f*)` so a trailing short
+  force flag (`git push origin main -f`) is denied like the long form.
+
 ## 0.3.2 - 2026-09-05
 
 - Project connector discovery is host-specific: a Claude lane reads the
