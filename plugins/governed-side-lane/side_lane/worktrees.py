@@ -64,18 +64,28 @@ def ensure_lane_exclusion(repo: Path, *, runner: Runner = subprocess.run) -> Pat
     try:
         existing = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
         lines = existing.splitlines()
-        if any(line.strip() == LEGACY_EXCLUDE_PATTERN for line in lines):
+        # Match only the exact tool-written entries; Git ignores trailing
+        # spaces/tabs, so tolerate those, but a leading-whitespace line is a
+        # different (user-authored) pattern and is left alone.
+        def is_entry(line: str, pattern: str) -> bool:
+            return line.rstrip(" \t") == pattern
+
+        if any(is_entry(line, LEGACY_EXCLUDE_PATTERN) for line in lines):
             # Upgrade the unanchored entry in place so nested directories of the
-            # same name become visible to the dirty check again.
-            lines = [LANE_EXCLUDE_PATTERN if line.strip() == LEGACY_EXCLUDE_PATTERN else line for line in lines]
-            deduped: list[str] = []
+            # same name become visible to the dirty check again; keep one copy.
+            rewritten: list[str] = []
+            seen_current = False
             for line in lines:
-                if line.strip() == LANE_EXCLUDE_PATTERN and LANE_EXCLUDE_PATTERN in {item.strip() for item in deduped}:
-                    continue
-                deduped.append(line)
-            exclude.write_text("\n".join(deduped) + "\n", encoding="utf-8")
+                if is_entry(line, LEGACY_EXCLUDE_PATTERN) or is_entry(line, LANE_EXCLUDE_PATTERN):
+                    if seen_current:
+                        continue
+                    seen_current = True
+                    rewritten.append(LANE_EXCLUDE_PATTERN)
+                else:
+                    rewritten.append(line)
+            exclude.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
             return exclude
-        if LANE_EXCLUDE_PATTERN in {line.strip() for line in lines}:
+        if any(is_entry(line, LANE_EXCLUDE_PATTERN) for line in lines):
             return exclude
         exclude.parent.mkdir(parents=True, exist_ok=True)
         prefix = "" if not existing or existing.endswith("\n") else "\n"

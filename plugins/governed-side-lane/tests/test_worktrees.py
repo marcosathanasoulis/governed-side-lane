@@ -152,6 +152,15 @@ class SideLaneExclusionTests(WorktreeTests):
         exclude.write_text("/.side-lanes/\n.side-lanes/\n", encoding="utf-8")
         worktrees.ensure_lane_exclusion(repo)
         self.assertEqual(exclude.read_text(encoding="utf-8"), "/.side-lanes/\n")
+        # A user-authored line with leading whitespace is a different pattern: untouched,
+        # and the real entry is still added.
+        exclude.write_text("  .side-lanes/\n", encoding="utf-8")
+        worktrees.ensure_lane_exclusion(repo)
+        self.assertEqual(exclude.read_text(encoding="utf-8"), "  .side-lanes/\n/.side-lanes/\n")
+        # Trailing whitespace on the tool entry is tolerated.
+        exclude.write_text(".side-lanes/ \t\n", encoding="utf-8")
+        worktrees.ensure_lane_exclusion(repo)
+        self.assertEqual(exclude.read_text(encoding="utf-8"), "/.side-lanes/\n")
         nested = repo / "src" / ".side-lanes"
         nested.mkdir(parents=True)
         (nested / "file").write_text("x\n", encoding="utf-8")
