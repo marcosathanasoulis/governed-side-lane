@@ -53,6 +53,16 @@ rules; `always` applies to every execute lane. Rules are ordinary developer
 commands; nothing here may match deploy, IAM, credential, cloud, merge, or
 release tooling, which stay forbidden by the Common rules above.
 
+This allowlist is an approval boundary for a headless session, not a security
+boundary. Execute lanes run with the same-user authority the Common rules
+describe and without an operating-system sandbox; an allowed interpreter or
+package runner (`python3`, `node`, `npx`, `uv`) can in principle run anything
+the user can, including a push that the `git-push` capability did not grant, and the
+lane process necessarily holds its own provider credential in its environment.
+The controls are the injected rules above, the audited lane branch, and the
+coordinator's review of the resulting diff before anything is merged or
+pushed onward. Do not describe the allowlist as preventing those actions.
+
 ### always
 
 - `Read`

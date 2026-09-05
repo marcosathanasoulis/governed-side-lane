@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.2 - 2026-09-05
+
+- Project connector discovery is host-specific: a Claude lane reads the
+  repository's `.mcp.json`, a Codex lane its `.codex/config.toml`, so a
+  connector configured only for the other host is not reported as evidence.
+- AGENTS.md linkage also ignores modal negations ("must not treat ... as
+  authoritative", "should not consider ... the source of truth").
+- `config/lane-governance.md` states plainly that the execute tool allowlist is
+  an approval boundary for headless sessions, not a security boundary: allowed
+  interpreters can perform actions a capability did not grant, and the controls
+  are the injected rules, the audited lane branch, and coordinator review.
+- The adapter type-alias test no longer calls
+  `typing.get_type_hints` on Python 3.9, where PEP 604 unions in the
+  adapter's other annotations cannot be evaluated; it asserts the aliases are
+  real `Union`/`Callable` types on every supported version instead.
+
 ## 0.3.1 - 2026-09-04
 
 - The execute-lane tool allowlist is now a section of the canonical

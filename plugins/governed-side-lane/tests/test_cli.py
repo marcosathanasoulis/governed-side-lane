@@ -241,6 +241,37 @@ class SideLaneTests(unittest.TestCase):
         self.assertIn("glm\tdirect-zai\tglm-5.3\tprovider-key\tbillable", text)
 
 
+class ConnectorDiscoveryTests(unittest.TestCase):
+    def test_project_connector_files_are_host_specific(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / ".mcp.json").write_text('{"mcpServers": {"playwright": {"command": "npx"}}}', encoding="utf-8")
+            (repo / ".codex").mkdir()
+            (repo / ".codex" / "config.toml").write_text('[mcp_servers.gitnexus]\ncommand = "gitnexus"\n', encoding="utf-8")
+            with mock.patch("side_lane.cli.Path.home", return_value=repo / "no-home"), \
+                 mock.patch.dict(os.environ, {"CODEX_HOME": str(repo / "no-codex-home")}):
+                claude_names = cli._discover_mcp_names("claude", repo)
+                codex_names = cli._discover_mcp_names("codex", repo)
+        self.assertEqual(claude_names, {"playwright"})
+        self.assertEqual(codex_names, {"gitnexus"})
+
+    def test_empty_codex_home_falls_back_to_the_default_not_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd, home = Path(directory) / "cwd", Path(directory) / "home"
+            cwd.mkdir(); (home / ".codex").mkdir(parents=True)
+            (cwd / "config.toml").write_text('[mcp_servers.leaked]\ncommand = "x"\n', encoding="utf-8")
+            (home / ".codex" / "config.toml").write_text('[mcp_servers.expected]\ncommand = "x"\n', encoding="utf-8")
+            previous = os.getcwd()
+            os.chdir(cwd)
+            try:
+                with mock.patch("side_lane.cli.Path.home", return_value=home), \
+                     mock.patch.dict(os.environ, {"CODEX_HOME": "  "}):
+                    names = cli._discover_mcp_names("codex", None)
+            finally:
+                os.chdir(previous)
+        self.assertEqual(names, {"expected"})
+
+
 class ExecuteLanePermissionTests(SideLaneTests):
     def test_playwright_capability_is_reported_from_connector_names_only(self) -> None:
         config = cli.load_config()

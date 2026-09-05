@@ -349,10 +349,13 @@ def _capability_report(config: Mapping[str, Any], host: str, mode: str, provider
 
 def _discover_mcp_names(host: str, repo: Path | None = None) -> set[str]:
     names: set[str] = set()
-    paths = ([Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "config.toml"] if host == "codex"
+    codex_home = Path(os.environ.get("CODEX_HOME", "").strip() or Path.home() / ".codex")
+    paths = ([codex_home / "config.toml"] if host == "codex"
              else [Path.home() / ".claude.json", Path.home() / ".claude" / "settings.json"])
     if repo is not None:
-        paths += [repo / ".mcp.json", repo / ".codex" / "config.toml"]
+        # Each host reads only its own project connector file; a lane inherits
+        # the selected host's connectors, never the other host's.
+        paths.append(repo / ".codex" / "config.toml" if host == "codex" else repo / ".mcp.json")
     for path in paths:
         if not path.is_file():
             continue
