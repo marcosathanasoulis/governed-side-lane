@@ -174,6 +174,21 @@ class WorktreeRootTests(WorktreeTests):
             with self.assertRaisesRegex(worktrees.WorktreeError, "outside the repository"):
                 worktrees.resolve_worktree_root(repo, bad)
 
+    def test_symlink_back_into_the_repository_is_refused(self) -> None:
+        repo = self.make_repo()
+        link = repo.parent / "lanes-link"
+        link.symlink_to(repo / "nested-lanes")
+        with self.assertRaisesRegex(worktrees.WorktreeError, "outside the repository"):
+            worktrees.resolve_worktree_root(repo, str(link))
+        via_parent = repo.parent / "parent-link"
+        via_parent.symlink_to(repo)
+        with self.assertRaisesRegex(worktrees.WorktreeError, "outside the repository"):
+            worktrees.resolve_worktree_root(repo, str(via_parent / "sub"))
+        outside = repo.parent / "outside-link"
+        (repo.parent / "real-outside").mkdir()
+        outside.symlink_to(repo.parent / "real-outside")
+        self.assertEqual(worktrees.resolve_worktree_root(repo, str(outside)), outside)
+
 
 if __name__ == "__main__":
     unittest.main()

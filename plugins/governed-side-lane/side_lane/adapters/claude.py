@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Union
 from urllib.parse import urlparse
 
 from side_lane.governance import known_capabilities, lane_system_prompt, tool_policy
@@ -57,7 +57,7 @@ class ClaudeAdapterError(RuntimeError):
     """A Claude route cannot be safely launched."""
 
 
-Capabilities = "tuple[str, ...] | list[str] | frozenset[str]"
+Capabilities = Union[tuple[str, ...], list[str], frozenset[str]]
 
 
 def _capability_set(capabilities: Capabilities) -> frozenset[str]:

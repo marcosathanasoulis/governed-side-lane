@@ -100,7 +100,11 @@ def resolve_worktree_root(repo: Path, override: str | None = None, *,
     candidate = Path(os.path.normpath(candidate))
     if candidate == default:
         return default
-    if candidate == repo or repo in candidate.parents:
+    # Compare real paths so a symlink (or symlinked segment) that points back
+    # into the repository cannot create an un-excluded nested checkout.
+    real_candidate = Path(os.path.realpath(candidate))
+    real_repo = Path(os.path.realpath(repo))
+    if real_candidate == real_repo or real_candidate.is_relative_to(real_repo):
         raise WorktreeError(
             f"worktree root must be outside the repository (or the default {default}): {candidate}"
         )
