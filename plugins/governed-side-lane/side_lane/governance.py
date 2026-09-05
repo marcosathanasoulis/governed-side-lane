@@ -19,7 +19,11 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 GOVERNANCE_PATH = PACKAGE_ROOT / "config" / "lane-governance.md"
 MODELS_PATH = PACKAGE_ROOT / "config" / "models.json"
 NEGATED_CLAIM = re.compile(
+    # "is not currently/really/yet the source of truth": allow one qualifying
+    # adverb between the negation and the claim, but never "only" ("not only
+    # authoritative but required" is an affirmative claim).
     r"(?:\b(?:is|are|remains?|be|being|been)\s+(?:not|no longer)|\b(?:isn't|aren't|not))"
+    r"(?:\s+(?!only\b)(?:\w+ly|yet|now|still|ever|even|anymore))?"
     r"\s+(?:the\s+|an?\s+)?(?:authoritative|source of truth)\b"
     # "never treat ... as authoritative", "must not treat ... as the source of truth",
     # "should not consider ... authoritative", "do not read ... as authoritative"
