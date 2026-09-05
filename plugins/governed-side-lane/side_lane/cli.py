@@ -162,6 +162,7 @@ def make_parser() -> argparse.ArgumentParser:
     run.add_argument("--model", required=True)
     run.add_argument("--repo", required=True)
     run.add_argument("--lane-name")
+    run.add_argument("--worktree-root", help="directory for lane worktrees; default <repo>/.side-lanes/worktrees, or $SIDE_LANE_WORKTREE_ROOT; relative paths are anchored to the repo")
     run.add_argument("--capability", action="append", default=[])
     run.add_argument("--approve-billable-route", action="store_true")
     prompt = run.add_mutually_exclusive_group(required=True)
@@ -393,7 +394,7 @@ def _launch(args: argparse.Namespace, config: Mapping[str, Any], repo: Path, pro
         raise SideLaneError("billable route requires explicit --approve-billable-route for this run")
     executable = _require_host_executable(args.host)
     capabilities = tuple(sorted(set(args.capability)))
-    lane = create_worktree(repo, args.lane_name)
+    lane = create_worktree(repo, args.lane_name, worktree_root=getattr(args, "worktree_root", None))
     secret: str | None = None
     try:
         if provider_config["auth_method"] == "oauth":

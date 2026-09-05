@@ -34,7 +34,11 @@ never retry or fall back silently.
 The default packaged GLM gateway is direct Z.AI; OpenRouter is neither required
 nor packaged as a default developer route.
 
-Both modes require `--lane-name <name>` and use a dedicated worktree. Use
+Both modes require `--lane-name <name>` and use a dedicated worktree. Lane
+worktrees default to `<repo>/.side-lanes/worktrees` (excluded from `git status`
+via `.git/info/exclude`); when the governed repository's rules require
+worktrees in a sibling directory, pass `--worktree-root ../<dir>` or set
+`SIDE_LANE_WORKTREE_ROOT`, and the runner creates them there instead. Use
 `--mode review` for strict read-only/no-MCP investigation; its clean disposable
 worktree is audited and removed. Use `--mode execute` for implementation and
 retain its worktree for coordinator inspection. Add only capabilities the task

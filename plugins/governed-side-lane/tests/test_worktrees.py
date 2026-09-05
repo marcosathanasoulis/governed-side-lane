@@ -143,5 +143,36 @@ class SideLaneExclusionTests(WorktreeTests):
         self.assertEqual(exclude.read_text(encoding="utf-8"), "*.log\n.side-lanes/\n")
 
 
+class WorktreeRootTests(WorktreeTests):
+    def test_sibling_root_is_used_and_needs_no_exclusion(self) -> None:
+        repo = self.make_repo()
+        root = repo.parent / "lanes"
+        lane = worktrees.create_worktree(repo, "task", worktree_root=str(root))
+        self.assertEqual(lane.worktree.parent.resolve(), root.resolve())
+        self.assertTrue((lane.worktree / ".git").exists())
+        self.assertFalse((repo / ".side-lanes").exists())
+        self.assertFalse((repo / ".git" / "info" / "exclude").exists())
+        self.assertEqual(subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
+                                        check=True, capture_output=True, text=True).stdout, "")
+
+    def test_relative_root_is_anchored_to_the_repository(self) -> None:
+        repo = self.make_repo()
+        lane = worktrees.create_worktree(repo, "task", worktree_root="../side-lanes-elsewhere")
+        self.assertEqual(lane.worktree.parent.resolve(), (repo.parent / "side-lanes-elsewhere").resolve())
+
+    def test_environment_override_and_default(self) -> None:
+        repo = self.make_repo()
+        self.assertEqual(worktrees.resolve_worktree_root(repo, env={}), repo / ".side-lanes" / "worktrees")
+        self.assertEqual(worktrees.resolve_worktree_root(repo, env={"SIDE_LANE_WORKTREE_ROOT": "../x"}), (repo.parent / "x"))
+        self.assertEqual(worktrees.resolve_worktree_root(repo, "", env={"SIDE_LANE_WORKTREE_ROOT": "../x"}), (repo.parent / "x"))
+        self.assertEqual(worktrees.resolve_worktree_root(repo, ".side-lanes/worktrees"), repo / ".side-lanes" / "worktrees")
+
+    def test_nested_non_default_root_is_refused(self) -> None:
+        repo = self.make_repo()
+        for bad in ("lanes", ".", str(repo / "sub"), ".side-lanes/other"):
+            with self.assertRaisesRegex(worktrees.WorktreeError, "outside the repository"):
+                worktrees.resolve_worktree_root(repo, bad)
+
+
 if __name__ == "__main__":
     unittest.main()
