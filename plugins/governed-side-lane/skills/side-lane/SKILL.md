@@ -6,28 +6,56 @@ description: Route an approved review or implementation task to an exact native 
 # Side lane
 
 Use the [bundled runner](../../bin/side-lane), resolving that link relative to
-this `SKILL.md` and invoking the resulting absolute path. On Unix-like hosts it
-is executable directly; on Windows invoke it with the configured Python 3
-launcher. Do not install software, modify global instructions, or look for a
-private source checkout when the bundled runner is present.
+this `SKILL.md` and invoking the resulting absolute path.
+Resolve any symlink in this `SKILL.md` path before resolving that relative link
+so an installed host-specific overlay, route configuration, and credential
+service remain authoritative. A companion skill or executable named
+`side-lane` on `PATH` does not prove that this core skill is installed or
+configured. On Unix-like hosts the runner is executable directly; on Windows
+invoke it with the configured Python 3 launcher. Do not install software,
+modify global instructions, or look for a private source checkout when the
+bundled runner is present.
 
 This skill is distributed to both Codex and Claude Code. Each product loads its
 own skill wrapper, CLI, OAuth session, and connectors; neither product borrows
 the other's identity or configuration.
 
-Before routing, run `side-lane list` and select an exact host, provider, gateway,
-and model. Native Codex/OpenAI and Claude routes use the selected host's existing
-signed-in OAuth subscription. If OAuth is absent or expired, stop and offer that
-host's sign-in/refresh command. Never silently substitute a model, provider,
-gateway, or paid key route.
+Inspect the resolved runner's help. `list` shows configured route inventory, not
+current readiness. For the exact host, mode, provider, model, and repository,
+run `check-capabilities`; treat its OAuth/credential result as presence-only and
+never retrieve a secret value. Use `recommend` separately for task eligibility.
+Record `absent`, `configured`, `auth-or-tool-missing`, `task-unqualified`, or
+`eligible` with evidence source, observation time, and reason. Native
+Codex/OpenAI and Claude routes use the selected host's existing signed-in OAuth
+subscription. If OAuth is absent or expired, stop and offer that host's
+sign-in/refresh command; never log in automatically. Never silently substitute
+a model, provider, gateway, or paid key route.
+
+For Prompt it staffing, inspect the current runtime and documented lane
+inventory for exact available model names and supplied capability descriptions.
+Compare qualified Anthropic/Claude and Codex models with the same task-relative
+rubric and record the exact assignment reason; provider brand alone is not
+capability or reviewer-independence evidence.
+For ordinary work, choose the least-cost or most-efficient eligible model that
+meets the task's quality, reasoning, context, tools, host, and authority needs.
+Honor explicit developer/user preferences and stated usage or surplus
+constraints, record material tradeoffs, and never probe quotas or invent cost
+when reviewed evidence is missing. Provider diversity alone does not justify an
+independent second opinion; require a distinct question and decision value based
+on uncertainty, non-determinism, impact, irreversibility, material disagreement
+risk, or an explicit acceptance gate.
 
 GLM is optional and enters staffing only when the user explicitly enables it.
+Its only selectable model is the fixed `glm-5.3`; never propose another GLM
+model or fallback.
+It may appear as configured inventory before enablement; exclude it from
+staffing until the explicit GLM gate passes.
 It is execute-only: review mode cannot use a provider key because canonical
 review governance forbids secret access.
 It uses an exact configured provider/gateway and the user's prepaid flat-rate
 subscription, so its marginal task cost is zero while available. It can rank
 cheapest only after the same worker-host capability, task-evidence, and quality
-gates. Before credential lookup or launch, obtain explicit approval for that
+gates. Before retrieving a credential value or launching, obtain explicit approval for that
 key-backed run and pass the compatibility flag `--approve-billable-route`.
 If GLM reports its temporary quota pause, stop and return for a new exact route;
 never retry or fall back silently.
@@ -50,6 +78,15 @@ missing or returns no eligible route, Prompt it continues on the originating
 host. The coordinator stays fixed while Codex and Claude worker hosts are
 qualified independently against their own OAuth, connectors, and tools.
 Recommendations are capability/evidence gated and never dispatch a lane.
+Coordinator origin does not select a provider: Codex-origin staffing may
+consider configured native Claude and fixed `glm-5.3` on its Claude worker;
+Claude-origin staffing may consider configured native Codex and the same
+explicitly enabled fixed GLM route on its Claude worker.
+During Prompt it research, the runner may launch a qualified review lane only
+when the user has explicitly authorized that bounded external research team;
+generic Prompt it consent and recommendation output do not authorize launch.
+Review governance still forbids MCP/connectors and secrets. Execute lanes,
+including GLM, retain their separate approval gates.
 
 For durable context that must survive movement between direct Codex, direct
 Claude Code, and side lanes, follow the installed pointer to

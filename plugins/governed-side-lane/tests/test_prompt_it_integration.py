@@ -15,7 +15,7 @@ SKILL = (
 class PromptItIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.text = SKILL.read_text(encoding="utf-8")
+        cls.text = " ".join(SKILL.read_text(encoding="utf-8").split())
 
     def test_optional_runner_preserves_normal_prompt_it_flow(self) -> None:
         self.assertIn("normal Prompt it workflow remains fully usable", self.text)
@@ -28,8 +28,19 @@ class PromptItIntegrationTests(unittest.TestCase):
         self.assertIn("recommend", self.text)
         self.assertIn("presence-only", self.text)
         self.assertIn("never read or infer", self.text)
-        self.assertIn("Prompt it approval remains required", self.text)
+        self.assertIn("generic Prompt it invocation never authorizes dispatch", self.text)
         self.assertIn("never as authorization", self.text)
+
+    def test_preapproval_dispatch_requires_bounded_external_research_authority(
+        self,
+    ) -> None:
+        self.assertIn("explicitly authorized a bounded external research team", self.text)
+        self.assertIn("qualified `review` route", self.text)
+        self.assertIn("All implementation dispatch waits for execution-brief approval", self.text)
+        self.assertNotIn(
+            "Prompt it approval remains required before any external lane is dispatched",
+            self.text,
+        )
 
     def test_coordinator_stays_fixed_and_each_worker_host_is_hard_gated(self) -> None:
         self.assertIn("keeps its Codex coordinator", self.text)
