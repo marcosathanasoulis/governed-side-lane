@@ -120,6 +120,28 @@ class AllowedToolsTests(unittest.TestCase):
         self.assertEqual(tools, ("Read", "Edit", "Write", "Glob", "Grep"))
         self.assertFalse(any(tool.startswith("Bash(") for tool in tools))
 
+    def test_playwright_grants_only_standard_browser_tools_in_execute(self) -> None:
+        expected = (
+            "mcp__playwright__browser_navigate",
+            "mcp__playwright__browser_snapshot",
+            "mcp__playwright__browser_take_screenshot",
+            "mcp__playwright__browser_resize",
+            "mcp__playwright__browser_click",
+            "mcp__playwright__browser_press_key",
+            "mcp__playwright__browser_evaluate",
+            "mcp__playwright__browser_tabs",
+            "mcp__playwright__browser_close",
+            "mcp__playwright__browser_wait_for",
+            "mcp__playwright__browser_console_messages",
+            "mcp__playwright__browser_network_requests",
+            "mcp__playwright__browser_fill_form",
+        )
+        base = claude.allowed_tools("execute", ())
+        self.assertEqual(claude.allowed_tools("execute", ("playwright",)), base + expected)
+        self.assertEqual(claude.allowed_tools("execute", ()), base)
+        self.assertEqual(claude.allowed_tools("review", ("playwright",)), ())
+        self.assertFalse(any("browser_install" in tool or "browser_run_code" in tool or tool == "mcp__playwright__*" for tool in expected))
+
     def test_shell_or_workspace_write_adds_ordinary_dev_commands_not_push(self) -> None:
         for capability in ("shell", "workspace-write"):
             tools = claude.allowed_tools("execute", (capability,))
