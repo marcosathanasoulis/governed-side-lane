@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0 - 2026-09-05
+
+- Discover the installed core runner and configured providers in either host direction; preserve wrapper overlays and distinguish presence, task eligibility and consent.
+
+- Select provider-neutral economical qualified routes from current supplied descriptions; GLM remains the explicitly enabled fixed `glm-5.3` route.
+- Require a distinct, justified question for independent second opinions; provider diversity alone adds no review requirement.
+- Connect Prompt it task graphs to exact, capability-qualified worker assignments and explicit readiness dependencies.
+- Support explicitly authorized bounded review research and targeted second opinions before execution-brief approval; generic discovery remains presence-only.
+- Preserve review-mode isolation, execute/key-backed approval boundaries and the originating coordinator's ownership. Runtime governance and route catalogs are unchanged.
+
 ## 0.3.5 - 2026-09-05
 
 - `ensure_lane_exclusion` upgrades a legacy unanchored `.side-lanes/` entry
