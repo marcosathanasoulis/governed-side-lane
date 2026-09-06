@@ -66,6 +66,11 @@ def main() -> int:
         except (OSError, json.JSONDecodeError) as exc:
             problems.append(f"invalid JSON {path.relative_to(ROOT)}: {exc}")
             continue
+        if path == ROOT / ".claude-plugin" / "marketplace.json":
+            entries = [entry for entry in payload.get("plugins", [])
+                       if entry.get("name") == "governed-side-lane"]
+            if len(entries) != 1 or entries[0].get("version") != EXPECTED_VERSION:
+                problems.append("wrong or missing Claude marketplace plugin version")
         if path.name == "plugin.json":
             if payload.get("name") != "governed-side-lane":
                 problems.append(f"wrong plugin name: {path.relative_to(ROOT)}")

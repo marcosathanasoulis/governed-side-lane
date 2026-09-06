@@ -15,8 +15,7 @@ SKILL = (
 class PromptItIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.raw_text = SKILL.read_text(encoding="utf-8")
-        cls.text = " ".join(cls.raw_text.split())
+        cls.text = " ".join(SKILL.read_text(encoding="utf-8").split())
 
     def test_optional_runner_preserves_normal_prompt_it_flow(self) -> None:
         self.assertIn("normal Prompt it workflow remains fully usable", self.text)

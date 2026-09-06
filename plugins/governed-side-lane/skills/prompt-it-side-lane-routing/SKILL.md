@@ -11,7 +11,7 @@ it workflow remains fully usable when `side-lane` is not installed or has no
 qualifying route.
 
 This is an optional integration for users who already have a compatible
-Prompt-it workflow. It is not required to use the core side-lane skill. Never
+Prompt it workflow. It is not required to use the core side-lane skill. Never
 require a private checkout or organization-specific global configuration.
 
 ## Resolve the installed core and runner
