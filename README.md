@@ -90,6 +90,10 @@ explicitly configured, key-backed, and potentially billable.
   prompt, so an MCP tool is callable only when a granted capability allowlists
   it. There `gitnexus` and `codegraph` grant the read-only query tools of those
   code-graph servers and index-mutating GitNexus tools are never granted.
+  Because those grants name the server (`mcp__gitnexus__*`, `mcp__codegraph__*`),
+  `check-capabilities` reports the capability `present` only when a server is
+  registered under exactly that name; a near-miss such as `gitnexus-local` is
+  reported as `name-mismatch` and blocks the launch gate.
   Codex execute lanes use Codex's own sandbox semantics, not this allowlist.
 - Native Codex and Claude routes use each host's own OAuth session.
 - Optional GLM is execute-only, explicit, key-backed, and never a fallback.
