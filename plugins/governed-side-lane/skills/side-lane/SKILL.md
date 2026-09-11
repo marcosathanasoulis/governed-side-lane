@@ -109,6 +109,11 @@ Execute lanes also inherit the host's configured MCP servers (for example,
 Playwright, when the `playwright` capability reports as present via
 `check-capabilities`). Review mode hides every MCP server with
 `--strict-mcp-config`, so no capability makes a connector available there.
+A connected MCP server is callable in a headless execute lane only when a
+granted capability allowlists its tools: pass `--capability gitnexus` and/or
+`--capability codegraph` when the worker should query those code graphs.
+Only their read-only query tools are granted; GitNexus index mutation
+(`analyze`, `clean`, `group_sync`, non-dry-run `rename`) never is.
 
 ## AGENTS.md linkage
 

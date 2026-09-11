@@ -41,6 +41,12 @@ loading.
 - A workflow or messaging write is allowed only when the approved task names
   that exact update and recipient or object. Make only that update through the
   selected worker host's connector and report exactly what changed.
+- Code-graph connectors are read-only. With the `gitnexus` capability, call
+  `list_repos` first and report the indexed path, branch, and commit against
+  the lane worktree HEAD; treat a mismatch as stale or partial coverage. Never
+  run `analyze`, `clean`, `group_sync`, or a non-dry-run `rename`, and never
+  register a lane worktree as an index. With the `codegraph` capability, the
+  checkout-local graph may rebuild its own ignored database and nothing else.
 - Stop and report when an action exceeds these boundaries or its authority is
   uncertain.
 
@@ -137,3 +143,31 @@ pushed onward. Do not describe the allowlist as preventing those actions.
 - `Bash(git push * --mirror*)`
 - `Bash(git push +*)`
 - `Bash(git push * +*)`
+
+### gitnexus
+
+- `mcp__gitnexus__api_impact`
+- `mcp__gitnexus__check`
+- `mcp__gitnexus__context`
+- `mcp__gitnexus__cypher`
+- `mcp__gitnexus__detect_changes`
+- `mcp__gitnexus__explain`
+- `mcp__gitnexus__group_list`
+- `mcp__gitnexus__impact`
+- `mcp__gitnexus__list_repos`
+- `mcp__gitnexus__pdg_query`
+- `mcp__gitnexus__query`
+- `mcp__gitnexus__route_map`
+- `mcp__gitnexus__shape_check`
+- `mcp__gitnexus__tool_map`
+- `mcp__gitnexus__trace`
+
+### codegraph
+
+- `mcp__codegraph__find_symbol`
+- `mcp__codegraph__find_callers`
+- `mcp__codegraph__find_callees`
+- `mcp__codegraph__find_importers`
+- `mcp__codegraph__neighbors`
+- `mcp__codegraph__impact_of`
+- `mcp__codegraph__path_between`

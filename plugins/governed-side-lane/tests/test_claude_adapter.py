@@ -120,6 +120,25 @@ class AllowedToolsTests(unittest.TestCase):
         self.assertEqual(tools, ("Read", "Edit", "Write", "Glob", "Grep"))
         self.assertFalse(any(tool.startswith("Bash(") for tool in tools))
 
+    def test_graph_capabilities_grant_read_only_mcp_tools_in_execute(self) -> None:
+        gitnexus = tuple(f"mcp__gitnexus__{name}" for name in (
+            "api_impact", "check", "context", "cypher", "detect_changes", "explain",
+            "group_list", "impact", "list_repos", "pdg_query", "query", "route_map",
+            "shape_check", "tool_map", "trace"))
+        codegraph = tuple(f"mcp__codegraph__{name}" for name in (
+            "find_symbol", "find_callers", "find_callees", "find_importers",
+            "neighbors", "impact_of", "path_between"))
+        base = claude.allowed_tools("execute", ())
+        self.assertEqual(claude.allowed_tools("execute", ("gitnexus",)), base + gitnexus)
+        self.assertEqual(claude.allowed_tools("execute", ("codegraph",)), base + codegraph)
+        self.assertEqual(claude.allowed_tools("execute", ("gitnexus", "codegraph")), base + gitnexus + codegraph)
+        # Index-mutating GitNexus tools stay ungranted; no wildcard grants.
+        for tool in claude.allowed_tools("execute", ("gitnexus", "codegraph")):
+            self.assertNotRegex(tool, r"rename|group_sync|analyze|clean|__\*$")
+        self.assertFalse(any(tool.startswith("mcp__") for tool in base))
+        self.assertEqual(claude.allowed_tools("review", ("gitnexus", "codegraph")), ())
+        self.assertEqual(claude.disallowed_tools("execute", ("gitnexus", "codegraph")), ())
+
     def test_shell_or_workspace_write_adds_ordinary_dev_commands_not_push(self) -> None:
         for capability in ("shell", "workspace-write"):
             tools = claude.allowed_tools("execute", (capability,))

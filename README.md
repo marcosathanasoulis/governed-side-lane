@@ -85,7 +85,11 @@ explicitly configured, key-backed, and potentially billable.
   mode never receives an allowlist.
 - Execute lanes see the host's configured MCP servers (for example
   Playwright, tracked as the `playwright` capability); review mode always
-  hides MCP servers regardless of capability.
+  hides MCP servers regardless of capability. A connected server is not a
+  usable one: a headless lane cannot approve a tool prompt, so an MCP tool is
+  callable only when a granted capability allowlists it. `gitnexus` and
+  `codegraph` grant the read-only query tools of those code-graph servers;
+  index-mutating GitNexus tools are never granted.
 - Native Codex and Claude routes use each host's own OAuth session.
 - Optional GLM is execute-only, explicit, key-backed, and never a fallback.
 - Host-private memory and connectors are never presented as synchronized.
