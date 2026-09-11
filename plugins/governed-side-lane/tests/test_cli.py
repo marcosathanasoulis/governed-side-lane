@@ -305,6 +305,11 @@ class ExecuteLanePermissionTests(SideLaneTests):
                  mock.patch("side_lane.cli._discover_mcp_names", return_value=set()):
                 absent = cli._capability_report(config, "claude", "execute", None, None)
             self.assertEqual(absent["capability_evidence"][capability]["state"], "unknown")
+            # Codex renders no fixed mcp__ namespace grants, so a near-miss name stays usable there.
+            with mock.patch("side_lane.cli.shutil.which", return_value="/bin/tool"), \
+                 mock.patch("side_lane.cli._discover_mcp_names", return_value={f"{capability}-local"}):
+                codex = cli._capability_report(config, "codex", "execute", None, None)
+            self.assertEqual(codex["capability_evidence"][capability]["state"], "present")
 
     def test_execute_launch_forwards_capabilities_and_reports_allowed_tools(self) -> None:
         repo = self.repo()

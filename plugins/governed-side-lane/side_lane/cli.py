@@ -320,8 +320,8 @@ def _capability_report(config: Mapping[str, Any], host: str, mode: str, provider
         "workspace-write": {"state": "verified" if mode == "execute" else "unavailable", "basis": "active lane mode"},
         "shell": {"state": "verified" if runtime else "unavailable", "basis": "selected host executable"},
         "git-push": {"state": "present" if shutil.which("git") else "unavailable", "basis": "git executable; remote write authority not tested"},
-        "gitnexus": _graph_connector_evidence("gitnexus", mcp_names),
-        "codegraph": _graph_connector_evidence("codegraph", mcp_names),
+        "gitnexus": _graph_connector_evidence("gitnexus", mcp_names, host),
+        "codegraph": _graph_connector_evidence("codegraph", mcp_names, host),
         "gcloud-read": {"state": "present" if shutil.which("gcloud") else "unavailable", "basis": "gcloud executable; account/project access not tested"},
         "secret-use": {"state": "unknown", "basis": "credential values and access are never tested during preflight"},
         "database-read": {"state": "present" if shutil.which("psql") else "unavailable", "basis": "psql executable; database access not tested"},
@@ -347,17 +347,23 @@ def _capability_report(config: Mapping[str, Any], host: str, mode: str, provider
     return report
 
 
-def _graph_connector_evidence(capability: str, mcp_names: set[str]) -> dict[str, str]:
-    """Presence evidence for a code-graph connector whose grants use a fixed namespace.
+def _graph_connector_evidence(capability: str, mcp_names: set[str], host: str) -> dict[str, str]:
+    """Presence evidence for a code-graph connector.
 
-    The execute allowlist grants ``mcp__<capability>__*`` tool IDs, and a host
-    embeds the configured server name in every tool ID exactly. Only a server
-    registered under that exact name is therefore callable; a server that merely
-    contains the word (``gitnexus-local``) would pass a substring check and then
-    receive no usable grant, so it is reported as ``name-mismatch`` and fails the
-    launch gate like any non-present state.
+    Only the Claude execute adapter renders the fixed ``mcp__<capability>__*``
+    grants, and Claude embeds the configured server name in every tool ID
+    exactly. On that host only a server registered under the exact name is
+    callable; one that merely contains the word (``gitnexus-local``) would pass
+    a substring check and then receive no usable grant, so it is reported as
+    ``name-mismatch`` and fails the launch gate like any non-present state.
+    Codex lanes inherit their configured MCP servers directly with no such
+    allowlist, so connector-name presence remains the evidence there.
     """
 
+    if host != "claude":
+        if any(capability in name.lower() for name in mcp_names):
+            return {"state": "present", "basis": "connector-name metadata only; Codex lanes inherit configured MCP servers directly"}
+        return {"state": "unknown", "basis": "connector-name metadata only"}
     if capability in mcp_names:
         return {"state": "present", "basis": f"connector registered under the exact name {capability!r}; tool access not tested"}
     similar = sorted(name for name in mcp_names if capability in name.lower())
