@@ -11,6 +11,8 @@ class _JsonNames:
         self.stream = stream
         self.pending = ""
         self.names: set[str] = set()
+        self.scopes: dict[str, set[tuple[str, ...]]] = {}
+        self._path: list[str] = []
 
     def _get(self) -> str:
         if self.pending:
@@ -82,7 +84,15 @@ class _JsonNames:
             first = self._nonspace()
             if capture_names:
                 self.names.add(key)
-            self._value(first, capture_names=(key == "mcpServers"))
+                # Scope = the key path that leads to this ``mcpServers`` object,
+                # excluding the ``mcpServers`` key itself: ``()`` at the root,
+                # ``("projects", "/path")`` for a Claude per-project entry.
+                self.scopes.setdefault(key, set()).add(tuple(self._path[:-1]))
+            self._path.append(key)
+            try:
+                self._value(first, capture_names=(key == "mcpServers"))
+            finally:
+                self._path.pop()
             char = self._nonspace()
             if char == "}":
                 return
@@ -95,12 +105,28 @@ class _JsonNames:
         self._value()
         return self.names
 
+    def parse_scopes(self) -> dict[str, set[tuple[str, ...]]]:
+        self._value()
+        return self.scopes
+
 
 def json_mcp_names(path: Path) -> set[str]:
     """Return only object keys directly under any ``mcpServers`` object."""
 
     with path.open("r", encoding="utf-8", errors="replace") as stream:
         return _JsonNames(stream).parse()
+
+
+def json_mcp_name_scopes(path: Path) -> dict[str, set[tuple[str, ...]]]:
+    """Map each ``mcpServers`` key to the key paths of the objects declaring it.
+
+    Only object keys are retained, never values. A root-level declaration has
+    the scope ``()``; a Claude per-project declaration has
+    ``("projects", "<project path>")``.
+    """
+
+    with path.open("r", encoding="utf-8", errors="replace") as stream:
+        return _JsonNames(stream).parse_scopes()
 
 
 def toml_mcp_names(path: Path) -> set[str]:

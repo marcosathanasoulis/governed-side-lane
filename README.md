@@ -95,7 +95,11 @@ explicitly configured, key-backed, and potentially billable.
   only when a server is registered under exactly that name; a near-miss such
   as `gitnexus-local` is reported as `name-mismatch` and blocks the launch
   gate. Codex lanes inherit their MCP servers directly, so name presence
-  remains the evidence there.
+  remains the evidence there. On the Claude host only root-level `mcpServers`
+  entries of the user config and the repository's own `.mcp.json` count;
+  per-project entries in the user config are keyed by the directory Claude was
+  started in and never reach a lane worktree, so `check-capabilities` lists
+  them under `mcp_connectors_out_of_scope` instead of counting them.
   Codex execute lanes use Codex's own sandbox semantics, not this allowlist.
 - Native Codex and Claude routes use each host's own OAuth session.
 - Optional GLM is execute-only, explicit, key-backed, and never a fallback.

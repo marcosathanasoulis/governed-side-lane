@@ -87,7 +87,7 @@ class SideLaneTests(unittest.TestCase):
     def test_capability_report_uses_auth_metadata_or_override_presence_only(self) -> None:
         config = cli.load_config()
         ready = mock.Mock(ready=True, as_dict=lambda: {"state": "ready", "method": "oauth"})
-        with mock.patch("side_lane.cli.auth_status", return_value=ready), mock.patch("side_lane.cli.shutil.which", return_value="/bin/tool"), mock.patch("side_lane.cli._discover_mcp_names", return_value={"gitnexus"}):
+        with mock.patch("side_lane.cli.auth_status", return_value=ready), mock.patch("side_lane.cli.shutil.which", return_value="/bin/tool"), mock.patch("side_lane.cli._discover_mcp_inventory", return_value=({"gitnexus"}, set())):
             native = cli._capability_report(config, "codex", "execute", "openai", "gpt-5.6-sol")
         self.assertEqual(native["auth"], {"state": "ready", "method": "oauth"})
         self.assertFalse(native["capabilities"]["git-push"])
@@ -255,6 +255,36 @@ class ConnectorDiscoveryTests(unittest.TestCase):
         self.assertEqual(claude_names, {"playwright"})
         self.assertEqual(codex_names, {"gitnexus"})
 
+    def test_claude_per_project_entries_from_other_projects_are_out_of_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "home"
+            repo = Path(directory) / "repo"
+            home.mkdir(); repo.mkdir()
+            (home / ".claude.json").write_text(
+                '{"mcpServers":{"gitnexus":{"command":"g"}},'
+                '"projects":{"/elsewhere":{"mcpServers":{"codegraph":{"command":"c"},"contentful":{"command":"x"}}},'
+                + json.dumps(str(repo)) + ':{"mcpServers":{"zoom":{"command":"z"}}}}}',
+                encoding="utf-8",
+            )
+            (repo / ".mcp.json").write_text('{"mcpServers": {"playwright": {"command": "npx"}}}', encoding="utf-8")
+            with mock.patch("side_lane.cli.Path.home", return_value=home):
+                in_scope, out_of_scope = cli._discover_mcp_inventory("claude", repo)
+                names = cli._discover_mcp_names("claude", repo)
+                with mock.patch("side_lane.cli.shutil.which", return_value="/bin/tool"):
+                    report = cli._capability_report(cli.load_config(), "claude", "execute", None, None, repo)
+        # Root-level user config and the repo's own .mcp.json count; per-project
+        # entries do not, even when keyed by this repo — a lane runs in a fresh worktree.
+        self.assertEqual(in_scope, {"gitnexus", "playwright"})
+        self.assertEqual(out_of_scope, {"codegraph", "contentful", "zoom"})
+        self.assertEqual(names, in_scope)
+        self.assertEqual(report["mcp_connectors"], ["gitnexus", "playwright"])
+        self.assertEqual(report["mcp_connectors_out_of_scope"], ["codegraph", "contentful", "zoom"])
+        self.assertEqual(report["capability_evidence"]["gitnexus"]["state"], "present")
+        codegraph = report["capability_evidence"]["codegraph"]
+        self.assertEqual(codegraph["state"], "unknown")
+        self.assertIn("another project's scope", codegraph["basis"])
+        self.assertNotIn("/elsewhere", json.dumps(report))
+
     def test_empty_codex_home_falls_back_to_the_default_not_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             cwd, home = Path(directory) / "cwd", Path(directory) / "home"
@@ -277,12 +307,12 @@ class ExecuteLanePermissionTests(SideLaneTests):
         config = cli.load_config()
         self.assertIn("playwright", config["capabilities"])
         with mock.patch("side_lane.cli.shutil.which", return_value="/bin/tool"), \
-             mock.patch("side_lane.cli._discover_mcp_names", return_value={"playwright", "gitnexus"}):
+             mock.patch("side_lane.cli._discover_mcp_inventory", return_value=({"playwright", "gitnexus"}, set())):
             report = cli._capability_report(config, "claude", "execute", None, None)
         self.assertEqual(report["capability_evidence"]["playwright"]["state"], "present")
         self.assertIn("host_support_dir", report)
         with mock.patch("side_lane.cli.shutil.which", return_value="/bin/tool"), \
-             mock.patch("side_lane.cli._discover_mcp_names", return_value=set()):
+             mock.patch("side_lane.cli._discover_mcp_inventory", return_value=(set(), set())):
             report = cli._capability_report(config, "claude", "execute", None, None)
         self.assertEqual(report["capability_evidence"]["playwright"]["state"], "unavailable")
 
@@ -290,11 +320,11 @@ class ExecuteLanePermissionTests(SideLaneTests):
         config = cli.load_config()
         for capability in ("gitnexus", "codegraph"):
             with mock.patch("side_lane.cli.shutil.which", return_value="/bin/tool"), \
-                 mock.patch("side_lane.cli._discover_mcp_names", return_value={capability, "playwright"}):
+                 mock.patch("side_lane.cli._discover_mcp_inventory", return_value=({capability, "playwright"}, set())):
                 exact = cli._capability_report(config, "claude", "execute", None, None)
             self.assertEqual(exact["capability_evidence"][capability]["state"], "present")
             with mock.patch("side_lane.cli.shutil.which", return_value="/bin/tool"), \
-                 mock.patch("side_lane.cli._discover_mcp_names", return_value={f"{capability}-local", capability.upper()}):
+                 mock.patch("side_lane.cli._discover_mcp_inventory", return_value=({f"{capability}-local", capability.upper()}, set())):
                 mismatch = cli._capability_report(config, "claude", "execute", None, None)
             evidence = mismatch["capability_evidence"][capability]
             self.assertEqual(evidence["state"], "name-mismatch")
@@ -302,12 +332,12 @@ class ExecuteLanePermissionTests(SideLaneTests):
             self.assertIn(f"mcp__{capability}__*", evidence["basis"])
             self.assertFalse(mismatch["capabilities"][capability])
             with mock.patch("side_lane.cli.shutil.which", return_value="/bin/tool"), \
-                 mock.patch("side_lane.cli._discover_mcp_names", return_value=set()):
+                 mock.patch("side_lane.cli._discover_mcp_inventory", return_value=(set(), set())):
                 absent = cli._capability_report(config, "claude", "execute", None, None)
             self.assertEqual(absent["capability_evidence"][capability]["state"], "unknown")
             # Codex renders no fixed mcp__ namespace grants, so a near-miss name stays usable there.
             with mock.patch("side_lane.cli.shutil.which", return_value="/bin/tool"), \
-                 mock.patch("side_lane.cli._discover_mcp_names", return_value={f"{capability}-local"}):
+                 mock.patch("side_lane.cli._discover_mcp_inventory", return_value=({f"{capability}-local"}, set())):
                 codex = cli._capability_report(config, "codex", "execute", None, None)
             self.assertEqual(codex["capability_evidence"][capability]["state"], "present")
 
@@ -419,7 +449,7 @@ class HostExecutableCliTests(unittest.TestCase):
             with mock.patch("side_lane.cli.shutil.which", return_value=None), \
                  mock.patch.object(hosts, "BUNDLED_CODEX_CANDIDATES", (str(bundled),)), \
                  mock.patch("side_lane.cli.auth_status", return_value=ready) as status, \
-                 mock.patch("side_lane.cli._discover_mcp_names", return_value=set()):
+                 mock.patch("side_lane.cli._discover_mcp_inventory", return_value=(set(), set())):
                 report = cli._capability_report(config, "codex", "execute", "openai", "gpt-5.6-terra")
         self.assertEqual(report["runtime"], str(bundled))
         self.assertEqual(report["capability_evidence"]["shell"]["state"], "verified")

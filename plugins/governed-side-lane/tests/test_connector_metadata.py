@@ -2,7 +2,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from side_lane.connector_metadata import json_mcp_names, toml_mcp_names
+from side_lane.connector_metadata import json_mcp_name_scopes, json_mcp_names, toml_mcp_names
 
 
 class ConnectorMetadataTests(unittest.TestCase):
@@ -14,6 +14,21 @@ class ConnectorMetadataTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(json_mcp_names(path), {"gitnexus", "asana"})
+
+    def test_json_scopes_distinguish_root_from_per_project_declarations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "claude.json"
+            path.write_text(
+                '{"mcpServers":{"gitnexus":{"command":"g"}},'
+                '"projects":{"/home/me/other":{"mcpServers":{"gitnexus":{"env":{"TOKEN":"never"}},"zoom":{"command":"z"}}},'
+                '"/home/me/repo":{"mcpServers":{}}}}',
+                encoding="utf-8",
+            )
+            scopes = json_mcp_name_scopes(path)
+        self.assertEqual(scopes["gitnexus"], {(), ("projects", "/home/me/other")})
+        self.assertEqual(scopes["zoom"], {("projects", "/home/me/other")})
+        self.assertNotIn("TOKEN", scopes)
+        self.assertNotIn("never", str(scopes))
 
     def test_toml_extracts_only_mcp_table_headers(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

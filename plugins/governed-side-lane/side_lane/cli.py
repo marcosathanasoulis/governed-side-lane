@@ -12,7 +12,7 @@ from typing import Any, Mapping, Sequence
 from side_lane import evaluation, routing
 from side_lane.auth import AuthError, auth_status, require_native_oauth
 from side_lane.credentials import CredentialError, credential_present, read_credential
-from side_lane.connector_metadata import json_mcp_names, toml_mcp_names
+from side_lane.connector_metadata import json_mcp_name_scopes, toml_mcp_names
 from side_lane.governance import GovernanceError, validate_repository
 from side_lane.hosts import (
     HostExecutableError,
@@ -314,21 +314,21 @@ def _require_host_executable(host: str) -> str:
 
 def _capability_report(config: Mapping[str, Any], host: str, mode: str, provider: str | None, model: str | None, repo: Path | None = None) -> dict[str, Any]:
     runtime = _host_executable(host)
-    mcp_names = _discover_mcp_names(host, repo)
+    mcp_names, out_of_scope = _discover_mcp_inventory(host, repo)
     lowered = {name.lower() for name in mcp_names}
     evidence = {
         "workspace-write": {"state": "verified" if mode == "execute" else "unavailable", "basis": "active lane mode"},
         "shell": {"state": "verified" if runtime else "unavailable", "basis": "selected host executable"},
         "git-push": {"state": "present" if shutil.which("git") else "unavailable", "basis": "git executable; remote write authority not tested"},
-        "gitnexus": _graph_connector_evidence("gitnexus", mcp_names, host),
-        "codegraph": _graph_connector_evidence("codegraph", mcp_names, host),
+        "gitnexus": _graph_connector_evidence("gitnexus", mcp_names, host, out_of_scope),
+        "codegraph": _graph_connector_evidence("codegraph", mcp_names, host, out_of_scope),
         "gcloud-read": {"state": "present" if shutil.which("gcloud") else "unavailable", "basis": "gcloud executable; account/project access not tested"},
         "secret-use": {"state": "unknown", "basis": "credential values and access are never tested during preflight"},
         "database-read": {"state": "present" if shutil.which("psql") else "unavailable", "basis": "psql executable; database access not tested"},
         "workflow-write": {"state": "present" if any(marker in name for name in lowered for marker in ("asana", "slack", "teams", "github")) else "unknown", "basis": "connector-name metadata only; write authority not tested"},
-        "playwright": {"state": "present" if any("playwright" in name for name in lowered) else "unavailable", "basis": "connector-name metadata only, from the host's user config (may include entries scoped to other projects) and this repository's project config; browser launch not tested; review mode hides all MCP servers"},
+        "playwright": {"state": "present" if any("playwright" in name for name in lowered) else "unavailable", "basis": "connector-name metadata only, from the host's user-global config and this repository's project config; other projects' entries are excluded; browser launch not tested; review mode hides all MCP servers"},
     }
-    report: dict[str, Any] = {"host": host, "mode": mode, "runtime": runtime, "host_support_dir": host_support_dir(host, runtime), "route": "not-requested", "mcp_connectors": sorted(mcp_names)}
+    report: dict[str, Any] = {"host": host, "mode": mode, "runtime": runtime, "host_support_dir": host_support_dir(host, runtime), "route": "not-requested", "mcp_connectors": sorted(mcp_names), "mcp_connectors_out_of_scope": sorted(out_of_scope)}
     if bool(provider) != bool(model):
         raise SideLaneError("provider and model must be supplied together")
     if provider and model:
@@ -347,7 +347,7 @@ def _capability_report(config: Mapping[str, Any], host: str, mode: str, provider
     return report
 
 
-def _graph_connector_evidence(capability: str, mcp_names: set[str], host: str) -> dict[str, str]:
+def _graph_connector_evidence(capability: str, mcp_names: set[str], host: str, out_of_scope: set[str] = frozenset()) -> dict[str, str]:
     """Presence evidence for a code-graph connector.
 
     Only the Claude execute adapter renders the fixed ``mcp__<capability>__*``
@@ -366,6 +366,11 @@ def _graph_connector_evidence(capability: str, mcp_names: set[str], host: str) -
         return {"state": "unknown", "basis": "connector-name metadata only"}
     if capability in mcp_names:
         return {"state": "present", "basis": f"connector registered under the exact name {capability!r}; tool access not tested"}
+    if capability in out_of_scope:
+        return {
+            "state": "unknown",
+            "basis": f"{capability!r} is registered only under another project's scope in the host user config; a lane worktree does not inherit it — register it user-globally or in this repository's .mcp.json",
+        }
     similar = sorted(name for name in mcp_names if capability in name.lower())
     if similar:
         return {
@@ -376,7 +381,25 @@ def _graph_connector_evidence(capability: str, mcp_names: set[str], host: str) -
 
 
 def _discover_mcp_names(host: str, repo: Path | None = None) -> set[str]:
+    """Connector names a lane launched for ``repo`` on ``host`` can actually see."""
+
+    return _discover_mcp_inventory(host, repo)[0]
+
+
+def _discover_mcp_inventory(host: str, repo: Path | None = None) -> tuple[set[str], set[str]]:
+    """Return ``(in_scope, out_of_scope)`` connector names for a lane on ``host``.
+
+    Claude reads MCP servers from the root-level ``mcpServers`` of its user
+    config files and from the ``.mcp.json`` of the directory it is launched in.
+    Its user config also carries per-project entries (``projects.<path>.
+    mcpServers``) keyed by the directory Claude was started in; a lane runs in a
+    fresh worktree, so no such entry applies to it. Those names are reported
+    separately as out of scope instead of being unioned into the inventory.
+    Codex reads flat TOML tables and has no per-project layer in its user config.
+    """
+
     names: set[str] = set()
+    out_of_scope: set[str] = set()
     codex_home = Path(os.environ.get("CODEX_HOME", "").strip() or Path.home() / ".codex")
     paths = ([codex_home / "config.toml"] if host == "codex"
              else [Path.home() / ".claude.json", Path.home() / ".claude" / "settings.json"])
@@ -388,10 +411,17 @@ def _discover_mcp_names(host: str, repo: Path | None = None) -> set[str]:
         if not path.is_file():
             continue
         try:
-            names.update(toml_mcp_names(path) if path.suffix == ".toml" else json_mcp_names(path))
+            if path.suffix == ".toml":
+                names.update(toml_mcp_names(path))
+                continue
+            for name, scopes in json_mcp_name_scopes(path).items():
+                if () in scopes:
+                    names.add(name)
+                else:
+                    out_of_scope.add(name)
         except (OSError, ValueError):
             pass
-    return names
+    return names, out_of_scope - names
 
 
 def _launch(args: argparse.Namespace, config: Mapping[str, Any], repo: Path, prompt: str) -> int:
