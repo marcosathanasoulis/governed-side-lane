@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.3 - 2026-09-11
+
+- Claude-host connector discovery is scope-aware. Only root-level `mcpServers`
+  entries of `~/.claude.json` / `~/.claude/settings.json` and the target
+  repository's `.mcp.json` count as inventory; per-project entries
+  (`projects.<path>.mcpServers`) are keyed by the directory Claude was started
+  in and never apply to a lane worktree, so they no longer make a capability
+  `present`. `check-capabilities` reports them as `mcp_connectors_out_of_scope`,
+  and an exact `gitnexus`/`codegraph` name found only there is `unknown` with a
+  basis saying so. `json_mcp_name_scopes` exposes the key path of each
+  declaration; values are still never materialized (#22).
+
 ## 0.4.2 - 2026-09-10
 
 - `check-capabilities` on the Claude host reports `gitnexus`/`codegraph` as
