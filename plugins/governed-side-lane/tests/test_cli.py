@@ -286,6 +286,31 @@ class ExecuteLanePermissionTests(SideLaneTests):
             report = cli._capability_report(config, "claude", "execute", None, None)
         self.assertEqual(report["capability_evidence"]["playwright"]["state"], "unavailable")
 
+    def test_graph_capabilities_require_the_exact_connector_name(self) -> None:
+        config = cli.load_config()
+        for capability in ("gitnexus", "codegraph"):
+            with mock.patch("side_lane.cli.shutil.which", return_value="/bin/tool"), \
+                 mock.patch("side_lane.cli._discover_mcp_names", return_value={capability, "playwright"}):
+                exact = cli._capability_report(config, "claude", "execute", None, None)
+            self.assertEqual(exact["capability_evidence"][capability]["state"], "present")
+            with mock.patch("side_lane.cli.shutil.which", return_value="/bin/tool"), \
+                 mock.patch("side_lane.cli._discover_mcp_names", return_value={f"{capability}-local", capability.upper()}):
+                mismatch = cli._capability_report(config, "claude", "execute", None, None)
+            evidence = mismatch["capability_evidence"][capability]
+            self.assertEqual(evidence["state"], "name-mismatch")
+            self.assertIn(f"{capability}-local", evidence["basis"])
+            self.assertIn(f"mcp__{capability}__*", evidence["basis"])
+            self.assertFalse(mismatch["capabilities"][capability])
+            with mock.patch("side_lane.cli.shutil.which", return_value="/bin/tool"), \
+                 mock.patch("side_lane.cli._discover_mcp_names", return_value=set()):
+                absent = cli._capability_report(config, "claude", "execute", None, None)
+            self.assertEqual(absent["capability_evidence"][capability]["state"], "unknown")
+            # Codex renders no fixed mcp__ namespace grants, so a near-miss name stays usable there.
+            with mock.patch("side_lane.cli.shutil.which", return_value="/bin/tool"), \
+                 mock.patch("side_lane.cli._discover_mcp_names", return_value={f"{capability}-local"}):
+                codex = cli._capability_report(config, "codex", "execute", None, None)
+            self.assertEqual(codex["capability_evidence"][capability]["state"], "present")
+
     def test_execute_launch_forwards_capabilities_and_reports_allowed_tools(self) -> None:
         repo = self.repo()
         worktree = repo.parent / "execute-worktree"
@@ -342,7 +367,7 @@ class LaunchCapabilityGateTests(SideLaneTests):
         report = {"capability_evidence": {
             "playwright": {"state": "present"}, "git-push": {"state": "present"},
             "shell": {"state": "verified"}, "secret-use": {"state": "unknown"},
-            "gitnexus": {"state": "unavailable"}}, "capabilities": {"shell": True}}
+            "gitnexus": {"state": "unavailable"}, "codegraph": {"state": "name-mismatch"}}, "capabilities": {"shell": True}}
         with mock.patch("side_lane.cli._capability_report", return_value=report), \
              mock.patch("side_lane.cli._require_host_executable", side_effect=cli.SideLaneError("stop here")):
             with self.assertRaisesRegex(cli.SideLaneError, "stop here"):
@@ -351,6 +376,8 @@ class LaunchCapabilityGateTests(SideLaneTests):
                 cli._launch(self._args(["secret-use"]), cli.load_config(), self.repo(), "Implement")
             with self.assertRaisesRegex(cli.SideLaneError, "unavailable: gitnexus"):
                 cli._launch(self._args(["gitnexus"]), cli.load_config(), self.repo(), "Implement")
+            with self.assertRaisesRegex(cli.SideLaneError, "unavailable: codegraph"):
+                cli._launch(self._args(["codegraph"]), cli.load_config(), self.repo(), "Implement")
 
 
 if __name__ == "__main__":

@@ -114,7 +114,10 @@ granted capability allowlists its tools: pass `--capability gitnexus` and/or
 `--capability codegraph` when the worker should query those code graphs.
 Only their read-only query tools are granted there; GitNexus index mutation
 (`analyze`, `clean`, `group_sync`, non-dry-run `rename`) never is. Codex
-execute lanes do not render this allowlist.
+execute lanes do not render this allowlist. The grants name the server, so on
+the Claude host the MCP server must be registered as exactly `gitnexus` /
+`codegraph`; `check-capabilities` reports `name-mismatch` for a near-miss and
+the launch gate refuses it. Codex lanes keep connector-name presence.
 
 ## AGENTS.md linkage
 

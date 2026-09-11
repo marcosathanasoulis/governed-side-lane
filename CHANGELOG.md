@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.2 - 2026-09-10
+
+- `check-capabilities` on the Claude host reports `gitnexus`/`codegraph` as
+  `present` only when an MCP server is registered under exactly that name. A server whose name merely
+  contains the word (for example `gitnexus-local`) is reported as
+  `name-mismatch` with the offending name, because the execute grants target
+  the fixed `mcp__gitnexus__*` / `mcp__codegraph__*` namespaces and such a
+  server would connect without a single callable tool. The launch gate treats
+  `name-mismatch` like any non-present state (#20). Codex lanes inherit their
+  MCP servers directly and keep connector-name presence evidence.
+
 ## 0.4.1 - 2026-09-10
 
 - The `gitnexus` and `codegraph` capabilities now grant their read-only MCP
