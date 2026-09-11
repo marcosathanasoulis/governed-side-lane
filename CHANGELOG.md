@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.1 - 2026-09-10
+
+- The `gitnexus` and `codegraph` capabilities now grant their read-only MCP
+  query tools to Claude-host execute lanes. Previously both names were
+  declared in `models.json` but unlocked no `--allowedTools` rule, so a
+  headless lane connected to the servers yet could not call them. GitNexus
+  index mutation (`analyze`, `clean`, `group_sync`, non-dry-run `rename`)
+  stays ungranted; Execute mode gains a read-only code-graph conduct rule.
+
 ## 0.4.0 - 2026-09-05
 
 - Discover the installed core runner and configured providers in either host direction; preserve wrapper overlays and distinguish presence, task eligibility and consent.

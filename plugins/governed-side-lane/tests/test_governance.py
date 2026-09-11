@@ -167,6 +167,9 @@ class ToolPolicyTests(unittest.TestCase):
         self.assertIn("Bash(git push *)", policy.allowed["git-push"])
         self.assertEqual(policy.denied["git-push"], ("Bash(git push --force*)", "Bash(git push -f*)", "Bash(git push * --force*)", "Bash(git push * -f*)", "Bash(git push --force-with-lease*)", "Bash(git push * --force-with-lease*)", "Bash(git push --mirror*)", "Bash(git push * --mirror*)", "Bash(git push +*)", "Bash(git push * +*)"))
         self.assertTrue(policy.capabilities <= known_capabilities())
+        self.assertIn("mcp__gitnexus__list_repos", policy.allowed["gitnexus"])
+        self.assertNotIn("mcp__gitnexus__rename", policy.allowed["gitnexus"])
+        self.assertIn("mcp__codegraph__find_callers", policy.allowed["codegraph"])
         for rules in list(policy.allowed.values()) + [policy.always]:
             for rule in rules:
                 self.assertNotRegex(rule, r"gcloud|deploy|merge|iam|secret|force")
