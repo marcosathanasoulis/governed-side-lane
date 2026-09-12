@@ -64,6 +64,9 @@ GLM_QUOTA_PAUSE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 SUPPORTED_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
+MCP_READINESS_TIMEOUT_SECONDS = 20
+READINESS_REQUIRED_CAPABILITIES = frozenset({"playwright"})
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 # Capability-gated permission rules for headless execute lanes.
@@ -245,7 +248,17 @@ def build_transport_environment(
     return child
 
 
-def _per_launch_settings(provider: str, model: str, mode: str, base_url: str | None = None) -> str:
+def _required_mcp_servers(capabilities: Capabilities) -> tuple[str, ...]:
+    return tuple(sorted(set(capabilities) & READINESS_REQUIRED_CAPABILITIES))
+
+
+def _per_launch_settings(
+    provider: str,
+    model: str,
+    mode: str,
+    base_url: str | None = None,
+    capabilities: Capabilities = (),
+) -> str:
     """Return nonsecret settings that outrank user/project/local settings.
 
     Execute lanes intentionally run in the user workspace under the user
@@ -256,6 +269,12 @@ def _per_launch_settings(provider: str, model: str, mode: str, base_url: str | N
     """
 
     settings: dict[str, Any] = {"sandbox": {"enabled": False}} if mode == "execute" else {}
+    required_servers = _required_mcp_servers(capabilities)
+    if required_servers:
+        # A capability grant is also explicit approval for the matching
+        # project-scoped MCP server for this one process. Claude otherwise
+        # leaves a fresh worktree's .mcp.json entry pending and omits its tools.
+        settings["enabledMcpjsonServers"] = list(required_servers)
     if provider != NATIVE_PROVIDER:
         settings["env"] = {name: model for name in EXACT_MODEL_ENV_NAMES}
         if base_url is not None:
@@ -345,7 +364,9 @@ def build_command(
                 "stream-json",
                 "--verbose",
                 "--settings",
-                _per_launch_settings(provider, runtime_model, mode, provider_config.get("base_url")),
+                _per_launch_settings(
+                    provider, runtime_model, mode, provider_config.get("base_url"), capabilities
+                ),
             )
         )
         effort = _optional_effort(model_config)
@@ -360,6 +381,46 @@ def build_command(
             command.extend(("--disallowedTools", tool))
     command.extend(("--append-system-prompt", lane_system_prompt(mode, repo_path)))
     return command
+
+
+def _require_mcp_readiness(
+    *, executable: str, cwd: Path, capabilities: Capabilities,
+    env: Mapping[str, str], runner: Runner,
+) -> None:
+    """Health-check capability-required MCP servers before starting a model."""
+
+    for server in _required_mcp_servers(capabilities):
+        settings = json.dumps(
+            {"enabledMcpjsonServers": [server]}, separators=(",", ":"), sort_keys=True
+        )
+        command = [executable, "--settings", settings, "mcp", "get", server]
+        try:
+            completed = runner(
+                command,
+                timeout=MCP_READINESS_TIMEOUT_SECONDS,
+                cwd=cwd,
+                env=dict(env),
+                stdin=subprocess.DEVNULL,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        except OSError as exc:
+            raise ClaudeAdapterError(f"could not check {server} MCP readiness: {exc}") from exc
+        stdout = str(getattr(completed, "stdout", "") or "")
+        connected = any(
+            re.search(r"^\s*Status:\s*[^\w]*Connected\s*$", ANSI_ESCAPE.sub("", line), re.I)
+            for line in stdout.splitlines()
+        )
+        if int(completed.returncode) != 0 or not connected:
+            status = next(
+                (ANSI_ESCAPE.sub("", line).strip() for line in stdout.splitlines()
+                 if "status:" in line.lower()),
+                "status unavailable",
+            )
+            raise ClaudeAdapterError(
+                f"required MCP server {server!r} is not ready before worker launch ({status})"
+            )
 
 
 def _redact(value: object, secret: str | None) -> str:
@@ -382,6 +443,7 @@ def launch(
     env: Mapping[str, str] | None = None,
     secret: str | None = None,
     runner: Runner = None,
+    readiness_runner: Runner = None,
 ) -> LaneResult:
     if provider != NATIVE_PROVIDER and provider != "glm":
         qualification = model_config.get("qualification")
@@ -420,6 +482,11 @@ def launch(
     if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
         raise ClaudeAdapterError("timeout_seconds must be a positive integer")
     active_runner = _bounded_process if runner is None else runner
+    active_readiness_runner = _bounded_process if readiness_runner is None else readiness_runner
+    _require_mcp_readiness(
+        executable=executable, cwd=worktree_path, capabilities=granted,
+        env=child_env, runner=active_readiness_runner,
+    )
     try:
         completed = active_runner(
             command,

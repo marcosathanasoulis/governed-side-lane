@@ -131,6 +131,7 @@ pushed onward. Do not describe the allowlist as preventing those actions.
 
 - `mcp__playwright__browser_navigate`
 - `mcp__playwright__browser_snapshot`
+- `mcp__playwright__browser_find`
 - `mcp__playwright__browser_take_screenshot`
 - `mcp__playwright__browser_resize`
 - `mcp__playwright__browser_click`

@@ -55,6 +55,52 @@ class ClaudeAdapterTests(unittest.TestCase):
         self.assertIn("user,project,local", execute)
         self.assertIn("Injected canonical side-lane governance", execute[-1])
 
+    def test_playwright_execute_approves_only_the_requested_project_server(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            execute = claude.build_command(executable="claude", repo=repo, worktree=lane,
+                provider="claude", model="claude-sonnet-5", provider_config=self.native,
+                model_config={"runtime_model": "claude-sonnet-5", "protocol": "native-claude"},
+                prompt="task", capabilities=("playwright",))
+        settings = json.loads(execute[execute.index("--settings") + 1])
+        self.assertEqual(settings["enabledMcpjsonServers"], ["playwright"])
+        self.assertNotIn("enableAllProjectMcpServers", settings)
+
+    def test_playwright_launch_requires_connected_mcp_before_model_runner(self) -> None:
+        readiness = mock.Mock(return_value=subprocess.CompletedProcess(
+            [], 0, "playwright:\n  Status: ✔ Connected\n", ""))
+        worker = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "done", ""))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            result = claude.launch(executable="claude", repo=repo, worktree=lane,
+                provider="claude", model="claude-sonnet-5", provider_config=self.native,
+                model_config={"runtime_model": "claude-sonnet-5", "protocol": "native-claude"},
+                prompt="task", capabilities=("playwright",), env={"PATH": "/bin"},
+                runner=worker, readiness_runner=readiness)
+        self.assertEqual(result.returncode, 0)
+        readiness_command = readiness.call_args.args[0]
+        self.assertEqual(readiness_command[-3:], ["mcp", "get", "playwright"])
+        self.assertEqual(json.loads(readiness_command[2]), {"enabledMcpjsonServers": ["playwright"]})
+        self.assertEqual(readiness.call_args.kwargs["timeout"], claude.MCP_READINESS_TIMEOUT_SECONDS)
+        worker.assert_called_once()
+
+    def test_playwright_launch_fails_before_model_when_mcp_is_pending(self) -> None:
+        readiness = mock.Mock(return_value=subprocess.CompletedProcess(
+            [], 0, "playwright:\n  Status: ⏸ Pending approval\n", ""))
+        worker = mock.Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            with self.assertRaisesRegex(claude.ClaudeAdapterError, "not ready before worker launch"):
+                claude.launch(executable="claude", repo=repo, worktree=lane,
+                    provider="claude", model="claude-sonnet-5", provider_config=self.native,
+                    model_config={"runtime_model": "claude-sonnet-5", "protocol": "native-claude"},
+                    prompt="task", capabilities=("playwright",), env={"PATH": "/bin"},
+                    runner=worker, readiness_runner=readiness)
+        worker.assert_not_called()
+
     def test_native_environment_scrubs_keys_and_rejects_secret(self) -> None:
         config = {"runtime_model": "claude-sonnet-5", "protocol": "native-claude"}
         child = claude.build_transport_environment({"PATH": "/bin", "ANTHROPIC_API_KEY": "x", "OPENAI_API_KEY": "y"},

@@ -74,6 +74,7 @@ class DevinAdapterTests(unittest.TestCase):
         self.assertIn("Exec(git)", config["permissions"]["allow"])
         self.assertIn("mcp__playwright__browser_navigate", config["permissions"]["allow"])
         self.assertIn("mcp__playwright__browser_click", config["permissions"]["allow"])
+        self.assertIn("mcp__playwright__browser_find", config["permissions"]["allow"])
         self.assertNotIn("mcp__playwright__*", config["permissions"]["allow"])
 
     def test_runtime_config_merges_safe_jsonc_settings_and_preserves_restrictions(self) -> None:
