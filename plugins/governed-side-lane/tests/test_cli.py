@@ -288,6 +288,28 @@ class SideLaneTests(unittest.TestCase):
             self.assertEqual(normalized["host_capabilities"]["codex"]["available_connectors"], ["gitnexus"])
             self.assertEqual(normalized["host_capabilities"]["claude"]["available_connectors"], [])
 
+    def test_recommend_execute_staffing_accepts_only_exact_configured_playwright_presence(self) -> None:
+        report = {
+            "mcp_connectors": ["gitnexus", "playwright"],
+            "capabilities": {"workspace-write": True, "playwright": False,
+                             "gitnexus": False,
+                             "git-push": False, "workflow-write": False},
+            "capability_evidence": {
+                "playwright": {"state": "present"},
+                "git-push": {"state": "present"},
+                "workflow-write": {"state": "present"},
+            },
+        }
+        execute = cli._recommendation_host_snapshot(report, "execute")
+        self.assertEqual(execute["available_connectors"], ["gitnexus", "playwright"])
+        self.assertEqual(execute["available_capabilities"], ["playwright", "workspace-write"])
+        review_report = {**report, "capabilities": {
+            **report["capabilities"], "playwright": True, "gitnexus": True,
+        }}
+        review = cli._recommendation_host_snapshot(review_report, "review")
+        self.assertEqual(review["available_connectors"], [])
+        self.assertEqual(review["available_capabilities"], ["workspace-write"])
+
     def test_list_exposes_provider_gateway_auth_and_billing(self) -> None:
         with contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(cli.run(["list"]), 0)
@@ -380,6 +402,10 @@ class ExecuteLanePermissionTests(SideLaneTests):
         self.assertIn("host_support_dir", report)
         with mock.patch("side_lane.cli.shutil.which", return_value="/bin/tool"), \
              mock.patch("side_lane.cli._discover_mcp_inventory", return_value=(set(), set())):
+            report = cli._capability_report(config, "claude", "execute", None, None)
+        self.assertEqual(report["capability_evidence"]["playwright"]["state"], "unavailable")
+        with mock.patch("side_lane.cli.shutil.which", return_value="/bin/tool"), \
+             mock.patch("side_lane.cli._discover_mcp_inventory", return_value=({"playwright-local"}, set())):
             report = cli._capability_report(config, "claude", "execute", None, None)
         self.assertEqual(report["capability_evidence"]["playwright"]["state"], "unavailable")
 

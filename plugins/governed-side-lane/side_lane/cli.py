@@ -269,12 +269,7 @@ def _recommend(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
         "required_connectors": sorted(set(required_connectors)),
         "required_capabilities": sorted(set(required_capabilities)),
         "host_capabilities": {
-            candidate_host: {
-                "available_connectors": report["mcp_connectors"],
-                "available_capabilities": sorted(
-                    name for name, state in report["capabilities"].items() if state
-                ),
-            }
+            candidate_host: _recommendation_host_snapshot(report, mode)
             for candidate_host, report in snapshots.items()
         }})
     result = routing.recommend(routing.load_catalog(), normalized,
@@ -283,6 +278,38 @@ def _recommend(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
                    "required_capabilities": sorted(required_capabilities)})
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
+
+
+def _recommendation_host_snapshot(report: Mapping[str, Any], mode: str) -> dict[str, Any]:
+    """Translate presence evidence narrowly for offline route staffing.
+
+    A configured Playwright server is enough for an execute recommendation
+    because dispatch performs a live readiness check and the route catalog
+    still requires its own local evaluation and connector evidence. Other
+    merely-present capabilities remain unavailable because their authority or
+    authentication has not been verified. Review lanes expose no MCP servers.
+    """
+
+    connectors = report.get("mcp_connectors", [])
+    capabilities = report.get("capabilities", {})
+    evidence = report.get("capability_evidence", {})
+    if not isinstance(connectors, list) or not isinstance(capabilities, Mapping):
+        raise SideLaneError("capability report is malformed")
+    available = {name for name, state in capabilities.items() if state}
+    if mode != "execute":
+        available.difference_update({"playwright", "gitnexus", "codegraph"})
+    if (
+        mode == "execute"
+        and "playwright" in connectors
+        and isinstance(evidence, Mapping)
+        and isinstance(evidence.get("playwright"), Mapping)
+        and evidence["playwright"].get("state") == "present"
+    ):
+        available.add("playwright")
+    return {
+        "available_connectors": sorted(connectors) if mode == "execute" else [],
+        "available_capabilities": sorted(available),
+    }
 
 
 def _evaluate(path_argument: str) -> int:
@@ -352,7 +379,7 @@ def _capability_report(config: Mapping[str, Any], host: str, mode: str, provider
         "secret-use": {"state": "unknown", "basis": "credential values and access are never tested during preflight"},
         "database-read": {"state": "present" if shutil.which("psql") else "unavailable", "basis": "psql executable; database access not tested"},
         "workflow-write": {"state": "present" if any(marker in name for name in lowered for marker in ("asana", "slack", "teams", "github")) else "unknown", "basis": "connector-name metadata only; write authority not tested"},
-        "playwright": {"state": "present" if any("playwright" in name for name in lowered) else "unavailable", "basis": "connector-name metadata only, from the host's user-global config and this repository's project config; other projects' entries are excluded; browser launch not tested; review mode hides all MCP servers"},
+        "playwright": {"state": "present" if "playwright" in mcp_names else "unavailable", "basis": "exact connector-name metadata only, from the host's user-global config and this repository's project config; other projects' entries are excluded; browser launch not tested; review mode hides all MCP servers"},
     }
     report: dict[str, Any] = {"host": host, "mode": mode, "runtime": runtime, "host_support_dir": host_support_dir(host, runtime), "route": "not-requested", "mcp_connectors": sorted(mcp_names), "mcp_connectors_out_of_scope": sorted(out_of_scope)}
     if bool(provider) != bool(model):
