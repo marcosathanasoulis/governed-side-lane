@@ -176,7 +176,10 @@ def _route_metadata(
         if parsed.scheme != "https" or not parsed.netloc or parsed.query or parsed.fragment:
             raise ClaudeAdapterError("billable gateway must be a clean HTTPS endpoint")
         expected_endpoint = FIRST_WAVE_ENDPOINTS.get(provider)
-        if expected_endpoint is not None and endpoint.rstrip("/") != expected_endpoint.rstrip("/"):
+        reviewed_endpoints = {expected_endpoint.rstrip("/")} if expected_endpoint else set()
+        if provider == "kimi":
+            reviewed_endpoints.add("https://api.moonshot.cn/anthropic")
+        if expected_endpoint is not None and endpoint.rstrip("/") not in reviewed_endpoints:
             raise ClaudeAdapterError("provider endpoint does not match the reviewed first-wave contract")
         # GLM predates the identity contract. Every newly configured direct
         # provider must prove that Claude Code settings cannot substitute an
@@ -219,7 +222,7 @@ def build_transport_environment(
     return child
 
 
-def _per_launch_settings(provider: str, model: str, mode: str) -> str:
+def _per_launch_settings(provider: str, model: str, mode: str, base_url: str | None = None) -> str:
     """Return nonsecret settings that outrank user/project/local settings.
 
     Execute lanes intentionally run in the user workspace under the user
@@ -232,6 +235,10 @@ def _per_launch_settings(provider: str, model: str, mode: str) -> str:
     settings: dict[str, Any] = {"sandbox": {"enabled": False}} if mode == "execute" else {}
     if provider != NATIVE_PROVIDER:
         settings["env"] = {name: model for name in EXACT_MODEL_ENV_NAMES}
+        if base_url is not None:
+            settings["env"]["ANTHROPIC_BASE_URL"] = base_url.rstrip("/")
+        if provider in FIRST_WAVE_ENDPOINTS:
+            settings["alwaysThinkingEnabled"] = True
     return json.dumps(settings, separators=(",", ":"), sort_keys=True)
 
 
@@ -315,7 +322,7 @@ def build_command(
                 "--output-format",
                 "text",
                 "--settings",
-                _per_launch_settings(provider, runtime_model, mode),
+                _per_launch_settings(provider, runtime_model, mode, provider_config.get("base_url")),
             )
         )
         effort = _optional_effort(model_config)

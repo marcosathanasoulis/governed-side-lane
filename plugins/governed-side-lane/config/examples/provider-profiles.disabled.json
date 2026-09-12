@@ -9,9 +9,9 @@
       "base_url": "https://api.deepseek.com/anthropic",
       "host": "claude",
       "protocol": "anthropic-compatible",
-      "requested_model": "deepseek-flash",
+      "requested_model": "deepseek-v4-flash",
       "execution_location": "local-user-workspace",
-      "identity_contract": {"requested_model": "deepseek-flash", "resolved_model": null, "settings_precedence": "unverified"}
+      "identity_contract": {"requested_model": "deepseek-v4-flash", "resolved_model": null, "settings_precedence": "unverified"}
     },
     {
       "provider": "kimi",

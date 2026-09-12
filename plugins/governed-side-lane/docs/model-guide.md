@@ -48,8 +48,9 @@ discovery.
 | Need | Start here | Account and setup fact | Status |
 | --- | --- | --- | --- |
 | Existing coding work | Keep the existing [OpenAI](https://chatgpt.com/) or [Claude](https://claude.ai/) account | Native OAuth is per host. Compare models already available there before buying anything. | Native routes may be executable when locally allowlisted. |
-| Low-cost coding or vision experiment | [DeepSeek API](https://platform.deepseek.com/) with `deepseek-flash` | It has documented OpenAI- and Anthropic-compatible endpoints; its [pricing](https://api-docs.deepseek.com/quick_start/pricing/) lists token and cache rates. Use an API key only in approved local credential storage. | Candidate; no packaged execute route yet. |
-| Kimi coding and reference-driven UI work | [Kimi Code](https://www.kimi.com/code/) | `kimi-for-coding` is K2.8 Preview. Use it before K3; `k3-256k` needs Moderato or above, and 1M/HighSpeed need Allegretto or above. Create a **Kimi Code Console** key, not a generic API key; its [third-party setup](https://www.kimi.com/code/docs/en/third-party-tools/claude-code.html) and [model table](https://www.kimi.com/code/docs/kimi-code/models.html) document the separate coding endpoint and IDs. | Candidate; subscription and API access are separate checks. |
+| Low-cost coding or vision experiment | [DeepSeek API](https://platform.deepseek.com/) with `deepseek-v4-flash` | It has documented OpenAI- and Anthropic-compatible endpoints; its [pricing](https://api-docs.deepseek.com/quick_start/pricing/) lists token and cache rates. Use an API key only in approved local credential storage. | Candidate; no packaged execute route yet. |
+| Kimi local coding trial with metered billing | [Kimi Platform](https://platform.kimi.ai/) PAYG | Use the exact regional endpoint for the funded API account. The [China Platform Claude Code guide](https://platform.kimi.com/docs/guide/claude-code-kimi) documents `https://api.moonshot.cn/anthropic` and `kimi-k2.7-code` (thinking required). Platform keys and Kimi Code subscription keys are separate. Compare K2.7 Code against K3 on accepted tasks before buying a longer subscription. | Local qualification required; funding alone does not activate Side Lane. |
+| Kimi subscription alternative | [Kimi Code](https://www.kimi.com/code/) | Verify current plan eligibility, quotas, and subscription-specific model IDs in the [Kimi Code docs](https://www.kimi.com/code/docs/kimi-code/models.html). A subscription may suit sustained usage after trial; it does not fund Platform API calls. | Separate product and credential contract. |
 | Coding plus multimodal comparison | [MiniMax platform](https://platform.minimax.io/subscribe) | Start with PAYG. For sustained measured use, current [token plans](https://platform.minimax.io/docs/guides/pricing-token-plan) list Plus at $22/month and Max at $55/month; shared quota and overflow credits apply. Compare M3 with M2.7 rather than assuming the newer name wins. | Candidate; protocol and tool support need local proof. |
 | Browser execution | Qualify a native-host browser connector first; use [Google AI Studio](https://aistudio.google.com/) only for a dedicated Gemini comparison | A supported local browser connector is the baseline. Gemini computer use is an optional model/action-loop evaluation; its [setup guide](https://ai.google.dev/gemini-api/docs/computer-use?authuser=0) still requires an executor, screenshots, and verified final state. | Any qualified vision/tool model may drive the selected host's browser. An API key alone does not operate it. |
 | SWE-2 / local Devin CLI evaluation | [Devin](https://devin.ai/pricing) | The Free plan is enough to inspect fit. The provider advertises free SWE-2 in Desktop and CLI through October 10, 2026; verify current access before a paid pilot. | Local Devin CLI and [Local Fusion](https://cognition.com/blog/local-fusion) are optional, unqualified local routes. Devin Cloud is a separate cloud workspace; do not treat it as a local-worker equivalent. |
@@ -154,3 +155,14 @@ configuration shortcut. DeepSeek, Kimi, and MiniMax launches currently stop
 with an adapter-unqualified error even if a caller supplies configuration.
 Enabling them requires a reviewed adapter qualification change, an exact
 allowlist entry, local task evaluation, and explicit task authorization.
+
+## Qualification entrypoint
+
+The operational `side_lane.qualification.qualify_claude` helper runs explicitly
+authorized, bounded local trials for direct providers after a matching transport
+probe. It reuses the adapter command/environment contracts, preserves local
+workspace execution, rejects conflicting saved authentication, and returns
+qualification evidence without activating a route. Automated tests mock it;
+ordinary `side-lane run` still rejects these candidates until full qualification
+and reviewed activation. Usage reported with `costBasis: unknown` is not a
+verified vendor bill.

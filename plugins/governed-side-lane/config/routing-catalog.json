@@ -390,7 +390,7 @@
       "endpoint": "https://api.deepseek.com/anthropic",
       "auth_method": "provider-key",
       "model_vendor": "deepseek",
-      "requested_model": "deepseek-flash",
+      "requested_model": "deepseek-v4-flash",
       "resolved_model": null,
       "host": "claude",
       "harness": "claude-code",
