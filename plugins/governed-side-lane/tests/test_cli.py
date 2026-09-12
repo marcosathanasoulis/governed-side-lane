@@ -83,6 +83,55 @@ class SideLaneTests(unittest.TestCase):
         base = ["run", "--host", "claude", "--provider", "claude", "--model", "claude-sonnet-5", "--repo", ".", "--prompt", "Review"]
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             parser.parse_args(base + ["--api-key", "secret"])
+        parsed = parser.parse_args(["auth-status", "--host", "devin"])
+        self.assertEqual(parsed.host, "devin")
+
+    def test_mocked_devin_route_dispatches_through_normal_cli_launch(self) -> None:
+        config = cli.load_config()
+        model = "swe-2-medium"
+        config["providers"]["devin"] = {
+            "gateway": "native-devin", "auth_method": "oauth", "billable": False,
+            "routes": {
+                "execute": {
+                    "devin": {
+                        "protocol": "native-devin", "models": [model],
+                        "model_configs": {
+                            model: {
+                                "identity_contract": {
+                                    "requested_model": model, "resolved_model": model,
+                                    "settings_precedence": "verified",
+                                },
+                                "qualification": {
+                                    "verified": True, "verified_on": "2026-09-11",
+                                    "source": "mocked local report",
+                                },
+                                "timeout_seconds": 600,
+                            }
+                        },
+                    }
+                }
+            },
+        }
+        repo = self.repo()
+        worktree = repo.parent / "devin-worktree"
+        lane = mock.Mock(worktree=worktree, branch="side-lane/devin-1")
+        result = LaneResult(("devin",), 0, worktree, "devin", "devin",
+            "native-devin", model, "oauth", False, '{"model":"swe-2-medium"}', "",
+            requested_model=model, resolved_model=model)
+        args = mock.Mock(host="devin", mode="execute", provider="devin", model=model,
+            capability=[], lane_name="devin-1", approve_billable_route=False,
+            worktree_root=None)
+        with mock.patch("side_lane.cli._require_host_executable", return_value="/opt/hosts/devin"), \
+             mock.patch("side_lane.cli.create_worktree", return_value=lane), \
+             mock.patch("side_lane.cli.require_native_oauth") as auth, \
+             mock.patch("side_lane.adapters.devin.launch", return_value=result) as launch, \
+             mock.patch("side_lane.cli.git_status", return_value="## lane"), \
+             mock.patch("side_lane.cli.write_audit", return_value=repo / ".git/audit.json"), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli._launch(args, config, repo, "Implement it"), 0)
+        auth.assert_called_once_with("devin", executable="/opt/hosts/devin")
+        self.assertEqual(launch.call_args.kwargs["model_config"]["timeout_seconds"], 600)
+        self.assertEqual(launch.call_args.kwargs["model_config"]["identity_contract"]["resolved_model"], model)
 
     def test_capability_report_uses_auth_metadata_or_override_presence_only(self) -> None:
         config = cli.load_config()
@@ -135,7 +184,9 @@ class SideLaneTests(unittest.TestCase):
         worktree = repo.parent / "review-worktree"
         lane = mock.Mock(worktree=worktree, branch="side-lane/review-1")
         result = LaneResult(("claude",), 0, worktree, "claude", "claude",
-            "native-claude", "claude-sonnet-5", "oauth", False, "finding: bug in api.py", "")
+            "native-claude", "claude-sonnet-5", "oauth", False, "finding: bug in api.py", "",
+            requested_model="claude-sonnet-5", resolved_model="claude-sonnet-5",
+            usage={"input_tokens": 12}, provider_artifact="/tmp/provider.json")
         args = mock.Mock(host="claude", mode="review", provider="claude",
             model="claude-sonnet-5", capability=[], lane_name="review",
             approve_billable_route=False, worktree_root=None)
@@ -152,6 +203,10 @@ class SideLaneTests(unittest.TestCase):
         self.assertEqual(launch.call_args.kwargs["worktree"], worktree)
         self.assertEqual(launch.call_args.kwargs["executable"], "/opt/hosts/claude")
         self.assertEqual(audit.call_args.kwargs["stdout"], "finding: bug in api.py")
+        self.assertEqual(audit.call_args.kwargs["requested_model"], "claude-sonnet-5")
+        self.assertEqual(audit.call_args.kwargs["resolved_model"], "claude-sonnet-5")
+        self.assertEqual(audit.call_args.kwargs["usage"], {"input_tokens": 12})
+        self.assertEqual(audit.call_args.kwargs["provider_artifact"], "/tmp/provider.json")
         dispose.assert_called_once_with(lane)
         lines = output.getvalue().splitlines()
         summary = json.loads("\n".join(lines[1:]))

@@ -148,6 +148,21 @@ def auth_status(
             return AuthStatus("claude", "ready", "oauth", refresh)
         return AuthStatus("claude", "unknown", "unknown", refresh)
 
+    if host == "devin":
+        command = [executable or "devin", "auth", "status"]
+        completed = _run_status(command, runner)
+        if completed is None:
+            return AuthStatus("devin", "unavailable", "none", refresh)
+        output = f"{getattr(completed, 'stdout', '')}\n{getattr(completed, 'stderr', '')}".lower()
+        if completed.returncode != 0 or any(marker in output for marker in (
+            "not logged in", "not authenticated", "isn't authenticated",
+            "is not authenticated", "signed out", "unauthenticated",
+        )):
+            return AuthStatus("devin", "signed-out", "none", refresh)
+        if any(marker in output for marker in ("logged in", "authenticated", "signed in")):
+            return AuthStatus("devin", "ready", "oauth", refresh)
+        return AuthStatus("devin", "unknown", "unknown", refresh)
+
     raise AuthError(f"unsupported native auth host: {host}")
 
 

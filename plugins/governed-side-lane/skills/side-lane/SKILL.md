@@ -57,6 +57,14 @@ inventory for exact available model names and supplied capability descriptions.
 Compare qualified Anthropic/Claude and Codex models with the same task-relative
 rubric and record the exact assignment reason; provider brand alone is not
 capability or reviewer-independence evidence.
+Classify each task before ranking routes: `light` for bounded mechanical or
+fixture work, `deep` for ambiguous debugging, architecture, or large-repository
+reasoning, `design` for visual hierarchy and design judgment, and `browser` for
+connector-backed navigation and interaction. These bands are task requirements,
+not model tiers. Require supplied evidence for the requested band, quality
+floor, context/output estimate, tools, host, and authority. Coding or vision
+evidence does not satisfy design or browser requirements by implication;
+unknown or stale band evidence excludes the route until refreshed.
 For ordinary work, choose the least-cost or most-efficient eligible model that
 meets the task's quality, reasoning, context, tools, host, and authority needs.
 Honor explicit developer/user preferences and stated usage or surplus
@@ -65,6 +73,11 @@ when reviewed evidence is missing. Provider diversity alone does not justify an
 independent second opinion; require a distinct question and decision value based
 on uncertainty, non-determinism, impact, irreversibility, material disagreement
 risk, or an explicit acceptance gate.
+Compare the complete session: task tokens, known tool charges, dispatch/setup,
+retries and coordinator correction, and any independent review. Keep prepaid
+subscription usage separate from marginal provider-key usage. Unknown prices or
+overhead remain unknown and are never treated as zero. A frontier route needs
+task-specific evidence that an eligible economical route cannot meet the need.
 
 GLM is optional and enters staffing only when the user explicitly enables it.
 Its only selectable model is the fixed `glm-5.3`; never propose another GLM
@@ -108,6 +121,13 @@ when the user has explicitly authorized that bounded external research team;
 generic Prompt it consent and recommendation output do not authorize launch.
 Review governance still forbids MCP/connectors and secrets. Execute lanes,
 including GLM, retain their separate approval gates.
+
+After execution approval, dispatch the exact approved route and record route
+recheck, dispatch, worktree and capability grants, handoff, validation, and
+coordinator acceptance. A failed task may receive only the approved in-scope
+retry on that same route, with its added session cost recorded. If the route
+becomes unavailable, block dependents and return for a staffing decision; never
+silently substitute a provider, model, gateway, host, or mode.
 
 An execute lane runs locally as the selected signed-in user. Its worktree is
 Git-edit isolation, not an OS/container/cloud sandbox. This does not broaden

@@ -48,10 +48,10 @@ discovery.
 | Need | Start here | Account and setup fact | Status |
 | --- | --- | --- | --- |
 | Existing coding work | Keep the existing [OpenAI](https://chatgpt.com/) or [Claude](https://claude.ai/) account | Native OAuth is per host. Compare models already available there before buying anything. | Native routes may be executable when locally allowlisted. |
-| Low-cost coding or vision experiment | [DeepSeek API](https://platform.deepseek.com/) with `deepseek-v4-flash` | It has documented OpenAI- and Anthropic-compatible endpoints; its [pricing](https://api-docs.deepseek.com/quick_start/pricing/) lists token and cache rates. Use an API key only in approved local credential storage. | Candidate; no packaged execute route yet. |
+| Low-cost coding or vision experiment | [DeepSeek API](https://platform.deepseek.com/) with `deepseek-flash` | It has documented OpenAI- and Anthropic-compatible endpoints; its [pricing](https://api-docs.deepseek.com/quick_start/pricing/) lists token and cache rates. Use an API key only in approved local credential storage. | Candidate; no packaged execute route yet. |
 | Kimi local coding trial with metered billing | [Kimi Platform](https://platform.kimi.ai/) PAYG | Use the exact regional endpoint for the funded API account. The [China Platform Claude Code guide](https://platform.kimi.com/docs/guide/claude-code-kimi) documents `https://api.moonshot.cn/anthropic` and `kimi-k2.7-code` (thinking required). Platform keys and Kimi Code subscription keys are separate. Compare K2.7 Code against K3 on accepted tasks before buying a longer subscription. | Local qualification required; funding alone does not activate Side Lane. |
 | Kimi subscription alternative | [Kimi Code](https://www.kimi.com/code/) | Verify current plan eligibility, quotas, and subscription-specific model IDs in the [Kimi Code docs](https://www.kimi.com/code/docs/kimi-code/models.html). A subscription may suit sustained usage after trial; it does not fund Platform API calls. | Separate product and credential contract. |
-| Coding plus multimodal comparison | [MiniMax platform](https://platform.minimax.io/subscribe) | Start with PAYG. For sustained measured use, current [token plans](https://platform.minimax.io/docs/guides/pricing-token-plan) list Plus at $22/month and Max at $55/month; shared quota and overflow credits apply. Compare M3 with M2.7 rather than assuming the newer name wins. | Candidate; protocol and tool support need local proof. |
+| Coding plus multimodal comparison | [MiniMax platform](https://platform.minimax.io/subscribe) | Choose standard PAYG or prepaid Credits deliberately: they use different keys and balances. Credits use an `sk-cp` Subscription Key even without a Token Plan subscription; 1,000 credits = $1 and usage follows the PAYG list price. For sustained measured use, current [token plans](https://platform.minimax.io/docs/guides/pricing-token-plan) list Plus at $22/month and Max at $55/month; shared quota and overflow credits apply. Compare M3 with M2.7 rather than assuming the newer name wins. | Candidate; protocol and tool support need local proof. |
 | Browser execution | Qualify a native-host browser connector first; use [Google AI Studio](https://aistudio.google.com/) only for a dedicated Gemini comparison | A supported local browser connector is the baseline. Gemini computer use is an optional model/action-loop evaluation; its [setup guide](https://ai.google.dev/gemini-api/docs/computer-use?authuser=0) still requires an executor, screenshots, and verified final state. | Any qualified vision/tool model may drive the selected host's browser. An API key alone does not operate it. |
 | SWE-2 / local Devin CLI evaluation | [Devin](https://devin.ai/pricing) | The Free plan is enough to inspect fit. The provider advertises free SWE-2 in Desktop and CLI through October 10, 2026; verify current access before a paid pilot. | Local Devin CLI and [Local Fusion](https://cognition.com/blog/local-fusion) are optional, unqualified local routes. Devin Cloud is a separate cloud workspace; do not treat it as a local-worker equivalent. |
 | Grok comparison | [xAI Console](https://console.x.ai/) | Use a metered API experiment only after a direct supported harness is qualified. See the [Grok 4.6 model page](https://docs.x.ai/developers/models/grok-4.6). A consumer Grok plan does not establish API credit or local-tool access. | Candidate; Grok Bot is cloud-hosted and excluded from local-workspace selection. |
@@ -63,8 +63,8 @@ Use this as an evaluation shortlist, never as an automatic route assignment.
 
 | Task | Candidate comparison | Required proof before it can run |
 | --- | --- | --- |
-| Bounded code, tests, or mechanical migration | Native economical model first; then DeepSeek Flash, Kimi `kimi-for-coding`, or MiniMax M2.7 if configured | Reproducible patch, tests, scope discipline, and full-session cost evidence. |
-| Large context or reference-driven UI implementation | Kimi `k3-256k` before 1M K3; MiniMax M3 as a comparison | Exact model/effort, image or reference support, visual/accessibility result, and responsive behavior. |
+| Bounded code, tests, or mechanical migration | Compare all configured economical workers, including DeepSeek Flash, Kimi `kimi-k2.7-code`, MiniMax M2.7/M3, and native local SWE models | Reproducible patch, tests, scope discipline, and full-session cost evidence. |
+| Large context or reference-driven UI implementation | Kimi Platform `kimi-k3` versus `kimi-k2.7-code`; MiniMax M3 as a comparison | Exact model/effort, image or reference support, visual/accessibility result, and responsive behavior. |
 | Browser operation | Native-host browser connector first; optionally compare Gemini computer use with the same executor | A browser connector/action loop, session handling, and verified final state. Vision is not proof. |
 | SWE agent workflow | Local Devin CLI or Local Fusion separately | A local-workspace harness, exact model/composite identity, and ordinary task evidence. Devin Cloud stays out of local-worker selection. |
 | High-uncertainty or consequential work | A proven native model remains the default comparison | Task-specific reasoning evidence and an independent review plan where it has decision value. |
@@ -104,9 +104,19 @@ is the source; caching, retries, and changing rate cards alter the result.
 
 ## What this research supports
 
-The current first-wave catalog is DeepSeek Flash; Kimi `kimi-for-coding`, `k3[1m]` (Claude Code; API selector `k3`),
-`k3-256k`, and `kimi-for-coding-highspeed`; and MiniMax M3/M2.7 variants.
-Grok, Gemini, and Devin Cloud remain research-only candidates. The linked
+The direct-provider comparison set includes DeepSeek `deepseek-flash` and
+`deepseek-v4-pro`; Kimi China Platform `kimi-k2.6`, `kimi-k3`,
+`kimi-k2.7-code`, and `kimi-k2.7-code-highspeed`; and MiniMax M3/M2.7 variants.
+Kimi Code subscription aliases remain separate candidates. DeepSeek documents
+V4.1 Flash behind the current Flash selector; retired `deepseek-v4-flash` requests
+redirect, so an echoed selector alone does not prove immutable model weights.
+
+Devin CLI exposes an account-specific model inventory. Discover it with
+`devin models list --format json`, pin the exact model UID, and distinguish
+Cognition SWE models from Grok/Gemini/other vendors served through Devin.
+A Grok route through Devin uses Devin billing and authentication, not a direct
+xAI API key. Availability and any promotional free label must be checked for
+the actual account. Devin Cloud remains excluded from local-workspace routing. The linked
 provider documentation establishes selectors, plans, endpoints, or published
 pricing; it does not establish local tool behavior or task quality. Provider
 benchmarks and community reports, including Reddit reports, are evaluation

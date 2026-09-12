@@ -1,7 +1,9 @@
 from datetime import date
 import copy
+import os
 import json
 from pathlib import Path
+import tempfile
 import unittest
 
 from side_lane import routing
@@ -80,6 +82,66 @@ class RoutingTests(unittest.TestCase):
             runtime_allowlist=self.allowlist, credential_present_routes=self.allowlist, today=TODAY)
         self.assertEqual(result["winner"]["host"], "codex")
         self.assertTrue(result["winner"]["estimated_cost"]["incremental_zero"])
+
+    def test_preferred_provider_pool_is_soft_and_applies_after_eligibility(self) -> None:
+        preferred = routing.recommend(self.catalog,
+            self.profile(preferred_provider_pool=["claude"]),
+            runtime_allowlist=self.allowlist, credential_present_routes=self.allowlist,
+            today=TODAY)
+        self.assertEqual(preferred["winner"]["route_id"], "fable")
+        self.assertTrue(preferred["preferred_provider_pool_applied"])
+        self.assertEqual(preferred["preference_rationale"],
+                         "qualified-route-in-preferred-provider-pool")
+        fallback = routing.recommend(self.catalog,
+            self.profile(preferred_provider_pool=["glm"]),
+            runtime_allowlist=self.allowlist, credential_present_routes=self.allowlist,
+            today=TODAY)
+        self.assertEqual(fallback["winner"]["route_id"], "fable")
+        self.assertTrue(fallback["preferred_provider_pool_fallback"])
+        self.assertIn("preferred-provider-pool-fallback", fallback["reason_codes"])
+        glm = next(item for item in fallback["exclusions"] if item["route_id"] == "glm")
+        self.assertIn("explicit-opt-in-required", glm["reasons"])
+
+    def test_preferred_provider_pool_accepts_provider_or_model_vendor_names(self) -> None:
+        catalog = copy.deepcopy(self.catalog)
+        catalog["routes"][0]["provider"] = "openai-gateway"
+        allowlist = frozenset((item["provider"], item["host"], item["mode"], item["model"])
+                              for item in catalog["routes"])
+        by_provider = routing.recommend(catalog,
+            self.profile(preferred_provider_pool=["openai-gateway"]),
+            runtime_allowlist=allowlist, credential_present_routes=allowlist, today=TODAY)
+        self.assertEqual([item["route_id"] for item in by_provider["ranked_routes"]], ["terra"])
+        by_vendor = routing.recommend(catalog,
+            self.profile(preferred_provider_pool=["openai"]),
+            runtime_allowlist=allowlist, credential_present_routes=allowlist, today=TODAY)
+        self.assertEqual([item["route_id"] for item in by_vendor["ranked_routes"]], ["sol", "terra"])
+
+    def test_noncash_candidate_does_not_erase_comparable_cash_ranking(self) -> None:
+        catalog = copy.deepcopy(self.catalog)
+        catalog["routes"][0]["cost_model"]["rates"]["unit"] = "workspace-credit"
+        result = routing.recommend(catalog, self.profile(policy="cost-optimized",
+            host_cost_state={"codex": "extra-usage", "claude": "extra-usage"}),
+            runtime_allowlist=self.allowlist, credential_present_routes=self.allowlist,
+            today=TODAY)
+        self.assertIsNotNone(result["winner"])
+        self.assertNotEqual(result["winner"]["route_id"], "terra")
+        terra = next(item for item in result["exclusions"] if item["route_id"] == "terra")
+        self.assertIn("noncash-cost-unit", terra["reasons"])
+
+    def test_latency_budget_uses_only_fresh_local_evaluation_median(self) -> None:
+        catalog = copy.deepcopy(self.catalog)
+        catalog["routes"][2]["local_evaluation"]["median_duration_ms"] = 2_000
+        within = routing.recommend(catalog, self.profile(max_duration_ms=2_500),
+            runtime_allowlist=self.allowlist, credential_present_routes=self.allowlist,
+            today=TODAY)
+        self.assertEqual(within["winner"]["route_id"], "fable")
+        self.assertEqual(within["winner"]["median_duration_ms"], 2_000)
+        too_slow = routing.recommend(catalog, self.profile(max_duration_ms=1_500),
+            runtime_allowlist=self.allowlist, credential_present_routes=self.allowlist,
+            today=TODAY)
+        self.assertIsNone(too_slow["winner"])
+        fable = next(item for item in too_slow["exclusions"] if item["route_id"] == "fable")
+        self.assertIn("duration-budget-exceeded", fable["reasons"])
 
     def test_origin_host_connectors_allowlist_and_auth_presence_are_hard_gates(self) -> None:
         result = routing.recommend(self.catalog, self.profile(required_connectors=["gitnexus"]), runtime_allowlist=frozenset(), credential_present_routes=frozenset(), today=TODAY)
@@ -170,6 +232,58 @@ class RoutingTests(unittest.TestCase):
         sol = next(item for item in result["exclusions"] if item["route_id"] == "sol")
         self.assertIn("cost-basis-missing-or-stale", sol["reasons"])
 
+    def test_route_specific_cohorts_compare_observed_efficiency_and_include_failures(self) -> None:
+        result = routing.recommend(self.catalog, self.profile(policy="cost-optimized",
+            host_cost_state={"codex": "extra-usage", "claude": "extra-usage"},
+            session_cost_basis="route-specific-cohorts", route_session_cohorts={
+                "terra": {"session_attempts": [
+                    {"kind": "failed-primary", "uncached_input_tokens": 1_000_000},
+                    {"kind": "accepted-retry", "uncached_input_tokens": 1_000_000},
+                ], "accepted_completions": 1},
+                "sol": {"session_attempts": [
+                    {"kind": "accepted-primary", "uncached_input_tokens": 100_000},
+                ], "accepted_completions": 1},
+            }), runtime_allowlist=self.allowlist,
+            credential_present_routes=self.allowlist, today=TODAY)
+        self.assertEqual(result["winner"]["route_id"], "sol")
+        terra = next(item for item in result["ranked_routes"] if item["route_id"] == "terra")
+        self.assertEqual(terra["estimated_cost"]["attempt_count"], 2)
+        self.assertEqual(terra["expected_cost_per_accepted_result"], 4.0)
+        self.assertEqual(result["winner"]["expected_cost_per_accepted_result"], 0.8)
+        self.assertEqual(result["winner"]["cost_per_accepted_basis"],
+                         "observed-route-specific-cohorts")
+        fable = next(item for item in result["exclusions"] if item["route_id"] == "fable")
+        self.assertIn("route-session-cohort-missing", fable["reasons"])
+
+    def test_route_specific_cohorts_never_borrow_and_zero_success_fails_closed(self) -> None:
+        result = routing.recommend(self.catalog, self.profile(policy="cost-optimized",
+            host_cost_state={"codex": "extra-usage", "claude": "extra-usage"},
+            session_cost_basis="route-specific-cohorts", route_session_cohorts={
+                "terra": {"session_attempts": [{"uncached_input_tokens": 10}],
+                          "accepted_completions": 0},
+            }), runtime_allowlist=self.allowlist,
+            credential_present_routes=self.allowlist, today=TODAY)
+        self.assertIsNone(result["winner"])
+        terra = next(item for item in result["exclusions"] if item["route_id"] == "terra")
+        self.assertIn("accepted-completion-cost-unknown", terra["reasons"])
+        sol = next(item for item in result["exclusions"] if item["route_id"] == "sol")
+        self.assertIn("route-session-cohort-missing", sol["reasons"])
+
+    def test_route_specific_cohorts_validate_each_cohort(self) -> None:
+        common = {"session_cost_basis": "route-specific-cohorts"}
+        with self.assertRaisesRegex(routing.RoutingError, "requires route_session_cohorts"):
+            routing._profile(self.profile(**common))
+        with self.assertRaisesRegex(routing.RoutingError, "terra.session_attempts"):
+            routing._profile(self.profile(**common, route_session_cohorts={
+                "terra": {"session_attempts": [], "accepted_completions": 1},
+            }))
+        with self.assertRaisesRegex(routing.RoutingError, "per-route accepted"):
+            routing._profile(self.profile(**common, accepted_completions=1,
+                route_session_cohorts={"terra": {
+                    "session_attempts": [{"uncached_input_tokens": 1}],
+                    "accepted_completions": 1,
+                }}))
+
     def test_execute_rejects_cloud_workspace_route(self) -> None:
         cloud = route("cloud", "example", 99, 1)
         cloud["execution_location"] = "cloud-only"
@@ -211,6 +325,24 @@ class RoutingTests(unittest.TestCase):
         cards = catalog["rate_cards"]
         self.assertEqual(cards["openai-chatgpt-workspace-credits-2026-08-29"]["models"]["gpt-5.6-sol"]["output_per_million"], 500)
         self.assertEqual(cards["anthropic-api-list-price-proxy-2026-08-29"]["applicability"], "comparison-proxy-not-native-oauth-spend")
+
+    def test_catalog_path_environment_override_uses_private_evidence_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "private-catalog.json"
+            payload = json.loads(routing.DEFAULT_CATALOG_PATH.read_text(encoding="utf-8"))
+            payload["catalog_version"] = "private-local-evidence"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            previous = os.environ.get(routing.ROUTING_CATALOG_ENV)
+            os.environ[routing.ROUTING_CATALOG_ENV] = str(path)
+            try:
+                self.assertEqual(routing.load_catalog()["catalog_version"], "private-local-evidence")
+                self.assertNotEqual(routing.load_catalog(routing.DEFAULT_CATALOG_PATH)["catalog_version"],
+                                    "private-local-evidence")
+            finally:
+                if previous is None:
+                    os.environ.pop(routing.ROUTING_CATALOG_ENV, None)
+                else:
+                    os.environ[routing.ROUTING_CATALOG_ENV] = previous
 
 
 if __name__ == "__main__":

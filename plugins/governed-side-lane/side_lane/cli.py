@@ -22,6 +22,7 @@ from side_lane.hosts import (
 )
 from side_lane.adapters.claude import ClaudeAdapterError
 from side_lane.adapters.codex import CodexAdapterError
+from side_lane.adapters.devin import DevinAdapterError
 from side_lane.worktrees import (
     WorktreeError,
     create_worktree,
@@ -85,10 +86,13 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
                 raise SideLaneError(f"provider {provider!r} has an invalid route")
             for host, route in hosts.items():
                 models = route.get("models") if isinstance(route, dict) else None
-                if host not in {"codex", "claude"} or not route.get("protocol") or not isinstance(models, list) or not models:
+                if host not in {"codex", "claude", "devin"} or not route.get("protocol") or not isinstance(models, list) or not models:
                     raise SideLaneError(f"provider {provider!r} has an invalid host route")
                 if len(set(models)) != len(models) or not all(isinstance(model, str) and model for model in models):
                     raise SideLaneError(f"provider {provider!r} has invalid models")
+                model_configs = route.get("model_configs", {})
+                if not isinstance(model_configs, dict) or any(key not in models or not isinstance(value, dict) for key, value in model_configs.items()):
+                    raise SideLaneError(f"provider {provider!r} has invalid model_configs")
     return config
 
 
@@ -109,6 +113,7 @@ def select_route(config: Mapping[str, Any], host: str, mode: str, provider: str,
     for key in ("identity_contract", "reasoning_effort", "max_budget_usd", "execution_location"):
         if key in route:
             model_config[key] = route[key]
+    model_config.update(route.get("model_configs", {}).get(model, {}))
     return provider_config, model_config
 
 
@@ -147,10 +152,10 @@ def make_parser() -> argparse.ArgumentParser:
     credentials = sub.add_parser("credentials", allow_abbrev=False)
     credentials.add_argument("--json", action="store_true")
     auth = sub.add_parser("auth-status", allow_abbrev=False)
-    auth.add_argument("--host", choices=("codex", "claude"), required=True)
+    auth.add_argument("--host", choices=("codex", "claude", "devin"), required=True)
     auth.add_argument("--json", action="store_true")
     check = sub.add_parser("check-capabilities", allow_abbrev=False)
-    check.add_argument("--host", choices=("codex", "claude"), required=True)
+    check.add_argument("--host", choices=("codex", "claude", "devin"), required=True)
     check.add_argument("--mode", choices=("review", "execute"), default="execute")
     check.add_argument("--provider")
     check.add_argument("--model")
@@ -162,7 +167,7 @@ def make_parser() -> argparse.ArgumentParser:
     evaluate = sub.add_parser("evaluate", allow_abbrev=False)
     evaluate.add_argument("--input", required=True)
     run = sub.add_parser("run", allow_abbrev=False)
-    run.add_argument("--host", choices=("codex", "claude"), required=True)
+    run.add_argument("--host", choices=("codex", "claude", "devin"), required=True)
     run.add_argument("--mode", choices=("review", "execute"), default="review")
     run.add_argument("--provider", required=True)
     run.add_argument("--model", required=True)
@@ -207,13 +212,22 @@ def load_recommendation_profile(path_argument: str) -> dict[str, Any]:
 
 def _ready_routes(config: Mapping[str, Any]) -> frozenset[tuple[str, str, str, str]]:
     present: set[tuple[str, str, str, str]] = set()
-    statuses = {host: auth_status(host, executable=_host_executable(host)) for host in ("codex", "claude")}
+    configured_hosts = {
+        host
+        for item in config["providers"].values()
+        for hosts in item.get("routes", {}).values()
+        for host in hosts
+    }
+    statuses = {
+        host: auth_status(host, executable=_host_executable(host))
+        for host in configured_hosts
+    }
     for provider, item in config["providers"].items():
         if item.get("auth_method") == "oauth":
             ready_hosts = {host for host, status in statuses.items() if status.ready}
         else:
             ready_hosts = (
-                {"codex", "claude"}
+                configured_hosts
                 if credential_present(item["credential_service"])
                 else set()
             )
@@ -238,11 +252,17 @@ def _recommend(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
     unknown = sorted(set(required_capabilities) - set(config["capabilities"]))
     if unknown:
         raise SideLaneError(f"unknown capabilities: {', '.join(unknown)}")
+    candidate_hosts = tuple(sorted({
+        candidate_host
+        for item in config["providers"].values()
+        for hosts in item.get("routes", {}).values()
+        for candidate_host in hosts
+    }))
     snapshots = {
         candidate_host: _capability_report(
             config, candidate_host, mode, None, None, repo
         )
-        for candidate_host in ("codex", "claude")
+        for candidate_host in candidate_hosts
     }
     normalized = dict(profile)
     normalized.update({"coordinator_host": host,
@@ -473,11 +493,17 @@ def _launch(args: argparse.Namespace, config: Mapping[str, Any], repo: Path, pro
             result = run_codex(executable=executable, repo=repo, worktree=lane.worktree, provider=args.provider,
                 model=args.model, provider_config=provider_config, model_config=model_config, prompt=prompt, mode=args.mode,
                 capabilities=capabilities, support_dir=host_support_dir(args.host, executable))
-        else:
+        elif args.host == "claude":
             from side_lane.adapters.claude import launch
             result = launch(executable=executable, repo=repo, worktree=lane.worktree, provider=args.provider,
                 model=args.model, provider_config=provider_config, model_config=model_config, prompt=prompt,
                 mode=args.mode, capabilities=capabilities, secret=secret)
+        else:
+            from side_lane.adapters.devin import launch
+            result = launch(executable=executable, repo=repo, worktree=lane.worktree,
+                provider=args.provider, model=args.model, provider_config=provider_config,
+                model_config=model_config, prompt=prompt, mode=args.mode,
+                capabilities=capabilities)
     except Exception:
         dispose_clean_worktree(lane)
         raise
@@ -490,7 +516,9 @@ def _launch(args: argparse.Namespace, config: Mapping[str, Any], repo: Path, pro
     audit = write_audit(lane, host=result.host, mode=args.mode, provider=result.provider,
         gateway=result.gateway, auth_method=result.auth_method, billable=result.billable, model=result.model,
         prompt=prompt, exit_status=result.returncode, status=status,
-        stdout=result.stdout, stderr=result.stderr)
+        stdout=result.stdout, stderr=result.stderr,
+        requested_model=result.requested_model, resolved_model=result.resolved_model,
+        usage=result.usage, provider_artifact=result.provider_artifact)
     summary.update({"branch": lane.branch, "worktree": str(lane.worktree), "git_status": status,
                     "audit": str(audit), "result_artifact": str(audit)})
     if args.mode == "review":
@@ -547,7 +575,7 @@ def main() -> None:
     try:
         raise SystemExit(run())
     except (SideLaneError, AuthError, CredentialError, GovernanceError, WorktreeError,
-            ClaudeAdapterError, CodexAdapterError, evaluation.EvaluationError,
+            ClaudeAdapterError, CodexAdapterError, DevinAdapterError, evaluation.EvaluationError,
             routing.RoutingError) as exc:
         print(f"side-lane: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc

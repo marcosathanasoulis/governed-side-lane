@@ -10,12 +10,14 @@ from __future__ import annotations
 from datetime import date
 import json
 import math
+import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CATALOG_PATH = PACKAGE_ROOT / "config" / "routing-catalog.json"
+ROUTING_CATALOG_ENV = "SIDE_LANE_ROUTING_CATALOG_PATH"
 SUPPORTED_POLICIES = frozenset({"best-fit", "cost-optimized"})
 SUPPORTED_HOST_COST_STATES = frozenset({"included-oauth", "extra-usage", "unknown"})
 SUPPORTED_GLM_AVAILABILITY = frozenset({"available", "unknown", "temporarily-unavailable"})
@@ -23,6 +25,7 @@ EXECUTION_LOCATIONS = frozenset({"local-user-workspace", "cloud-only", "unknown"
 SUPPORTED_PROTOCOLS = {
     "codex": frozenset({"native-codex", "native-codex-readonly"}),
     "claude": frozenset({"native-claude", "native-claude-readonly", "anthropic-compatible", "anthropic-compatible-readonly"}),
+    "devin": frozenset({"native-devin"}),
 }
 
 
@@ -56,9 +59,12 @@ def _nonnegative_number(value: Any, label: str) -> float:
     return number
 
 
-def load_catalog(path: Path = DEFAULT_CATALOG_PATH) -> dict[str, Any]:
+def load_catalog(path: Path | None = None) -> dict[str, Any]:
     """Load and minimally validate a reviewed routing catalog."""
 
+    if path is None:
+        override = os.environ.get(ROUTING_CATALOG_ENV, "").strip()
+        path = Path(override).expanduser() if override else DEFAULT_CATALOG_PATH
     try:
         catalog = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -207,6 +213,14 @@ def _validate_executable_route(route: Mapping[str, Any], route_id: str) -> None:
     acceptance_rate = evaluation.get("acceptance_rate")
     if isinstance(acceptance_rate, bool) or not isinstance(acceptance_rate, (int, float)) or not 0 < acceptance_rate <= 1:
         raise RoutingError(f"route {route_id} lacks a valid acceptance_rate")
+    median_duration_ms = evaluation.get("median_duration_ms")
+    if median_duration_ms is not None and (
+        isinstance(median_duration_ms, bool)
+        or not isinstance(median_duration_ms, (int, float))
+        or not math.isfinite(float(median_duration_ms))
+        or median_duration_ms <= 0
+    ):
+        raise RoutingError(f"route {route_id} local_evaluation.median_duration_ms is invalid")
     cost_model = route.get("cost_model")
     if not isinstance(cost_model, Mapping):
         raise RoutingError(f"route {route_id} lacks a reviewed cost model")
@@ -289,6 +303,35 @@ def _fresh_on(record: Mapping[str, Any], key: str, now: date, max_days: int) -> 
     except RoutingError:
         return False
     return 0 <= (now - recorded).days <= max_days
+
+
+def _normalize_attempts(attempts: object, label: str) -> tuple[dict[str, Any], ...]:
+    """Validate one observed or hypothetical task-session attempt sequence."""
+
+    if not isinstance(attempts, list) or not attempts:
+        raise RoutingError(f"{label} must be a non-empty array")
+    normalized: list[dict[str, Any]] = []
+    for index, attempt in enumerate(attempts):
+        if not isinstance(attempt, Mapping):
+            raise RoutingError(f"{label} entries must be objects")
+        kind = attempt.get("kind", "attempt")
+        if not isinstance(kind, str) or not kind:
+            raise RoutingError(f"{label}.kind must be a non-empty string")
+        normalized.append({
+            "kind": kind,
+            "uncached_input_tokens": _positive_int(attempt.get("uncached_input_tokens", 0), f"{label}[{index}].uncached_input_tokens"),
+            "cached_read_tokens": _positive_int(attempt.get("cached_read_tokens", 0), f"{label}[{index}].cached_read_tokens"),
+            "cache_write_tokens": _positive_int(attempt.get("cache_write_tokens", 0), f"{label}[{index}].cache_write_tokens"),
+            "output_tokens": _positive_int(attempt.get("output_tokens", 0), f"{label}[{index}].output_tokens"),
+            "reasoning_tokens": _positive_int(attempt.get("reasoning_tokens", 0), f"{label}[{index}].reasoning_tokens"),
+            "coordinator_cost_usd": (
+                None if attempt.get("coordinator_cost_usd") is None
+                else _nonnegative_number(attempt.get("coordinator_cost_usd"), f"{label}[{index}].coordinator_cost_usd")
+            ),
+            "tool_cost_usd": _nonnegative_number(attempt.get("tool_cost_usd", 0), f"{label}[{index}].tool_cost_usd"),
+            "host_cost_usd": _nonnegative_number(attempt.get("host_cost_usd", 0), f"{label}[{index}].host_cost_usd"),
+        })
+    return tuple(normalized)
 
 
 def _profile(profile: Mapping[str, Any]) -> dict[str, Any]:
@@ -380,6 +423,13 @@ def _profile(profile: Mapping[str, Any]) -> dict[str, Any]:
     vendor_aliases = {"codex": "openai"}
     if preference is not None and (not isinstance(preference, str) or not preference):
         raise RoutingError("prefer must be a non-empty provider name")
+    preferred_pool = profile.get("preferred_provider_pool", [])
+    if not isinstance(preferred_pool, list) or not all(
+        isinstance(item, str) and item for item in preferred_pool
+    ):
+        raise RoutingError("preferred_provider_pool must contain provider or model_vendor names")
+    if len(set(preferred_pool)) != len(preferred_pool):
+        raise RoutingError("preferred_provider_pool must not contain duplicates")
     avoided = profile.get("avoid", [])
     if not isinstance(avoided, list) or not all(isinstance(item, str) and item for item in avoided):
         raise RoutingError("avoid must contain non-empty provider names")
@@ -391,34 +441,12 @@ def _profile(profile: Mapping[str, Any]) -> dict[str, Any]:
             "output_tokens": profile.get("output_tokens", 0),
             "kind": "primary",
         }]
-    if not isinstance(attempts, list) or not attempts:
-        raise RoutingError("session_attempts must be a non-empty array")
-    normalized_attempts: list[dict[str, Any]] = []
-    for index, attempt in enumerate(attempts):
-        if not isinstance(attempt, Mapping):
-            raise RoutingError("session_attempts entries must be objects")
-        kind = attempt.get("kind", "attempt")
-        if not isinstance(kind, str) or not kind:
-            raise RoutingError("session_attempts.kind must be a non-empty string")
-        normalized_attempts.append({
-            "kind": kind,
-            "uncached_input_tokens": _positive_int(attempt.get("uncached_input_tokens", 0), f"session_attempts[{index}].uncached_input_tokens"),
-            "cached_read_tokens": _positive_int(attempt.get("cached_read_tokens", 0), f"session_attempts[{index}].cached_read_tokens"),
-            "cache_write_tokens": _positive_int(attempt.get("cache_write_tokens", 0), f"session_attempts[{index}].cache_write_tokens"),
-            "output_tokens": _positive_int(attempt.get("output_tokens", 0), f"session_attempts[{index}].output_tokens"),
-            "reasoning_tokens": _positive_int(attempt.get("reasoning_tokens", 0), f"session_attempts[{index}].reasoning_tokens"),
-            "coordinator_cost_usd": (
-                None if attempt.get("coordinator_cost_usd") is None
-                else _nonnegative_number(attempt.get("coordinator_cost_usd"), f"session_attempts[{index}].coordinator_cost_usd")
-            ),
-            "tool_cost_usd": _nonnegative_number(attempt.get("tool_cost_usd", 0), f"session_attempts[{index}].tool_cost_usd"),
-            "host_cost_usd": _nonnegative_number(attempt.get("host_cost_usd", 0), f"session_attempts[{index}].host_cost_usd"),
-        })
+    normalized_attempts = _normalize_attempts(attempts, "session_attempts")
     accepted_completions = profile.get("accepted_completions")
     if accepted_completions is not None:
         accepted_completions = _positive_int(accepted_completions, "accepted_completions")
     session_cost_basis = profile.get("session_cost_basis", "hypothetical-workload")
-    if session_cost_basis not in {"hypothetical-workload", "route-specific-cohort"}:
+    if session_cost_basis not in {"hypothetical-workload", "route-specific-cohort", "route-specific-cohorts"}:
         raise RoutingError("session_cost_basis is invalid")
     if session_cost_basis == "route-specific-cohort" and accepted_completions is None:
         raise RoutingError("route-specific-cohort requires accepted_completions")
@@ -429,6 +457,36 @@ def _profile(profile: Mapping[str, Any]) -> dict[str, Any]:
         raise RoutingError("route-specific-cohort requires cohort_route_id")
     if cohort_route_id is not None and (not isinstance(cohort_route_id, str) or not cohort_route_id):
         raise RoutingError("cohort_route_id is invalid")
+    raw_route_cohorts = profile.get("route_session_cohorts")
+    if session_cost_basis == "route-specific-cohorts":
+        if accepted_completions is not None or cohort_route_id is not None:
+            raise RoutingError("route-specific-cohorts uses per-route accepted completions")
+        if not isinstance(raw_route_cohorts, Mapping) or not raw_route_cohorts:
+            raise RoutingError("route-specific-cohorts requires route_session_cohorts")
+    elif raw_route_cohorts is not None:
+        raise RoutingError("route_session_cohorts requires route-specific-cohorts")
+    normalized_route_cohorts: dict[str, dict[str, Any]] = {}
+    if isinstance(raw_route_cohorts, Mapping):
+        for route_id, cohort in raw_route_cohorts.items():
+            if not isinstance(route_id, str) or not route_id or not isinstance(cohort, Mapping):
+                raise RoutingError("route_session_cohorts contains an invalid route cohort")
+            if "accepted_completions" not in cohort:
+                raise RoutingError(f"route_session_cohorts.{route_id} requires accepted_completions")
+            normalized_route_cohorts[route_id] = {
+                "session_attempts": _normalize_attempts(
+                    cohort.get("session_attempts"), f"route_session_cohorts.{route_id}.session_attempts"
+                ),
+                "accepted_completions": _positive_int(
+                    cohort.get("accepted_completions"),
+                    f"route_session_cohorts.{route_id}.accepted_completions",
+                ),
+            }
+    max_duration_ms = profile.get("max_duration_ms")
+    if max_duration_ms is not None:
+        max_duration_ms = _positive_int(max_duration_ms, "max_duration_ms", allow_zero=False)
+    normalized_preferred_pool = tuple(vendor_aliases.get(item, item) for item in preferred_pool)
+    if len(set(normalized_preferred_pool)) != len(normalized_preferred_pool):
+        raise RoutingError("preferred_provider_pool contains duplicate effective providers")
     return {
         "originating_host": host,
         "coordinator_host": host,
@@ -452,15 +510,19 @@ def _profile(profile: Mapping[str, Any]) -> dict[str, Any]:
             profile.get("cached_input_tokens", 0), "cached_input_tokens"
         ),
         "output_tokens": _positive_int(profile.get("output_tokens", 0), "output_tokens"),
-        "session_attempts": tuple(normalized_attempts),
+        "session_attempts": normalized_attempts,
         "accepted_completions": accepted_completions,
         "session_cost_basis": session_cost_basis,
         "cohort_route_id": cohort_route_id,
+        "route_session_cohorts": normalized_route_cohorts,
         "privacy_class": profile.get("privacy_class", "ordinary"),
         "prefer": vendor_aliases.get(preference, preference),
         "declared_prefer": preference,
+        "preferred_provider_pool": frozenset(normalized_preferred_pool),
+        "declared_preferred_provider_pool": tuple(preferred_pool),
         "avoid": frozenset(vendor_aliases.get(item, item) for item in avoided),
         "declared_avoid": tuple(avoided),
+        "max_duration_ms": max_duration_ms,
     }
 
 
@@ -644,18 +706,26 @@ def _estimate_cost(
         return None
     if profile["session_cost_basis"] == "route-specific-cohort" and route.get("id") != profile["cohort_route_id"]:
         return None
+    attempts = profile["session_attempts"]
+    accepted_completions = (
+        profile["accepted_completions"]
+        if profile["session_cost_basis"] == "route-specific-cohort" else None
+    )
+    if profile["session_cost_basis"] == "route-specific-cohorts":
+        cohort = profile["route_session_cohorts"].get(str(route.get("id")))
+        if cohort is None:
+            return None
+        attempts = cohort["session_attempts"]
+        accepted_completions = cohort["accepted_completions"]
     return estimate_session_cost(
         cost_model,
-        profile["session_attempts"],
+        attempts,
         host_cost_state=profile["route_spend_state"].get(
             str(route.get("id")), profile["host_cost_state"].get(route.get("host"), "unknown")
         ),
         now=now,
         max_days=max_days,
-        accepted_completions=(
-            profile["accepted_completions"]
-            if profile["session_cost_basis"] == "route-specific-cohort" else None
-        ),
+        accepted_completions=accepted_completions,
         plan_state=profile["declared_plan_state"].get(str(route.get("id"))),
     )
 
@@ -763,6 +833,15 @@ def _candidate_or_reasons(
             score = int(scores[profile["task_band"]])
             if score < profile["quality_floor"]:
                 reasons.append("quality-floor-not-met")
+    median_duration_ms: float | None = None
+    if profile["max_duration_ms"] is not None:
+        raw_duration = evidence.get("median_duration_ms") if isinstance(evidence, Mapping) else None
+        if isinstance(raw_duration, bool) or not isinstance(raw_duration, (int, float)) or raw_duration <= 0:
+            reasons.append("duration-unverified")
+        else:
+            median_duration_ms = float(raw_duration)
+            if median_duration_ms > profile["max_duration_ms"]:
+                reasons.append("duration-budget-exceeded")
     behavioral = route.get("behavioral_capabilities")
     for required in profile["required_behavioral_capabilities"]:
         record = behavioral.get(required) if isinstance(behavioral, Mapping) else None
@@ -783,6 +862,9 @@ def _candidate_or_reasons(
     cost = _estimate_cost(
         route, profile, now, int(catalog["freshness_days"]["price"])
     )
+    if (profile["session_cost_basis"] == "route-specific-cohorts"
+            and route_id not in profile["route_session_cohorts"]):
+        reasons.append("route-session-cohort-missing")
     if profile["policy"] == "cost-optimized" and cost is None:
         reasons.append("cost-basis-missing-or-stale")
     expected_cost: float | None = None
@@ -815,6 +897,7 @@ def _candidate_or_reasons(
         "protocol": route["protocol"],
         "execution_location": execution_location,
         "quality_score": score,
+        "median_duration_ms": median_duration_ms,
         "estimated_cost": cost,
         "estimated_cost_usd": (
             cost["value"] if cost is not None and cost["unit"] in {"usd", "incremental-usd"} else None
@@ -822,6 +905,7 @@ def _candidate_or_reasons(
         "expected_cost_per_accepted_result": expected_cost,
         "cost_per_accepted_basis": (
             "observed-route-specific-cohort" if profile["session_cost_basis"] == "route-specific-cohort"
+            else "observed-route-specific-cohorts" if profile["session_cost_basis"] == "route-specific-cohorts"
             else "local-evaluation-rate-assumption"
         ),
         "acceptance_rate": evidence.get("acceptance_rate"),
@@ -871,6 +955,8 @@ def recommend(
             candidates.append(candidate)
 
     preference_applied = False
+    preferred_pool_applied = False
+    preferred_pool_fallback = False
     if normalized["prefer"]:
         preferred = [item for item in candidates if item["model_vendor"] == normalized["prefer"]]
         rejected = [item for item in candidates if item["model_vendor"] != normalized["prefer"]]
@@ -880,6 +966,23 @@ def recommend(
         )
         candidates = preferred
         preference_applied = bool(preferred)
+
+    if normalized["preferred_provider_pool"] and not normalized["prefer"]:
+        preferred = [
+            item for item in candidates
+            if item["provider"] in normalized["preferred_provider_pool"]
+            or item["model_vendor"] in normalized["preferred_provider_pool"]
+        ]
+        if preferred:
+            rejected = [item for item in candidates if item not in preferred]
+            exclusions.extend(
+                {"route_id": item["route_id"], "reasons": ["preferred-provider-pool"]}
+                for item in rejected
+            )
+            candidates = preferred
+            preferred_pool_applied = True
+        else:
+            preferred_pool_fallback = True
 
     if normalized["policy"] == "best-fit":
         ranked = sorted(
@@ -892,21 +995,20 @@ def recommend(
         ]
         pool = zero_cost or candidates
         cash_units = {"usd", "incremental-usd"}
-        if any(item["estimated_cost"]["unit"] not in cash_units for item in pool):
-            exclusions.extend(
-                {"route_id": item["route_id"], "reasons": ["noncash-cost-unit"]}
-                for item in pool
-            )
-            ranked = []
-        else:
-            ranked = sorted(
-                pool,
-                key=lambda item: (
-                    float(item["expected_cost_per_accepted_result"]),
-                    -int(item["quality_score"]),
-                    item["route_id"],
-                ),
-            )
+        noncash = [item for item in pool if item["estimated_cost"]["unit"] not in cash_units]
+        exclusions.extend(
+            {"route_id": item["route_id"], "reasons": ["noncash-cost-unit"]}
+            for item in noncash
+        )
+        cash_pool = [item for item in pool if item["estimated_cost"]["unit"] in cash_units]
+        ranked = sorted(
+            cash_pool,
+            key=lambda item: (
+                float(item["expected_cost_per_accepted_result"]),
+                -int(item["quality_score"]),
+                item["route_id"],
+            ),
+        )
 
     winner = ranked[0] if ranked else None
     return {
@@ -920,6 +1022,15 @@ def recommend(
         "preference": normalized["declared_prefer"],
         "effective_model_vendor_preference": normalized["prefer"],
         "preference_applied": preference_applied,
+        "preferred_provider_pool": list(normalized["declared_preferred_provider_pool"]),
+        "preferred_provider_pool_applied": preferred_pool_applied,
+        "preferred_provider_pool_fallback": preferred_pool_fallback,
+        "preference_rationale": (
+            "qualified-route-in-preferred-provider-pool"
+            if preferred_pool_applied else
+            "no-qualified-route-in-preferred-provider-pool;-ranked-all-eligible-routes"
+            if preferred_pool_fallback else None
+        ),
         "assumptions": {
             "originating_host": normalized["originating_host"],
             "coordinator_host": normalized["coordinator_host"],
@@ -935,6 +1046,13 @@ def recommend(
             "accepted_completions": normalized["accepted_completions"],
             "session_cost_basis": normalized["session_cost_basis"],
             "cohort_route_id": normalized["cohort_route_id"],
+            "route_session_cohorts": {
+                route_id: {
+                    "session_attempts": list(cohort["session_attempts"]),
+                    "accepted_completions": cohort["accepted_completions"],
+                }
+                for route_id, cohort in sorted(normalized["route_session_cohorts"].items())
+            },
             "required_connectors": sorted(normalized["required_connectors"]),
             "available_connectors": sorted(normalized["available_connectors"]),
             "required_capabilities": sorted(normalized["required_capabilities"]),
@@ -955,10 +1073,14 @@ def recommend(
             "include_glm": normalized["include_glm"],
             "glm_availability": normalized["glm_availability"],
             "declared_avoid": list(normalized["declared_avoid"]),
+            "max_duration_ms": normalized["max_duration_ms"],
             "today": now.isoformat(),
         },
         "reason_codes": (
             ["explicit-provider-preference"] if preference_applied else []
+        ) + (
+            ["preferred-provider-pool"] if preferred_pool_applied else
+            ["preferred-provider-pool-fallback"] if preferred_pool_fallback else []
         ) + (
             ["cross-host-worker-selected"]
             if winner and winner["connector_identity_changed"]

@@ -390,14 +390,14 @@
       "endpoint": "https://api.deepseek.com/anthropic",
       "auth_method": "provider-key",
       "model_vendor": "deepseek",
-      "requested_model": "deepseek-v4-flash",
+      "requested_model": "deepseek-flash",
       "resolved_model": null,
       "host": "claude",
       "harness": "claude-code",
       "mode": "execute",
       "protocol": "anthropic-compatible",
       "reasoning_setting": "provider-default",
-      "identity_stability": "alias-based",
+      "identity_stability": "provider-versioned-alias",
       "execution_location": "local-user-workspace",
       "qualification_state": "adapter-unqualified",
       "endpoint_evidence": {
@@ -408,9 +408,9 @@
       "model_evidence": {
         "verified": true,
         "verified_on": "2026-09-11",
-        "source": "https://api-docs.deepseek.com/news/news260910/"
+        "source": "https://api-docs.deepseek.com/quick_start/pricing/"
       },
-      "notes": "Candidate only. Exact response identity, tool behavior, and local evaluation remain required."
+      "notes": "Current Flash selector. Vendor documents V4.1 Flash behind this name; retired v4-flash aliases redirect. Record runtime response and vendor model version separately."
     },
     {
       "id": "deepseek-pro-research",
@@ -790,6 +790,130 @@
       "reasoning_setting": null,
       "identity_stability": null,
       "resolved_model": null
+    },
+    {
+      "id": "kimi-k2.6-platform-local",
+      "state": "candidate",
+      "default_enabled": false,
+      "provider": "kimi",
+      "model_vendor": "kimi",
+      "requested_model": "kimi-k2.6",
+      "resolved_model": null,
+      "gateway": "direct-kimi",
+      "endpoint": "https://api.moonshot.cn/anthropic",
+      "auth_method": "provider-key",
+      "host": "claude",
+      "harness": "claude-code",
+      "mode": "execute",
+      "protocol": "anthropic-compatible",
+      "reasoning_setting": "thinking-enabled",
+      "identity_stability": "provider-versioned-alias",
+      "execution_location": "local-user-workspace",
+      "qualification_state": "requires-local-evaluation",
+      "model_evidence": {
+        "verified": true,
+        "verified_on": "2026-09-11",
+        "source": "https://platform.kimi.com/docs/pricing/chat"
+      },
+      "endpoint_evidence": {
+        "verified": true,
+        "verified_on": "2026-09-11",
+        "source": "https://platform.kimi.com/docs/guide/claude-code-kimi"
+      },
+      "notes": "China Platform PAYG product; independent of Kimi Code subscription. User-specific live evidence belongs in the local routing profile."
+    },
+    {
+      "id": "kimi-k3-platform-local",
+      "state": "candidate",
+      "default_enabled": false,
+      "provider": "kimi",
+      "model_vendor": "kimi",
+      "requested_model": "kimi-k3",
+      "resolved_model": null,
+      "gateway": "direct-kimi",
+      "endpoint": "https://api.moonshot.cn/anthropic",
+      "auth_method": "provider-key",
+      "host": "claude",
+      "harness": "claude-code",
+      "mode": "execute",
+      "protocol": "anthropic-compatible",
+      "reasoning_setting": "thinking-enabled",
+      "identity_stability": "provider-versioned-alias",
+      "execution_location": "local-user-workspace",
+      "qualification_state": "requires-local-evaluation",
+      "model_evidence": {
+        "verified": true,
+        "verified_on": "2026-09-11",
+        "source": "https://platform.kimi.com/docs/pricing/chat"
+      },
+      "endpoint_evidence": {
+        "verified": true,
+        "verified_on": "2026-09-11",
+        "source": "https://platform.kimi.com/docs/guide/claude-code-kimi"
+      },
+      "notes": "China Platform PAYG product; independent of Kimi Code subscription. User-specific live evidence belongs in the local routing profile."
+    },
+    {
+      "id": "kimi-k2.7-code-platform-local",
+      "state": "candidate",
+      "default_enabled": false,
+      "provider": "kimi",
+      "model_vendor": "kimi",
+      "requested_model": "kimi-k2.7-code",
+      "resolved_model": null,
+      "gateway": "direct-kimi",
+      "endpoint": "https://api.moonshot.cn/anthropic",
+      "auth_method": "provider-key",
+      "host": "claude",
+      "harness": "claude-code",
+      "mode": "execute",
+      "protocol": "anthropic-compatible",
+      "reasoning_setting": "thinking-enabled",
+      "identity_stability": "provider-versioned-alias",
+      "execution_location": "local-user-workspace",
+      "qualification_state": "requires-local-evaluation",
+      "model_evidence": {
+        "verified": true,
+        "verified_on": "2026-09-11",
+        "source": "https://platform.kimi.com/docs/pricing/chat"
+      },
+      "endpoint_evidence": {
+        "verified": true,
+        "verified_on": "2026-09-11",
+        "source": "https://platform.kimi.com/docs/guide/claude-code-kimi"
+      },
+      "notes": "China Platform PAYG product; independent of Kimi Code subscription. User-specific live evidence belongs in the local routing profile."
+    },
+    {
+      "id": "kimi-k2.7-code-highspeed-platform-local",
+      "state": "candidate",
+      "default_enabled": false,
+      "provider": "kimi",
+      "model_vendor": "kimi",
+      "requested_model": "kimi-k2.7-code-highspeed",
+      "resolved_model": null,
+      "gateway": "direct-kimi",
+      "endpoint": "https://api.moonshot.cn/anthropic",
+      "auth_method": "provider-key",
+      "host": "claude",
+      "harness": "claude-code",
+      "mode": "execute",
+      "protocol": "anthropic-compatible",
+      "reasoning_setting": "thinking-enabled",
+      "identity_stability": "provider-versioned-alias",
+      "execution_location": "local-user-workspace",
+      "qualification_state": "requires-local-evaluation",
+      "model_evidence": {
+        "verified": true,
+        "verified_on": "2026-09-11",
+        "source": "https://platform.kimi.com/docs/pricing/chat"
+      },
+      "endpoint_evidence": {
+        "verified": true,
+        "verified_on": "2026-09-11",
+        "source": "https://platform.kimi.com/docs/guide/claude-code-kimi"
+      },
+      "notes": "China Platform PAYG product; independent of Kimi Code subscription. User-specific live evidence belongs in the local routing profile."
     }
   ]
 }

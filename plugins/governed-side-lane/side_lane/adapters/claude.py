@@ -6,6 +6,7 @@ import os
 import json
 from pathlib import Path
 import re
+import signal
 import subprocess
 from typing import Any, Callable, Mapping, Union
 from urllib.parse import urlparse
@@ -18,6 +19,8 @@ MAX_PROMPT_CHARS = 100_000
 NATIVE_PROVIDER = "claude"
 NATIVE_GATEWAY = "native-claude"
 BILLABLE_PROVIDERS = frozenset({"glm", "openrouter", "deepseek", "kimi", "minimax"})
+# Qualification harness membership only. Runtime endpoint acceptance is driven
+# by the configured per-model identity and qualification contract below.
 FIRST_WAVE_ENDPOINTS = {
     "deepseek": "https://api.deepseek.com/anthropic",
     "kimi": "https://api.kimi.com/coding/",
@@ -77,6 +80,32 @@ class ClaudeAdapterError(RuntimeError):
 
 Capabilities = Union[tuple[str, ...], list[str], frozenset[str]]
 Runner = Callable[..., Any]
+
+
+def _bounded_process(command: list[str], *, timeout: int, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    """Run one Claude worker and stop its whole process group on timeout/cancel."""
+
+    if kwargs.pop("capture_output", False):
+        kwargs["stdout"] = subprocess.PIPE
+        kwargs["stderr"] = subprocess.PIPE
+    kwargs.pop("check", None)
+    process = subprocess.Popen(command, start_new_session=True, **kwargs)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except (subprocess.TimeoutExpired, KeyboardInterrupt) as exc:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            stdout, stderr = process.communicate()
+        except ProcessLookupError:
+            stdout, stderr = process.communicate()
+        if isinstance(exc, KeyboardInterrupt):
+            raise
+        return subprocess.CompletedProcess(command, 124, stdout,
+            (stderr or "") + "\nworker timed out; process group stopped")
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 def _capability_set(capabilities: Capabilities) -> frozenset[str]:
@@ -175,12 +204,6 @@ def _route_metadata(
         parsed = urlparse(endpoint)
         if parsed.scheme != "https" or not parsed.netloc or parsed.query or parsed.fragment:
             raise ClaudeAdapterError("billable gateway must be a clean HTTPS endpoint")
-        expected_endpoint = FIRST_WAVE_ENDPOINTS.get(provider)
-        reviewed_endpoints = {expected_endpoint.rstrip("/")} if expected_endpoint else set()
-        if provider == "kimi":
-            reviewed_endpoints.add("https://api.moonshot.cn/anthropic")
-        if expected_endpoint is not None and endpoint.rstrip("/") not in reviewed_endpoints:
-            raise ClaudeAdapterError("provider endpoint does not match the reviewed first-wave contract")
         # GLM predates the identity contract. Every newly configured direct
         # provider must prove that Claude Code settings cannot substitute an
         # alias, fast model, or subagent model behind the requested selector.
@@ -237,8 +260,7 @@ def _per_launch_settings(provider: str, model: str, mode: str, base_url: str | N
         settings["env"] = {name: model for name in EXACT_MODEL_ENV_NAMES}
         if base_url is not None:
             settings["env"]["ANTHROPIC_BASE_URL"] = base_url.rstrip("/")
-        if provider in FIRST_WAVE_ENDPOINTS:
-            settings["alwaysThinkingEnabled"] = True
+        settings["alwaysThinkingEnabled"] = True
     return json.dumps(settings, separators=(",", ":"), sort_keys=True)
 
 
@@ -320,7 +342,8 @@ def build_command(
                 "--setting-sources",
                 "user,project,local",
                 "--output-format",
-                "text",
+                "stream-json",
+                "--verbose",
                 "--settings",
                 _per_launch_settings(provider, runtime_model, mode, provider_config.get("base_url")),
             )
@@ -358,14 +381,14 @@ def launch(
     capabilities: Capabilities = (),
     env: Mapping[str, str] | None = None,
     secret: str | None = None,
-    runner: Runner = subprocess.run,
+    runner: Runner = None,
 ) -> LaneResult:
-    # Contract rendering is testable offline, but these providers have not
-    # passed a local response-identity/lifecycle evaluation.  Refuse before
-    # credential transport or process creation; a catalog candidate is never
-    # executable merely because its endpoint syntax is known.
-    if provider in FIRST_WAVE_ENDPOINTS:
-        raise ClaudeAdapterError("first-wave provider adapter is unqualified for launch")
+    if provider != NATIVE_PROVIDER and provider != "glm":
+        qualification = model_config.get("qualification")
+        if not isinstance(qualification, Mapping) or qualification.get("verified") is not True:
+            raise ClaudeAdapterError("external route lacks verified model transport qualification")
+        _nonempty(qualification.get("verified_on"), "qualification.verified_on")
+        _nonempty(qualification.get("source"), "qualification.source")
     repo_path = validate_worktree(repo)
     worktree_path = validate_worktree(worktree)
     granted = tuple(sorted(_capability_set(capabilities)))
@@ -393,9 +416,14 @@ def launch(
         mode=mode,
         secret=secret,
     )
+    timeout = model_config.get("timeout_seconds", 600)
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+        raise ClaudeAdapterError("timeout_seconds must be a positive integer")
+    active_runner = _bounded_process if runner is None else runner
     try:
-        completed = runner(
+        completed = active_runner(
             command,
+            timeout=timeout,
             cwd=worktree_path,
             env=child_env,
             stdin=subprocess.DEVNULL,
@@ -414,6 +442,18 @@ def launch(
         and GLM_QUOTA_PAUSE.search(f"{stdout}\n{stderr}")
         else "completed"
     )
+    resolved_model, usage, attested_models = _stream_metadata(stdout)
+    identity = model_config.get("identity_contract")
+    if int(completed.returncode) == 0 and provider != NATIVE_PROVIDER and isinstance(identity, Mapping):
+        if not attested_models:
+            completed = subprocess.CompletedProcess(command, 65, stdout, stderr)
+            stderr = (stderr + "\nidentity-unverified: response did not attest a model").lstrip()
+        elif len(attested_models) != 1:
+            completed = subprocess.CompletedProcess(command, 65, stdout, stderr)
+            stderr = (stderr + "\nidentity-unverified: response attested multiple models").lstrip()
+        elif resolved_model != model:
+            completed = subprocess.CompletedProcess(command, 65, stdout, stderr)
+            stderr = (stderr + f"\nidentity-mismatch: requested {model!r}, attested {resolved_model!r}").lstrip()
     return LaneResult(
         argv=tuple(command),
         returncode=int(completed.returncode),
@@ -433,9 +473,48 @@ def launch(
         requested_model=model,
         # The transport requests this selector; it cannot attest to the
         # provider's response weight/version without a verified response field.
-        resolved_model=None,
+        resolved_model=resolved_model,
         reasoning_effort=(
             model_config.get("reasoning_effort")
             if isinstance(model_config.get("reasoning_effort"), str) else None
         ),
+        usage=usage,
     )
+
+
+def _stream_metadata(stdout: str) -> tuple[str | None, dict[str, Any] | None, frozenset[str]]:
+    """Read attested model and usage from Claude stream-json without estimating cost."""
+
+    models: set[str] = set()
+    final_usage: dict[str, Any] | None = None
+    message_usage: dict[str, dict[str, int | float]] = {}
+    for line_number, line in enumerate(stdout.splitlines()):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, Mapping):
+            continue
+        if isinstance(event.get("model"), str) and event["model"]:
+            models.add(event["model"])
+        message = event.get("message")
+        if isinstance(message, Mapping):
+            if isinstance(message.get("model"), str) and message["model"]:
+                models.add(message["model"])
+            if isinstance(message.get("usage"), Mapping):
+                message_id = message.get("id")
+                identity = message_id if isinstance(message_id, str) and message_id else f"line:{line_number}"
+                observed = message_usage.setdefault(identity, {})
+                for key, value in message["usage"].items():
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        observed[key] = max(observed.get(key, value), value)
+        if event.get("type") == "result" and isinstance(event.get("usage"), Mapping):
+            final_usage = dict(event["usage"])
+    usage: dict[str, Any] | None = final_usage
+    if usage is None and message_usage:
+        usage = {"observation": "partial-stream"}
+        for observed in message_usage.values():
+            for key, value in observed.items():
+                usage[key] = usage.get(key, 0) + value
+    resolved = next(iter(models)) if len(models) == 1 else None
+    return resolved, usage, frozenset(models)

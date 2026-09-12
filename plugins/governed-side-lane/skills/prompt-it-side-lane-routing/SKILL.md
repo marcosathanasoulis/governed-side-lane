@@ -124,6 +124,14 @@ marketing tiers. Record the task's actual requirements:
   preferences and stated usage or surplus constraints, such as
   `prefer=claude` or `avoid=codex`.
 
+Classify each task before comparing routes: `light` (bounded mechanical or
+fixture work), `deep` (ambiguous debugging, architecture, or large-repository
+reasoning), `design` (visual hierarchy and design judgment), or `browser`
+(connector-backed navigation and interaction). The band is a task requirement,
+not a model tier. Require evidence for the requested band, quality floor,
+context/output estimate, host tools, connectors, and authority. Frontend coding
+or model-vision evidence alone does not qualify a design or browser task.
+
 At planning time, inspect the current runtime and documented lane inventory for
 exact available model names and their supplied capability descriptions. Include
 qualified currently available Anthropic/Claude models in the same task-relative
@@ -141,8 +149,8 @@ meet the stated quality floor.
 
 A side-lane candidate is eligible only when all of these are true:
 
-1. Its exact `host + mode + provider + model` route is configured and the
-   transport protocol is verified.
+1. Its exact `host + mode + provider + gateway + model` route is configured and
+   the transport protocol is verified.
 2. Its own worker host satisfies every required connector/MCP and operational
    capability; cross-host connector parity is never assumed.
 3. It has current reviewed task-fit and behavioral-capability evidence,
@@ -176,6 +184,14 @@ developer/user preferences and stated usage or surplus constraints, and record
 the material tradeoff. If reviewed cost evidence is missing, report it as
 unknown rather than inventing a price or relaxing another gate. Show exclusions,
 assumptions, catalog/evidence timestamps, and the exact route in the brief.
+
+Estimate economics for the complete session: task tokens, known tool charges,
+dispatch/setup, retries and coordinator repair, and any independent review.
+Keep prepaid usage separate from marginal provider-key cost; unknown rates or
+overhead remain unknown and are never treated as zero. Prefer the least-cost
+sufficiently evidenced eligible fit for ordinary work. A frontier assignment
+requires task-specific evidence that an eligible economical route cannot meet
+the quality or capability requirement.
 
 Use official specifications for hard protocol/tool facts. For behavioral
 capabilities, preserve typed evidence from reproducible benchmarks, local
@@ -277,3 +293,10 @@ coordinator has accepted. A failed task blocks its dependents while unrelated
 approved tasks may continue. A later missing route or failed lane returns for a
 staffing decision; it never silently reroutes, falls back, or changes the
 primary coordinator.
+
+After approval, dispatch only the exact route in the accepted staffing row and
+record route recheck, dispatch, handoff, validation, and coordinator
+acceptance. A retry or correction stays within the approved route and scope;
+record its added session cost. If the route becomes unavailable, block its
+dependents and return for an explicit staffing decision. An independent review
+is a separate node with a distinct question, approval, and cost entry.

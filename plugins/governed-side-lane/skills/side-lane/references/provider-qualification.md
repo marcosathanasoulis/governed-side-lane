@@ -15,11 +15,18 @@ references to secrets, never their values in skills, prompts, artifacts, or argv
 - Kimi: distinguish Platform PAYG from Kimi Code subscription credentials and
   endpoints. Match the account's regional endpoint and currency. A funded
   Platform account does not establish a Code subscription entitlement.
-- MiniMax: distinguish an account-management credential from an inference API
-  key and confirm the product/region supported by the configured endpoint.
+- MiniMax: distinguish the standard PAYG inference API key from a `sk-cp`
+  Token Plan key backed by prepaid credits. Token Plan credits can qualify the
+  route without a separate subscription; neither credential is an account-
+  management credential. Confirm the product, region, endpoint, and applicable
+  credit or subscription terms before comparing marginal cost. Use the
+  [Token Plan pricing documentation](https://platform.minimax.io/docs/guides/pricing-token-plan)
+  as the current source for those terms.
 - Cognition/Devin: distinguish service credentials, personal access tokens, and
-  API credentials using current documentation. Identify whether the selected
-  product executes tools locally or in a hosted workspace.
+  API credentials using current documentation. For the Devin local worker,
+  qualify the separate CLI login and its local workspace harness; inherited
+  worker MCP tools remain host-local. A Devin Cloud workspace is a separate
+  route and is never a fallback for local execution.
 - xAI/Grok: distinguish consumer subscription access from API credentials and
   establish the actual tool harness rather than inferring browser support.
 
@@ -76,3 +83,10 @@ and qualification evidence. Enable only routes whose adapter and task evidence
 pass the existing gates. Report separately whether changes are tested in a
 worktree, committed, merged, installed, and confirmed by installed discovery.
 A successful API call or a passing unit test alone is not an end-to-end lane.
+
+For measured cross-route cost comparisons, set `session_cost_basis` to
+`route-specific-cohorts` and provide `route_session_cohorts`, keyed by exact route
+ID, with each route's complete `session_attempts` and `accepted_completions`.
+Include failed attempts. Missing or zero-success cohorts are ineligible; usage
+is never borrowed from another model. This is distinct from a hypothetical
+workload estimate. Keep unmeasured coordinator overhead explicitly unknown.

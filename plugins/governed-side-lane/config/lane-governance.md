@@ -122,10 +122,26 @@ pushed onward. Do not describe the allowlist as preventing those actions.
 - `Bash(find *)`
 - `Bash(sed *)`
 - `Bash(wc *)`
+
 - `Bash(echo *)`
 - `Bash(pwd)`
 - `Bash(which *)`
 - `Bash(env)`
+### playwright
+
+- `mcp__playwright__browser_navigate`
+- `mcp__playwright__browser_snapshot`
+- `mcp__playwright__browser_take_screenshot`
+- `mcp__playwright__browser_resize`
+- `mcp__playwright__browser_click`
+- `mcp__playwright__browser_press_key`
+- `mcp__playwright__browser_evaluate`
+- `mcp__playwright__browser_tabs`
+- `mcp__playwright__browser_close`
+- `mcp__playwright__browser_wait_for`
+- `mcp__playwright__browser_console_messages`
+- `mcp__playwright__browser_network_requests`
+- `mcp__playwright__browser_fill_form`
 
 ### git-push
 

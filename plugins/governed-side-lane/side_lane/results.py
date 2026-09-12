@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,8 @@ class LaneResult:
     requested_model: str | None = None
     resolved_model: str | None = None
     reasoning_effort: str | None = None
+    usage: dict[str, Any] | None = None
+    provider_artifact: str | None = None
 
     @property
     def worktree(self) -> Path:
@@ -40,6 +43,8 @@ class LaneResult:
             "requested_model": self.requested_model or self.model,
             "resolved_model": self.resolved_model,
             "reasoning_effort": self.reasoning_effort,
+            "usage": self.usage,
+            "provider_artifact": self.provider_artifact,
             "auth_method": self.auth_method,
             "billable": self.billable,
             "cwd": str(self.cwd),
