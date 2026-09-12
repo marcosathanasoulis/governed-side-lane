@@ -100,6 +100,14 @@ claim an equivalent route. When the user requires a particular lane and it is
 not ready, represent qualification or repair as a scoped dependency with an
 owner and acceptance evidence; do not silently drop the requirement.
 
+For newly acquired provider accounts, use the core Side Lane skill's
+[provider qualification](../side-lane/references/provider-qualification.md)
+reference. Include each task-fitting configured provider in the comparison,
+including economical variants, without presuming its flagship is preferable.
+Separate product/region/endpoint and local harness identity from model capability.
+Report unfinished setup as a dependency, not as a reason to purchase another
+account or silently use a different provider.
+
 ## Build the task profile from evidence
 
 Use facts discovered during Prompt it research rather than model names or

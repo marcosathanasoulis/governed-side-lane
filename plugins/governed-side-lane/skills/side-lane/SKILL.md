@@ -1,6 +1,6 @@
 ---
 name: side-lane
-description: Route an approved review or implementation task to an exact native Codex, native Claude, or explicitly configured GLM lane, including Prompt it staffing and explicit spend routing.
+description: Discover and qualify optional model lanes, then route approved tasks through exact configured workers, including Prompt it staffing and explicit spend routing.
 ---
 
 # Side lane
@@ -26,6 +26,13 @@ public [model guide](../../docs/model-guide.md) and
 They do not make a route executable: keep candidate, configured, available, and
 authorized states separate, and continue normally with one native OpenAI or
 Claude host when no optional route qualifies.
+
+For new provider setup or a first trial, read
+[provider qualification](references/provider-qualification.md). It covers
+DeepSeek, Kimi, MiniMax, xAI/Grok, and Cognition/Devin without treating a saved
+credential, subscription, or catalog entry as an executable adapter. Apply the
+same route-specific process to future providers; keep exact IDs in configuration
+and sourced model guidance rather than hardcoding a second allowlist here.
 
 Inspect the resolved runner's help. `list` shows configured route inventory, not
 current readiness. For the exact host, mode, provider, model, and repository,
