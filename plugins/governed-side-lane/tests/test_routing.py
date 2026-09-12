@@ -83,6 +83,19 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(result["winner"]["host"], "codex")
         self.assertTrue(result["winner"]["estimated_cost"]["incremental_zero"])
 
+    def test_included_oauth_winner_does_not_hide_qualified_paid_routes(self) -> None:
+        catalog = copy.deepcopy(self.catalog)
+        catalog["routes"][1]["cost_model"]["basis"] = "external-billable"
+        result = routing.recommend(catalog, self.profile(policy="cost-optimized",
+            host_cost_state={"claude": "extra-usage", "codex": "included-oauth"}),
+            runtime_allowlist=self.allowlist, credential_present_routes=self.allowlist,
+            today=TODAY)
+        ranked = {item["route_id"]: item for item in result["ranked_routes"]}
+        self.assertEqual(result["winner"]["route_id"], "terra")
+        self.assertTrue(ranked["terra"]["estimated_cost"]["incremental_zero"])
+        self.assertGreater(ranked["sol"]["expected_cost_per_accepted_result"], 0)
+        self.assertIn("fable", ranked)
+
     def test_preferred_provider_pool_is_soft_and_applies_after_eligibility(self) -> None:
         preferred = routing.recommend(self.catalog,
             self.profile(preferred_provider_pool=["claude"]),

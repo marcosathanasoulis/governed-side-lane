@@ -990,17 +990,19 @@ def recommend(
             key=lambda item: (-int(item["quality_score"]), item["route_id"]),
         )
     else:
-        zero_cost = [
-            item for item in candidates if item["estimated_cost"]["incremental_zero"]
-        ]
-        pool = zero_cost or candidates
         cash_units = {"usd", "incremental-usd"}
-        noncash = [item for item in pool if item["estimated_cost"]["unit"] not in cash_units]
+        noncash = [
+            item for item in candidates
+            if item["estimated_cost"]["unit"] not in cash_units
+        ]
         exclusions.extend(
             {"route_id": item["route_id"], "reasons": ["noncash-cost-unit"]}
             for item in noncash
         )
-        cash_pool = [item for item in pool if item["estimated_cost"]["unit"] in cash_units]
+        cash_pool = [
+            item for item in candidates
+            if item["estimated_cost"]["unit"] in cash_units
+        ]
         ranked = sorted(
             cash_pool,
             key=lambda item: (
