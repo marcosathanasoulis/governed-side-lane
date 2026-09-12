@@ -142,6 +142,8 @@ pushed onward. Do not describe the allowlist as preventing those actions.
 - `mcp__playwright__browser_console_messages`
 - `mcp__playwright__browser_network_requests`
 - `mcp__playwright__browser_fill_form`
+- `mcp__playwright__browser_type`
+- `mcp__playwright__browser_select_option`
 
 ### git-push
 
