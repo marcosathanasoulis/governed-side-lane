@@ -161,10 +161,11 @@ priced request when context bands apply. The
 [disabled provider profile](../config/examples/provider-profiles.disabled.json)
 shows the exact identity contract a direct provider would need. It is not read
 by Side Lane, does not enable a provider or credential lookup, and is not a
-configuration shortcut. DeepSeek, Kimi, and MiniMax launches currently stop
-with an adapter-unqualified error even if a caller supplies configuration.
-Enabling them requires a reviewed adapter qualification change, an exact
-allowlist entry, local task evaluation, and explicit task authorization.
+configuration shortcut. DeepSeek, Kimi, and MiniMax execute routes require per-model verified transport
+qualification and an exact identity contract in the configured allowlist.
+Successful execution alone does not qualify automatic selection: that additionally
+requires fresh task-specific local evaluation and cost evidence. The returned
+model must match the requested model. No provider is enabled by this example.
 
 ## Qualification entrypoint
 
@@ -173,6 +174,13 @@ authorized, bounded local trials for direct providers after a matching transport
 probe. It reuses the adapter command/environment contracts, preserves local
 workspace execution, rejects conflicting saved authentication, and returns
 qualification evidence without activating a route. Automated tests mock it;
-ordinary `side-lane run` still rejects these candidates until full qualification
-and reviewed activation. Usage reported with `costBasis: unknown` is not a
+ordinary `side-lane run` accepts explicitly configured, transport-qualified
+routes, while `recommend` independently requires task-quality evidence. Usage reported with `costBasis: unknown` is not a
 verified vendor bill.
+
+For measured comparisons across multiple routes, use
+`session_cost_basis: "route-specific-cohorts"` and `route_session_cohorts`, keyed
+by route ID. Each value contains that route’s `session_attempts` and
+`accepted_completions`; failed attempts remain in the cost history. Missing
+cohorts or zero accepted completions cannot win. Report worker cost separately
+when coordinator repair/overhead has not been measured.
