@@ -66,6 +66,19 @@ class ClaudeAdapterTests(unittest.TestCase):
         settings = json.loads(execute[execute.index("--settings") + 1])
         self.assertEqual(settings["enabledMcpjsonServers"], ["playwright"])
         self.assertNotIn("enableAllProjectMcpServers", settings)
+        self.assertIn("WaitForMcpServers", execute)
+        self.assertIn('servers: ["playwright"]', execute[-1])
+
+    def test_non_browser_execute_does_not_receive_playwright_startup_instruction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            execute = claude.build_command(executable="claude", repo=repo, worktree=lane,
+                provider="claude", model="claude-sonnet-5", provider_config=self.native,
+                model_config={"runtime_model": "claude-sonnet-5", "protocol": "native-claude"},
+                prompt="task", capabilities=("shell",))
+        self.assertNotIn("WaitForMcpServers", execute)
+        self.assertNotIn("Claude Code Playwright startup", execute[-1])
 
     def test_playwright_launch_requires_connected_mcp_before_model_runner(self) -> None:
         readiness = mock.Mock(return_value=subprocess.CompletedProcess(

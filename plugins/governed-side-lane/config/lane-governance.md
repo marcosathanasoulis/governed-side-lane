@@ -129,6 +129,7 @@ pushed onward. Do not describe the allowlist as preventing those actions.
 - `Bash(env)`
 ### playwright
 
+- `WaitForMcpServers`
 - `mcp__playwright__browser_navigate`
 - `mcp__playwright__browser_snapshot`
 - `mcp__playwright__browser_find`

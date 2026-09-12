@@ -67,6 +67,19 @@ SUPPORTED_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 MCP_READINESS_TIMEOUT_SECONDS = 20
 READINESS_REQUIRED_CAPABILITIES = frozenset({"playwright"})
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+PLAYWRIGHT_STARTUP_INSTRUCTION = """\
+
+
+# Claude Code Playwright startup
+
+This task requires the Playwright MCP server. Before assessing browser-tool
+availability or starting browser work, check whether the Playwright tools have
+already appeared. If they have not, call `WaitForMcpServers` with
+`servers: ["playwright"]`. Continue only when the tools are present or the wait
+reports `ready: true` and adds them. If the wait reports that Playwright failed,
+needs authentication, is disabled, or remains pending, stop and report that
+exact state instead of claiming the tools were never configured.
+"""
 
 
 # Capability-gated permission rules for headless execute lanes.
@@ -379,7 +392,10 @@ def build_command(
             command.extend(("--allowedTools", tool))
         for tool in disallowed_tools(mode, capabilities):
             command.extend(("--disallowedTools", tool))
-    command.extend(("--append-system-prompt", lane_system_prompt(mode, repo_path)))
+    system_prompt = lane_system_prompt(mode, repo_path)
+    if mode == "execute" and "playwright" in _capability_set(capabilities):
+        system_prompt += PLAYWRIGHT_STARTUP_INSTRUCTION
+    command.extend(("--append-system-prompt", system_prompt))
     return command
 
 
