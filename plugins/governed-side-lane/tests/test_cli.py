@@ -29,6 +29,21 @@ class SideLaneTests(unittest.TestCase):
         (path / "AGENTS.md").write_text("You must read [CLAUDE.md](./CLAUDE.md); it is the authoritative source of truth.\n", encoding="utf-8")
         return path
 
+    def devin_billing_config(self) -> dict:
+        config = cli.load_config()
+        config["providers"]["devin"] = {
+            "gateway": "native-devin", "auth_method": "oauth", "billable": False,
+            "routes": {"execute": {"devin": {
+                "protocol": "native-devin",
+                "models": ["swe-2-medium", "grok-4-6-low"],
+                "model_configs": {
+                    "swe-2-medium": {"billable": False},
+                    "grok-4-6-low": {"billable": True},
+                },
+            }}},
+        }
+        return config
+
     def test_exact_native_matrix_and_explicit_glm_metadata(self) -> None:
         config = cli.load_config()
         provider, route = cli.select_route(config, "codex", "execute", "openai", "gpt-5.6-terra")
@@ -154,6 +169,86 @@ class SideLaneTests(unittest.TestCase):
             with self.assertRaisesRegex(cli.SideLaneError, "explicit --approve"):
                 cli._launch(args, cli.load_config(), self.repo(), "Review")
             read.assert_not_called()
+
+    def test_metered_devin_selection_list_and_approval_gate_use_model_billing(self) -> None:
+        config = self.devin_billing_config()
+        provider, route = cli.select_route(
+            config, "devin", "execute", "devin", "grok-4-6-low")
+        self.assertTrue(provider["billable"])
+        self.assertTrue(route["billable"])
+        with mock.patch("side_lane.cli.load_config", return_value=config), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(cli.run(["list"]), 0)
+        self.assertIn(
+            "devin\texecute\tdevin\tnative-devin\tgrok-4-6-low\toauth\tbillable",
+            output.getvalue(),
+        )
+        args = mock.Mock(host="devin", mode="execute", provider="devin",
+            model="grok-4-6-low", capability=[], lane_name="metered",
+            approve_billable_route=False, worktree_root=None)
+        with mock.patch("side_lane.cli._require_host_executable") as executable, \
+             mock.patch("side_lane.cli.create_worktree") as create, \
+             mock.patch("side_lane.cli.require_native_oauth") as auth, \
+             mock.patch("side_lane.cli.read_credential") as read:
+            with self.assertRaisesRegex(cli.SideLaneError, "explicit --approve"):
+                cli._launch(args, config, self.repo(), "Implement")
+        executable.assert_not_called()
+        create.assert_not_called()
+        auth.assert_not_called()
+        read.assert_not_called()
+
+    def test_approved_metered_devin_passes_effective_billing_to_adapter_and_audit(self) -> None:
+        config = self.devin_billing_config()
+        repo = self.repo()
+        worktree = repo.parent / "metered-devin-worktree"
+        lane = mock.Mock(worktree=worktree, branch="side-lane/metered")
+        result = LaneResult(("devin",), 0, worktree, "devin", "devin",
+            "native-devin", "grok-4-6-low", "oauth", True, "done", "",
+            requested_model="grok-4-6-low", resolved_model="grok-4-6-low")
+        args = mock.Mock(host="devin", mode="execute", provider="devin",
+            model="grok-4-6-low", capability=[], lane_name="metered",
+            approve_billable_route=True, worktree_root=None)
+        with mock.patch("side_lane.cli._require_host_executable", return_value="/opt/devin"), \
+             mock.patch("side_lane.cli.create_worktree", return_value=lane), \
+             mock.patch("side_lane.cli.require_native_oauth") as auth, \
+             mock.patch("side_lane.cli.read_credential") as read, \
+             mock.patch("side_lane.adapters.devin.launch", return_value=result) as launch, \
+             mock.patch("side_lane.cli.git_status", return_value="## metered"), \
+             mock.patch("side_lane.cli.write_audit", return_value=repo / ".git/audit.json") as audit, \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli._launch(args, config, repo, "Implement"), 0)
+        auth.assert_called_once_with("devin", executable="/opt/devin")
+        read.assert_not_called()
+        self.assertTrue(launch.call_args.kwargs["provider_config"]["billable"])
+        self.assertTrue(launch.call_args.kwargs["model_config"]["billable"])
+        self.assertTrue(audit.call_args.kwargs["billable"])
+
+    def test_included_devin_model_remains_non_billable(self) -> None:
+        config = self.devin_billing_config()
+        provider, route = cli.select_route(
+            config, "devin", "execute", "devin", "swe-2-medium")
+        self.assertFalse(provider["billable"])
+        self.assertFalse(route["billable"])
+        with mock.patch("side_lane.cli.load_config", return_value=config), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(cli.run(["list"]), 0)
+        self.assertIn(
+            "devin\texecute\tdevin\tnative-devin\tswe-2-medium\toauth\tsubscription",
+            output.getvalue(),
+        )
+
+    def test_model_billing_overrides_are_rejected_outside_native_devin_oauth(self) -> None:
+        provider_key = cli.load_config()
+        provider_key["providers"]["glm"]["routes"]["execute"]["claude"][
+            "model_configs"] = {"glm-5.3": {"billable": False}}
+        with self.assertRaisesRegex(cli.SideLaneError, "only for native Devin OAuth"):
+            cli.select_route(provider_key, "claude", "execute", "glm", "glm-5.3")
+        native_oauth = cli.load_config()
+        native_oauth["providers"]["claude"]["routes"]["execute"]["claude"][
+            "model_configs"] = {"claude-sonnet-5": {"billable": True}}
+        with self.assertRaisesRegex(cli.SideLaneError, "only for native Devin OAuth"):
+            cli.select_route(
+                native_oauth, "claude", "execute", "claude", "claude-sonnet-5")
 
     def test_adapter_errors_are_rendered_as_expected_cli_failures(self) -> None:
         with mock.patch("side_lane.cli.run", side_effect=cli.CodexAdapterError("bad adapter")), \
@@ -389,6 +484,52 @@ class ConnectorDiscoveryTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
         self.assertEqual(names, {"expected"})
+
+    def test_devin_uses_only_native_mcp_files_and_requires_exact_names(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "home"
+            repo = Path(directory) / "repo"
+            (home / ".config" / "devin").mkdir(parents=True)
+            (home / ".claude").mkdir()
+            (repo / ".devin").mkdir(parents=True)
+            (home / ".config" / "devin" / "mcp_config.json").write_text(
+                '{"mcpServers":{"playwright-local":{"command":"native-near"},'
+                '"gitnexus":{"command":"native-exact"}}}', encoding="utf-8")
+            (repo / ".devin" / "mcp_config.json").write_text(
+                '{"mcpServers":{"codegraph":{"command":"native-project"}}}', encoding="utf-8")
+            (repo / ".devin" / "mcp_config.local.json").write_text(
+                '{"mcpServers":{"playwright":{"command":"native-local"}}}', encoding="utf-8")
+            (home / ".claude.json").write_text(
+                '{"mcpServers":{"claude-only":{"command":"ignored"}}}', encoding="utf-8")
+            (home / ".claude" / "settings.json").write_text(
+                '{"mcpServers":{"claude-settings":{"command":"ignored"}}}', encoding="utf-8")
+            (repo / ".mcp.json").write_text(
+                '{"mcpServers":{"claude-project":{"command":"ignored"}}}', encoding="utf-8")
+            with mock.patch("side_lane.cli.Path.home", return_value=home), \
+                 mock.patch.dict(os.environ, {"APPDATA": ""}), \
+                 mock.patch("side_lane.cli._host_executable", return_value="/opt/devin"), \
+                 mock.patch("side_lane.cli.auth_status",
+                            return_value=mock.Mock(as_dict=lambda: {"state": "ready"})):
+                names, out_of_scope = cli._discover_mcp_inventory("devin", repo)
+                report = cli._capability_report(
+                    {"providers": {}, "capabilities": ["playwright", "gitnexus", "codegraph"]},
+                    "devin", "execute", None, None, repo)
+        self.assertEqual(names, {"playwright-local", "playwright", "gitnexus", "codegraph"})
+        self.assertEqual(out_of_scope, set())
+        self.assertFalse({"claude-only", "claude-settings", "claude-project"} & names)
+        self.assertEqual(report["capability_evidence"]["playwright"]["state"], "present")
+        self.assertEqual(report["capability_evidence"]["gitnexus"]["state"], "present")
+        self.assertEqual(report["capability_evidence"]["codegraph"]["state"], "present")
+
+    def test_devin_near_match_connector_names_do_not_satisfy_capabilities(self) -> None:
+        with mock.patch("side_lane.cli._host_executable", return_value="/opt/devin"), \
+             mock.patch("side_lane.cli._discover_mcp_inventory",
+                        return_value=({"playwright-local", "gitnexus-local"}, set())):
+            report = cli._capability_report(
+                {"providers": {}, "capabilities": ["playwright", "gitnexus"]},
+                "devin", "execute", None, None)
+        self.assertEqual(report["capability_evidence"]["playwright"]["state"], "unavailable")
+        self.assertEqual(report["capability_evidence"]["gitnexus"]["state"], "name-mismatch")
 
 
 class ExecuteLanePermissionTests(SideLaneTests):

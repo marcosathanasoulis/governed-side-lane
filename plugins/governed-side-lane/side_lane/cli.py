@@ -114,7 +114,15 @@ def select_route(config: Mapping[str, Any], host: str, mode: str, provider: str,
         if key in route:
             model_config[key] = route[key]
     model_config.update(route.get("model_configs", {}).get(model, {}))
-    return provider_config, model_config
+    billable = model_config["billable"]
+    if not isinstance(billable, bool):
+        raise SideLaneError("model billable metadata must be boolean")
+    if billable != provider_config["billable"] and not (
+        host == "devin" and route["protocol"] == "native-devin"
+        and provider_config["auth_method"] == "oauth"
+    ):
+        raise SideLaneError("model billing override is supported only for native Devin OAuth")
+    return {**provider_config, "billable": billable}, model_config
 
 
 def validate_selection(config: Mapping[str, Any], provider: str, model: str, *, host: str = "claude", mode: str = "review") -> Mapping[str, Any]:
@@ -403,9 +411,9 @@ def _capability_report(config: Mapping[str, Any], host: str, mode: str, provider
 def _graph_connector_evidence(capability: str, mcp_names: set[str], host: str, out_of_scope: set[str] = frozenset()) -> dict[str, str]:
     """Presence evidence for a code-graph connector.
 
-    Only the Claude execute adapter renders the fixed ``mcp__<capability>__*``
-    grants, and Claude embeds the configured server name in every tool ID
-    exactly. On that host only a server registered under the exact name is
+    The Claude and Devin execute adapters render the fixed ``mcp__<capability>__*``
+    grants, whose tool IDs embed the configured server name
+    exactly. On those hosts only a server registered under the exact name is
     callable; one that merely contains the word (``gitnexus-local``) would pass
     a substring check and then receive no usable grant, so it is reported as
     ``name-mismatch`` and fails the launch gate like any non-present state.
@@ -413,7 +421,7 @@ def _graph_connector_evidence(capability: str, mcp_names: set[str], host: str, o
     allowlist, so connector-name presence remains the evidence there.
     """
 
-    if host != "claude":
+    if host == "codex":
         if any(capability in name.lower() for name in mcp_names):
             return {"state": "present", "basis": "connector-name metadata only; Codex lanes inherit configured MCP servers directly"}
         return {"state": "unknown", "basis": "connector-name metadata only"}
@@ -454,12 +462,22 @@ def _discover_mcp_inventory(host: str, repo: Path | None = None) -> tuple[set[st
     names: set[str] = set()
     out_of_scope: set[str] = set()
     codex_home = Path(os.environ.get("CODEX_HOME", "").strip() or Path.home() / ".codex")
-    paths = ([codex_home / "config.toml"] if host == "codex"
-             else [Path.home() / ".claude.json", Path.home() / ".claude" / "settings.json"])
-    if repo is not None:
-        # Each host reads only its own project connector file; a lane inherits
-        # the selected host's connectors, never the other host's.
-        paths.append(repo / ".codex" / "config.toml" if host == "codex" else repo / ".mcp.json")
+    if host == "codex":
+        paths = [codex_home / "config.toml"]
+        if repo is not None:
+            paths.append(repo / ".codex" / "config.toml")
+    elif host == "claude":
+        paths = [Path.home() / ".claude.json", Path.home() / ".claude" / "settings.json"]
+        if repo is not None:
+            paths.append(repo / ".mcp.json")
+    elif host == "devin":
+        # Devin CLI >=3000.3 uses dedicated native MCP files, not Claude's.
+        base = Path(os.environ["APPDATA"]) if os.name == "nt" and os.environ.get("APPDATA") else Path.home() / ".config"
+        paths = [base / "devin" / "mcp_config.json"]
+        if repo is not None:
+            paths.extend([repo / ".devin" / "mcp_config.json", repo / ".devin" / "mcp_config.local.json"])
+    else:
+        return names, out_of_scope
     for path in paths:
         if not path.is_file():
             continue
@@ -502,9 +520,9 @@ def _launch(args: argparse.Namespace, config: Mapping[str, Any], repo: Path, pro
             )
     if not args.lane_name:
         raise SideLaneError(f"{args.mode} mode requires --lane-name")
-    if provider_config["auth_method"] == "oauth" and args.approve_billable_route:
-        raise SideLaneError("--approve-billable-route is invalid for native OAuth routes")
-    if provider_config["auth_method"] == "provider-key" and not args.approve_billable_route:
+    if not provider_config["billable"] and args.approve_billable_route:
+        raise SideLaneError("--approve-billable-route is invalid for non-billable native OAuth routes")
+    if provider_config["billable"] and not args.approve_billable_route:
         raise SideLaneError("billable route requires explicit --approve-billable-route for this run")
     executable = _require_host_executable(args.host)
     capabilities = tuple(sorted(set(args.capability)))
@@ -563,7 +581,8 @@ def run(argv: Sequence[str] | None = None) -> int:
             for mode, hosts in item["routes"].items():
                 for host, route in hosts.items():
                     for model in route["models"]:
-                        print(f"{host}\t{mode}\t{provider}\t{item['gateway']}\t{model}\t{item['auth_method']}\t{'billable' if item['billable'] else 'subscription'}")
+                        effective, _ = select_route(config, host, mode, provider, model)
+                        print(f"{host}\t{mode}\t{provider}\t{item['gateway']}\t{model}\t{item['auth_method']}\t{'billable' if effective['billable'] else 'subscription'}")
         return 0
     if args.command == "candidates":
         candidates = routing.list_catalog_candidates(routing.load_catalog())

@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 from typing import Any, Callable, Mapping
 
+from side_lane.credentials import scrub_backend_environment
 from side_lane.governance import lane_system_prompt
 from side_lane.hosts import with_support_dir
 from side_lane.results import LaneResult
@@ -88,12 +89,12 @@ def _validate_worktree(path_value: Path | str) -> Path:
 def build_child_env(inherited: Mapping[str, str]) -> dict[str, str]:
     """Preserve the OAuth session while removing every API-key fallback."""
 
-    return {
+    return scrub_backend_environment({
         name: value
         for name, value in inherited.items()
         if name not in PROVIDER_CREDENTIAL_ENV_NAMES
         and not name.startswith(PROVIDER_CREDENTIAL_ENV_PREFIXES)
-    }
+    })
 
 
 def build_codex_command(

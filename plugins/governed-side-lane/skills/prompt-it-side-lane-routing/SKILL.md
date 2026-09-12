@@ -82,7 +82,9 @@ For each considered route, record one state: `absent`, `configured`,
 `auth-or-tool-missing`, `task-unqualified`, or `eligible`. Include the evidence
 source, observation time, and reason. A configured GLM route may appear in
 inventory before the user enables it; exclude it from staffing until explicit
-GLM permission exists. Native OAuth defaults to included subscription usage.
+GLM permission exists. Authentication alone does not establish cost: native
+Devin can offer metered Gemini/Grok models. Use effective model billing metadata.
+Other native OAuth routes default to included subscription usage.
 When the user says a host is on extra usage, record only that statement (for
 example Claude `extra-usage`, Codex `included-oauth`).
 
@@ -215,7 +217,7 @@ coordinator or qualified native helper. Never change a research task to
 
 An external `execute` lane is an implementation worker proposed for after the
 execution brief is approved. GLM remains execute-only and keeps its separate
-explicit enablement and one-run approval gates; research-team authorization
+explicit enablement and run authorization gates; research-team authorization
 does not enable GLM, provider-key use, new spend, or execute mode.
 
 ## Build the complete task graph
@@ -300,3 +302,9 @@ acceptance. A retry or correction stays within the approved route and scope;
 record its added session cost. If the route becomes unavailable, block its
 dependents and return for an explicit staffing decision. An independent review
 is a separate node with a distinct question, approval, and cost entry.
+
+Explicit standing authorization for cost-effective metered routing may satisfy
+run-level spend authorization. Record it in staffing and pass the runner's
+`--approve-billable-route` flag for each covered billable run without asking the
+user again. Qualification, exact model selection, task scope, and accepted-task
+cost evidence still apply. OAuth does not exempt a metered model from this flag.

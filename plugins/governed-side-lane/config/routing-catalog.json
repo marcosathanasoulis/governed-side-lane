@@ -809,7 +809,7 @@
       "reasoning_setting": "thinking-enabled",
       "identity_stability": "provider-versioned-alias",
       "execution_location": "local-user-workspace",
-      "qualification_state": "requires-local-evaluation",
+      "qualification_state": "evaluation-required",
       "model_evidence": {
         "verified": true,
         "verified_on": "2026-09-11",
@@ -840,7 +840,7 @@
       "reasoning_setting": "thinking-enabled",
       "identity_stability": "provider-versioned-alias",
       "execution_location": "local-user-workspace",
-      "qualification_state": "requires-local-evaluation",
+      "qualification_state": "evaluation-required",
       "model_evidence": {
         "verified": true,
         "verified_on": "2026-09-11",
@@ -871,7 +871,7 @@
       "reasoning_setting": "thinking-enabled",
       "identity_stability": "provider-versioned-alias",
       "execution_location": "local-user-workspace",
-      "qualification_state": "requires-local-evaluation",
+      "qualification_state": "evaluation-required",
       "model_evidence": {
         "verified": true,
         "verified_on": "2026-09-11",
@@ -902,7 +902,7 @@
       "reasoning_setting": "thinking-enabled",
       "identity_stability": "provider-versioned-alias",
       "execution_location": "local-user-workspace",
-      "qualification_state": "requires-local-evaluation",
+      "qualification_state": "evaluation-required",
       "model_evidence": {
         "verified": true,
         "verified_on": "2026-09-11",

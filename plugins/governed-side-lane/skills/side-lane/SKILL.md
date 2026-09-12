@@ -89,8 +89,10 @@ review governance forbids secret access.
 It uses an exact configured provider/gateway and the user's prepaid flat-rate
 subscription, so its marginal task cost is zero while available. It can rank
 cheapest only after the same worker-host capability, task-evidence, and quality
-gates. Before retrieving a credential value or launching, obtain explicit approval for that
-key-backed run and pass the compatibility flag `--approve-billable-route`.
+gates. Before retrieving a credential value or launching, confirm that user
+authorization covers the run and pass `--approve-billable-route`. Existing
+explicit standing authorization can cover eligible runs; do not ask again
+within its scope.
 If GLM reports its temporary quota pause, stop and return for a new exact route;
 never retry or fall back silently.
 The default packaged GLM gateway is direct Z.AI; OpenRouter is neither required
@@ -178,3 +180,19 @@ required words are present):
   rules.**"
 
 Links on such a line may only point at root `CLAUDE.md`.
+
+## Metered models and standing authorization
+
+Authentication and billing are separate. Native Devin OAuth can include
+metered Gemini/Grok routes; use the exact model's effective `billable` metadata,
+not the login method. Pass `--approve-billable-route` for every authorized
+billable dispatch, including OAuth routes. Keep included SWE routes marked
+non-billable only while the configured entitlement applies.
+
+If the user explicitly authorizes cost-effective metered routing, record that
+policy and apply it to eligible task-specific routes without repeated permission
+questions. Compare expected total accepted-task cost, including retries and
+review, rather than token price alone. Record the selected route, cost evidence,
+and authorization basis. Standing cost authorization does not enable an
+unconfigured provider or authorize unrelated tasks. Unknown costs do not prove
+a route is cheapest.

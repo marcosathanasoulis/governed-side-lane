@@ -116,7 +116,9 @@ class ClaudeAdapterTests(unittest.TestCase):
 
     def test_native_environment_scrubs_keys_and_rejects_secret(self) -> None:
         config = {"runtime_model": "claude-sonnet-5", "protocol": "native-claude"}
-        child = claude.build_transport_environment({"PATH": "/bin", "ANTHROPIC_API_KEY": "x", "OPENAI_API_KEY": "y"},
+        child = claude.build_transport_environment({"PATH": "/bin", "ANTHROPIC_API_KEY": "x",
+            "OPENAI_API_KEY": "y", "SIDE_LANE_CREDENTIAL_OTHER": "other-secret",
+            "SIDE_LANE_CREDENTIALS_DIR": "/private/credentials"},
             provider="claude", model="claude-sonnet-5", provider_config=self.native, model_config=config, mode="execute")
         self.assertEqual(child, {"PATH": "/bin"})
         with self.assertRaisesRegex(claude.ClaudeAdapterError, "must not receive"):
@@ -169,11 +171,15 @@ class ClaudeAdapterTests(unittest.TestCase):
         config = {"runtime_model": "glm-5.3", "protocol": "anthropic-compatible"}
         with self.assertRaisesRegex(claude.ClaudeAdapterError, "credential is absent"):
             claude.build_transport_environment({}, provider="glm", model="glm-5.3", provider_config=self.glm, model_config=config, mode="execute")
-        child = claude.build_transport_environment({"OPENROUTER_API_KEY": "old"}, provider="glm",
+        child = claude.build_transport_environment({"OPENROUTER_API_KEY": "old",
+            "SIDE_LANE_CREDENTIAL_OTHER": "other-secret",
+            "SIDE_LANE_CREDENTIALS_DIR": "/private/credentials"}, provider="glm",
             model="glm-5.3", provider_config=self.glm, model_config=config, mode="execute", secret="selected")
         self.assertEqual(child["ANTHROPIC_AUTH_TOKEN"], "selected")
         self.assertEqual(child["ANTHROPIC_BASE_URL"], "https://api.z.ai/api/anthropic")
         self.assertNotIn("OPENROUTER_API_KEY", child)
+        self.assertNotIn("SIDE_LANE_CREDENTIAL_OTHER", child)
+        self.assertNotIn("SIDE_LANE_CREDENTIALS_DIR", child)
 
     def test_mocked_launch_redacts_billable_secret_and_normalizes_result(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

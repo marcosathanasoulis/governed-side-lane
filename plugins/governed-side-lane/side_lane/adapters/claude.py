@@ -11,6 +11,7 @@ import subprocess
 from typing import Any, Callable, Mapping, Union
 from urllib.parse import urlparse
 
+from side_lane.credentials import scrub_backend_environment
 from side_lane.governance import known_capabilities, lane_system_prompt, tool_policy
 from side_lane.results import LaneResult
 
@@ -181,11 +182,11 @@ def validate_worktree(path_value: str | Path) -> Path:
 
 
 def scrub_environment(inherited: Mapping[str, str]) -> dict[str, str]:
-    return {
+    return scrub_backend_environment({
         name: value
         for name, value in inherited.items()
         if name not in SCRUB_EXACT and not name.startswith(SCRUB_PREFIXES)
-    }
+    })
 
 
 def _route_metadata(
