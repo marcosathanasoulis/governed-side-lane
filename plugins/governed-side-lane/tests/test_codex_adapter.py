@@ -41,7 +41,10 @@ class CodexAdapterTests(unittest.TestCase):
                 codex.build_codex_command("codex", repo, repo, "openai", "gpt-5.6-terra", self.provider, self.execute, "task")
 
     def test_oauth_environment_scrubs_all_provider_keys(self) -> None:
-        child = codex.build_child_env({"PATH": "/bin", "GOOGLE_APPLICATION_CREDENTIALS": "/adc", "OPENAI_API_KEY": "x", "ANTHROPIC_CUSTOM": "y", "GLM_API_KEY": "z"})
+        child = codex.build_child_env({"PATH": "/bin", "GOOGLE_APPLICATION_CREDENTIALS": "/adc",
+            "OPENAI_API_KEY": "x", "ANTHROPIC_CUSTOM": "y", "GLM_API_KEY": "z",
+            "SIDE_LANE_CREDENTIAL_OTHER": "other-secret",
+            "SIDE_LANE_CREDENTIALS_DIR": "/private/credentials"})
         self.assertEqual(child, {"PATH": "/bin", "GOOGLE_APPLICATION_CREDENTIALS": "/adc"})
 
     def test_mocked_run_returns_normalized_result_without_key(self) -> None:

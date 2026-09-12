@@ -1,5 +1,7 @@
 from pathlib import Path
+import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -10,6 +12,24 @@ from side_lane.adapters import claude
 class ClaudeAdapterTests(unittest.TestCase):
     native = {"gateway": "native-claude", "auth_method": "oauth", "billable": False}
     glm = {"gateway": "direct-zai", "auth_method": "provider-key", "billable": True, "base_url": "https://api.z.ai/api/anthropic"}
+
+    def test_bounded_process_accepts_subprocess_run_capture_kwargs(self) -> None:
+        completed = claude._bounded_process(
+            [sys.executable, "-c", "print('captured')"], timeout=5,
+            capture_output=True, check=False, text=True,
+        )
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.stdout.strip(), "captured")
+        self.assertEqual(completed.stderr, "")
+
+    def test_bounded_process_timeout_preserves_real_partial_output(self) -> None:
+        completed = claude._bounded_process(
+            [sys.executable, "-c", "import time; print('partial', flush=True); time.sleep(10)"],
+            timeout=0.1, capture_output=True, check=False, text=True,
+        )
+        self.assertEqual(completed.returncode, 124)
+        self.assertIn("partial", completed.stdout)
+        self.assertIn("process group stopped", completed.stderr)
 
     def repo(self, root: Path, name: str) -> Path:
         path = root / name
@@ -35,9 +55,70 @@ class ClaudeAdapterTests(unittest.TestCase):
         self.assertIn("user,project,local", execute)
         self.assertIn("Injected canonical side-lane governance", execute[-1])
 
+    def test_playwright_execute_approves_only_the_requested_project_server(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            execute = claude.build_command(executable="claude", repo=repo, worktree=lane,
+                provider="claude", model="claude-sonnet-5", provider_config=self.native,
+                model_config={"runtime_model": "claude-sonnet-5", "protocol": "native-claude"},
+                prompt="task", capabilities=("playwright",))
+        settings = json.loads(execute[execute.index("--settings") + 1])
+        self.assertEqual(settings["enabledMcpjsonServers"], ["playwright"])
+        self.assertNotIn("enableAllProjectMcpServers", settings)
+        self.assertIn("WaitForMcpServers", execute)
+        self.assertIn('servers: ["playwright"]', execute[-1])
+
+    def test_non_browser_execute_does_not_receive_playwright_startup_instruction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            execute = claude.build_command(executable="claude", repo=repo, worktree=lane,
+                provider="claude", model="claude-sonnet-5", provider_config=self.native,
+                model_config={"runtime_model": "claude-sonnet-5", "protocol": "native-claude"},
+                prompt="task", capabilities=("shell",))
+        self.assertNotIn("WaitForMcpServers", execute)
+        self.assertNotIn("Claude Code Playwright startup", execute[-1])
+
+    def test_playwright_launch_requires_connected_mcp_before_model_runner(self) -> None:
+        readiness = mock.Mock(return_value=subprocess.CompletedProcess(
+            [], 0, "playwright:\n  Status: ✔ Connected\n", ""))
+        worker = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "done", ""))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            result = claude.launch(executable="claude", repo=repo, worktree=lane,
+                provider="claude", model="claude-sonnet-5", provider_config=self.native,
+                model_config={"runtime_model": "claude-sonnet-5", "protocol": "native-claude"},
+                prompt="task", capabilities=("playwright",), env={"PATH": "/bin"},
+                runner=worker, readiness_runner=readiness)
+        self.assertEqual(result.returncode, 0)
+        readiness_command = readiness.call_args.args[0]
+        self.assertEqual(readiness_command[-3:], ["mcp", "get", "playwright"])
+        self.assertEqual(json.loads(readiness_command[2]), {"enabledMcpjsonServers": ["playwright"]})
+        self.assertEqual(readiness.call_args.kwargs["timeout"], claude.MCP_READINESS_TIMEOUT_SECONDS)
+        worker.assert_called_once()
+
+    def test_playwright_launch_fails_before_model_when_mcp_is_pending(self) -> None:
+        readiness = mock.Mock(return_value=subprocess.CompletedProcess(
+            [], 0, "playwright:\n  Status: ⏸ Pending approval\n", ""))
+        worker = mock.Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            with self.assertRaisesRegex(claude.ClaudeAdapterError, "not ready before worker launch"):
+                claude.launch(executable="claude", repo=repo, worktree=lane,
+                    provider="claude", model="claude-sonnet-5", provider_config=self.native,
+                    model_config={"runtime_model": "claude-sonnet-5", "protocol": "native-claude"},
+                    prompt="task", capabilities=("playwright",), env={"PATH": "/bin"},
+                    runner=worker, readiness_runner=readiness)
+        worker.assert_not_called()
+
     def test_native_environment_scrubs_keys_and_rejects_secret(self) -> None:
         config = {"runtime_model": "claude-sonnet-5", "protocol": "native-claude"}
-        child = claude.build_transport_environment({"PATH": "/bin", "ANTHROPIC_API_KEY": "x", "OPENAI_API_KEY": "y"},
+        child = claude.build_transport_environment({"PATH": "/bin", "ANTHROPIC_API_KEY": "x",
+            "OPENAI_API_KEY": "y", "SIDE_LANE_CREDENTIAL_OTHER": "other-secret",
+            "SIDE_LANE_CREDENTIALS_DIR": "/private/credentials"},
             provider="claude", model="claude-sonnet-5", provider_config=self.native, model_config=config, mode="execute")
         self.assertEqual(child, {"PATH": "/bin"})
         with self.assertRaisesRegex(claude.ClaudeAdapterError, "must not receive"):
@@ -48,18 +129,57 @@ class ClaudeAdapterTests(unittest.TestCase):
         child = claude.scrub_environment({
             "PATH": "/bin", "CLAUDE_CODE_USE_BEDROCK": "1",
             "CLAUDE_CODE_USE_VERTEX": "1", "CLAUDE_CODE_USE_FOUNDRY": "1",
+            "CLAUDE_CODE_EFFORT_LEVEL": "max", "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "999999",
         })
         self.assertEqual(child, {"PATH": "/bin"})
+
+    def test_direct_candidate_requires_identity_contract_and_pins_nonsecret_settings(self) -> None:
+        direct = {"gateway": "direct-kimi", "auth_method": "provider-key", "billable": True,
+                  "base_url": "https://api.kimi.com/coding/"}
+        config = {"runtime_model": "k3-256k", "protocol": "anthropic-compatible",
+                  "identity_contract": {"requested_model": "k3-256k", "resolved_model": "k3-256k",
+                                        "settings_precedence": "verified"}, "reasoning_effort": "high",
+                  "max_budget_usd": 2}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            command = claude.build_command(executable="claude", repo=repo, worktree=lane,
+                provider="kimi", model="k3-256k", provider_config=direct, model_config=config,
+                prompt="task", mode="execute")
+        settings = command[command.index("--settings") + 1]
+        self.assertIn('"enabled":false', settings)
+        self.assertIn('"CLAUDE_CODE_SUBAGENT_MODEL":"k3-256k"', settings)
+        self.assertEqual(command[command.index("--effort") + 1], "high")
+        self.assertEqual(command[command.index("--max-budget-usd") + 1], "2.0")
+        with self.assertRaisesRegex(claude.ClaudeAdapterError, "identity contract"):
+            claude.build_transport_environment({}, provider="kimi", model="k3-256k",
+                provider_config=direct, model_config={"runtime_model": "k3-256k", "protocol": "anthropic-compatible"},
+                mode="execute", secret="selected")
+        wrong_endpoint = {**direct, "base_url": "http://api.moonshot.ai/anthropic"}
+        with self.assertRaisesRegex(claude.ClaudeAdapterError, "endpoint"):
+            claude.build_transport_environment({}, provider="kimi", model="k3-256k",
+                provider_config=wrong_endpoint, model_config=config, mode="execute", secret="selected")
+        runner = mock.Mock()
+        with self.assertRaisesRegex(claude.ClaudeAdapterError, "transport qualification"):
+            claude.launch(executable="claude", repo="/not-used", worktree="/not-used", provider="kimi",
+                model="k3-256k", provider_config=direct, model_config=config, prompt="task",
+                secret="selected", runner=runner)
+        runner.assert_not_called()
 
     def test_glm_requires_explicit_secret_and_uses_direct_gateway(self) -> None:
         config = {"runtime_model": "glm-5.3", "protocol": "anthropic-compatible"}
         with self.assertRaisesRegex(claude.ClaudeAdapterError, "credential is absent"):
             claude.build_transport_environment({}, provider="glm", model="glm-5.3", provider_config=self.glm, model_config=config, mode="execute")
-        child = claude.build_transport_environment({"OPENROUTER_API_KEY": "old"}, provider="glm",
+        child = claude.build_transport_environment({"OPENROUTER_API_KEY": "old",
+            "SIDE_LANE_CREDENTIAL_OTHER": "other-secret",
+            "SIDE_LANE_CREDENTIALS_DIR": "/private/credentials"}, provider="glm",
             model="glm-5.3", provider_config=self.glm, model_config=config, mode="execute", secret="selected")
         self.assertEqual(child["ANTHROPIC_AUTH_TOKEN"], "selected")
         self.assertEqual(child["ANTHROPIC_BASE_URL"], "https://api.z.ai/api/anthropic")
         self.assertNotIn("OPENROUTER_API_KEY", child)
+        self.assertNotIn("SIDE_LANE_CREDENTIAL_OTHER", child)
+        self.assertNotIn("SIDE_LANE_CREDENTIALS_DIR", child)
 
     def test_mocked_launch_redacts_billable_secret_and_normalizes_result(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -74,6 +194,80 @@ class ClaudeAdapterTests(unittest.TestCase):
         self.assertTrue(result.billable)
         self.assertNotIn("selected", result.stdout + result.stderr)
 
+    def test_qualified_direct_launch_captures_stream_identity_and_usage(self) -> None:
+        model = "kimi-k2.7-code"
+        provider = {"gateway": "direct-kimi", "auth_method": "provider-key", "billable": True,
+                    "base_url": "https://api.moonshot.cn/anthropic"}
+        config = {"runtime_model": model, "protocol": "anthropic-compatible",
+                  "identity_contract": {"requested_model": model, "resolved_model": model,
+                                        "settings_precedence": "verified"},
+                  "qualification": {"verified": True, "verified_on": "2026-09-11",
+                                    "source": "mocked transport report"}}
+        stdout = '\n'.join((json.dumps({"type": "system", "model": model}),
+                            json.dumps({"type": "result", "usage": {"input_tokens": 9}})))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            result = claude.launch(executable="claude", repo=repo, worktree=lane,
+                provider="kimi", model=model, provider_config=provider, model_config=config,
+                prompt="task", secret="selected",
+                runner=mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout, "")))
+        self.assertEqual(result.resolved_model, model)
+        self.assertEqual(result.usage, {"input_tokens": 9})
+        self.assertIn("stream-json", result.argv)
+
+    def test_qualified_direct_launch_fails_closed_on_unattested_or_wrong_identity(self) -> None:
+        model = "kimi-k2.7-code"
+        provider = {"gateway": "direct-kimi", "auth_method": "provider-key", "billable": True,
+                    "base_url": "https://api.moonshot.cn/anthropic"}
+        config = {"runtime_model": model, "protocol": "anthropic-compatible",
+                  "identity_contract": {"requested_model": model, "resolved_model": model,
+                                        "settings_precedence": "verified"},
+                  "qualification": {"verified": True, "verified_on": "2026-09-11",
+                                    "source": "mocked transport report"}}
+        cases = ((json.dumps({"type": "result", "usage": {"input_tokens": 1}}),
+                  "identity-unverified"),
+                 (json.dumps({"type": "system", "model": "another-model"}),
+                  "identity-mismatch"),
+                 ("\n".join((json.dumps({"model": model}),
+                              json.dumps({"model": "another-model"}))),
+                  "identity-unverified"))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            for stdout, error in cases:
+                result = claude.launch(executable="claude", repo=repo, worktree=lane,
+                    provider="kimi", model=model, provider_config=provider, model_config=config,
+                    prompt="task", secret="selected",
+                    runner=mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout, "")))
+                self.assertEqual(result.returncode, 65)
+                self.assertIn(error, result.stderr)
+
+    def test_native_route_without_identity_contract_preserves_legacy_success(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            result = claude.launch(executable="claude", repo=repo, worktree=lane,
+                provider="claude", model="claude-sonnet-5", provider_config=self.native,
+                model_config={"runtime_model": "claude-sonnet-5", "protocol": "native-claude-readonly"},
+                prompt="review", mode="review",
+                runner=mock.Mock(return_value=subprocess.CompletedProcess([], 0, "review complete", "")))
+        self.assertEqual(result.returncode, 0)
+        self.assertIsNone(result.resolved_model)
+
+    def test_partial_stream_usage_deduplicates_messages_and_final_result_wins(self) -> None:
+        partial = "\n".join((
+            json.dumps({"message": {"id": "a", "usage": {"input_tokens": 10, "cache_read_input_tokens": 3}}}),
+            json.dumps({"message": {"id": "a", "usage": {"input_tokens": 10, "cache_read_input_tokens": 7}}}),
+            json.dumps({"message": {"id": "b", "usage": {"input_tokens": 4, "output_tokens": 2}}}),
+        ))
+        self.assertEqual(claude._stream_metadata(partial)[1], {
+            "observation": "partial-stream", "input_tokens": 14,
+            "cache_read_input_tokens": 7, "output_tokens": 2,
+        })
+        complete = partial + "\n" + json.dumps({"type": "result", "usage": {"input_tokens": 99}})
+        self.assertEqual(claude._stream_metadata(complete)[1], {"input_tokens": 99})
+
     def test_glm_quota_pause_is_normalized_without_retry_or_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -87,6 +281,18 @@ class ClaudeAdapterTests(unittest.TestCase):
                 prompt="task", secret="selected", runner=runner)
         self.assertEqual(result.availability, "temporarily-unavailable")
         runner.assert_called_once()
+
+    @mock.patch("side_lane.adapters.claude.os.killpg")
+    @mock.patch("side_lane.adapters.claude.subprocess.Popen")
+    def test_bounded_launch_timeout_stops_process_group(self, popen: mock.Mock,
+                                                        killpg: mock.Mock) -> None:
+        process = popen.return_value
+        process.pid = 77
+        process.communicate.side_effect = [subprocess.TimeoutExpired("claude", 1),
+                                           ("partial", "diagnostic")]
+        completed = claude._bounded_process(["claude"], timeout=1)
+        self.assertEqual(completed.returncode, 124)
+        killpg.assert_called_once_with(77, claude.signal.SIGTERM)
 
 
 

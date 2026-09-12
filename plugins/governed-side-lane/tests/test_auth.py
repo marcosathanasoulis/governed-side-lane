@@ -29,6 +29,14 @@ class AuthTests(unittest.TestCase):
         with self.assertRaisesRegex(AuthError, "codex login"):
             require_native_oauth("codex", runner=runner)
 
+    def test_devin_requires_logged_in_status(self) -> None:
+        ready = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "Logged in as test", ""))
+        self.assertTrue(auth_status("devin", runner=ready).ready)
+        signed_out = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "Not logged in", ""))
+        self.assertFalse(auth_status("devin", runner=signed_out).ready)
+        not_authenticated = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "Not authenticated", ""))
+        self.assertFalse(auth_status("devin", runner=not_authenticated).ready)
+
 
 
 class RefreshCommandTests(unittest.TestCase):

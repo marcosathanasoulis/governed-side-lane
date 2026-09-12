@@ -21,11 +21,12 @@ from pathlib import Path
 import shutil
 from typing import Callable, Mapping
 
-SUPPORTED_HOSTS = frozenset({"codex", "claude"})
+SUPPORTED_HOSTS = frozenset({"codex", "claude", "devin"})
 
 EXECUTABLE_ENV = {
     "codex": "SIDE_LANE_CODEX_EXECUTABLE",
     "claude": "SIDE_LANE_CLAUDE_EXECUTABLE",
+    "devin": "SIDE_LANE_DEVIN_EXECUTABLE",
 }
 
 # Desktop-app bundles that ship the Codex CLI on macOS. Later entries are only
@@ -44,11 +45,13 @@ BUNDLED_CODEX_CANDIDATES: tuple[str, ...] = (
 HOST_SUPPORT_BINARIES = {
     "codex": ("codex-code-mode-host",),
     "claude": (),
+    "devin": (),
 }
 
 INSTALL_HINTS = {
     "codex": "install the Codex CLI (`npm install -g @openai/codex`), or the Codex desktop app",
     "claude": "install Claude Code (`npm install -g @anthropic-ai/claude-code`)",
+    "devin": "install the Devin CLI and sign in with `devin auth login`",
 }
 
 Which = Callable[[str], "str | None"]

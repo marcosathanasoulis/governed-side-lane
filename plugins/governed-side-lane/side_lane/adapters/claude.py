@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import re
+import signal
 import subprocess
 from typing import Any, Callable, Mapping, Union
 from urllib.parse import urlparse
 
+from side_lane.credentials import scrub_backend_environment
 from side_lane.governance import known_capabilities, lane_system_prompt, tool_policy
 from side_lane.results import LaneResult
 
@@ -16,7 +19,14 @@ from side_lane.results import LaneResult
 MAX_PROMPT_CHARS = 100_000
 NATIVE_PROVIDER = "claude"
 NATIVE_GATEWAY = "native-claude"
-BILLABLE_PROVIDERS = frozenset({"glm", "openrouter"})
+BILLABLE_PROVIDERS = frozenset({"glm", "openrouter", "deepseek", "kimi", "minimax"})
+# Qualification harness membership only. Runtime endpoint acceptance is driven
+# by the configured per-model identity and qualification contract below.
+FIRST_WAVE_ENDPOINTS = {
+    "deepseek": "https://api.deepseek.com/anthropic",
+    "kimi": "https://api.kimi.com/coding/",
+    "minimax": "https://api.minimax.io/anthropic",
+}
 
 SCRUB_EXACT = frozenset(
     {
@@ -36,13 +46,41 @@ SCRUB_EXACT = frozenset(
         "CLAUDE_CODE_USE_BEDROCK",
         "CLAUDE_CODE_USE_VERTEX",
         "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CODE_EFFORT_LEVEL",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
     }
 )
-SCRUB_PREFIXES = ("OPENROUTER_", "ZAI_", "ZHIPUAI_", "GLM_")
+SCRUB_PREFIXES = (
+    "ANTHROPIC_", "OPENROUTER_", "ZAI_", "ZHIPUAI_", "GLM_",
+    "DEEPSEEK_", "KIMI_", "MOONSHOT_", "MINIMAX_",
+)
+EXACT_MODEL_ENV_NAMES = (
+    "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL",
+)
 GLM_QUOTA_PAUSE = re.compile(
     r"\b(?:quota|usage limit|rate limit)\b.*\b(?:exceed(?:ed)?|reached|reset|temporar(?:y|ily)|hours?)\b",
     re.IGNORECASE | re.DOTALL,
 )
+SUPPORTED_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
+MCP_READINESS_TIMEOUT_SECONDS = 20
+READINESS_REQUIRED_CAPABILITIES = frozenset({"playwright"})
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+PLAYWRIGHT_STARTUP_INSTRUCTION = """\
+
+
+# Claude Code Playwright startup
+
+This task requires the Playwright MCP server. Before assessing browser-tool
+availability or starting browser work, check whether the Playwright tools have
+already appeared. If they have not, call `WaitForMcpServers` with
+`servers: ["playwright"]`. Continue only when the tools are present or the wait
+reports `ready: true` and adds them. If the wait reports that Playwright failed,
+needs authentication, is disabled, or remains pending, stop and report that
+exact state instead of claiming the tools were never configured.
+"""
 
 
 # Capability-gated permission rules for headless execute lanes.
@@ -59,6 +97,32 @@ class ClaudeAdapterError(RuntimeError):
 
 Capabilities = Union[tuple[str, ...], list[str], frozenset[str]]
 Runner = Callable[..., Any]
+
+
+def _bounded_process(command: list[str], *, timeout: int, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    """Run one Claude worker and stop its whole process group on timeout/cancel."""
+
+    if kwargs.pop("capture_output", False):
+        kwargs["stdout"] = subprocess.PIPE
+        kwargs["stderr"] = subprocess.PIPE
+    kwargs.pop("check", None)
+    process = subprocess.Popen(command, start_new_session=True, **kwargs)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except (subprocess.TimeoutExpired, KeyboardInterrupt) as exc:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            stdout, stderr = process.communicate()
+        except ProcessLookupError:
+            stdout, stderr = process.communicate()
+        if isinstance(exc, KeyboardInterrupt):
+            raise
+        return subprocess.CompletedProcess(command, 124, stdout,
+            (stderr or "") + "\nworker timed out; process group stopped")
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 def _capability_set(capabilities: Capabilities) -> frozenset[str]:
@@ -118,11 +182,11 @@ def validate_worktree(path_value: str | Path) -> Path:
 
 
 def scrub_environment(inherited: Mapping[str, str]) -> dict[str, str]:
-    return {
+    return scrub_backend_environment({
         name: value
         for name, value in inherited.items()
         if name not in SCRUB_EXACT and not name.startswith(SCRUB_PREFIXES)
-    }
+    })
 
 
 def _route_metadata(
@@ -148,6 +212,8 @@ def _route_metadata(
     else:
         if provider not in BILLABLE_PROVIDERS or auth_method != "provider-key" or not billable:
             raise ClaudeAdapterError("external Claude routes must be explicit billable key routes")
+        if provider != "glm" and mode != "execute":
+            raise ClaudeAdapterError("new direct providers are unqualified for review lanes")
         expected = "anthropic-compatible-readonly" if mode == "review" else "anthropic-compatible"
         if protocol != expected:
             raise ClaudeAdapterError(f"billable Claude {mode} protocol is not verified")
@@ -155,6 +221,17 @@ def _route_metadata(
         parsed = urlparse(endpoint)
         if parsed.scheme != "https" or not parsed.netloc or parsed.query or parsed.fragment:
             raise ClaudeAdapterError("billable gateway must be a clean HTTPS endpoint")
+        # GLM predates the identity contract. Every newly configured direct
+        # provider must prove that Claude Code settings cannot substitute an
+        # alias, fast model, or subagent model behind the requested selector.
+        if provider != "glm":
+            identity = model_config.get("identity_contract")
+            if not isinstance(identity, Mapping):
+                raise ClaudeAdapterError("external route lacks an exact model identity contract")
+            if identity.get("requested_model") != model or identity.get("resolved_model") != model:
+                raise ClaudeAdapterError("external route has unresolved model identity")
+            if identity.get("settings_precedence") != "verified":
+                raise ClaudeAdapterError("external route has unverified Claude settings precedence")
     return runtime_model, gateway, auth_method, billable
 
 
@@ -180,9 +257,66 @@ def build_transport_environment(
         raise ClaudeAdapterError("explicit billable route credential is absent")
     child["ANTHROPIC_AUTH_TOKEN"] = secret
     child["ANTHROPIC_BASE_URL"] = _nonempty(provider_config.get("base_url"), "base_url").rstrip("/")
-    child["ANTHROPIC_MODEL"] = runtime_model
-    child["ANTHROPIC_SMALL_FAST_MODEL"] = runtime_model
+    for name in EXACT_MODEL_ENV_NAMES:
+        child[name] = runtime_model
     return child
+
+
+def _required_mcp_servers(capabilities: Capabilities) -> tuple[str, ...]:
+    return tuple(sorted(set(capabilities) & READINESS_REQUIRED_CAPABILITIES))
+
+
+def _per_launch_settings(
+    provider: str,
+    model: str,
+    mode: str,
+    base_url: str | None = None,
+    capabilities: Capabilities = (),
+) -> str:
+    """Return nonsecret settings that outrank user/project/local settings.
+
+    Execute lanes intentionally run in the user workspace under the user
+    identity.  The setting is process-local and cannot change a user's saved
+    Claude settings.  Direct compatible transports also pin every documented
+    model selector here because Kimi's settings environment overrides shell
+    environment variables.
+    """
+
+    settings: dict[str, Any] = {"sandbox": {"enabled": False}} if mode == "execute" else {}
+    required_servers = _required_mcp_servers(capabilities)
+    if required_servers:
+        # A capability grant is also explicit approval for the matching
+        # project-scoped MCP server for this one process. Claude otherwise
+        # leaves a fresh worktree's .mcp.json entry pending and omits its tools.
+        settings["enabledMcpjsonServers"] = list(required_servers)
+    if provider != NATIVE_PROVIDER:
+        settings["env"] = {name: model for name in EXACT_MODEL_ENV_NAMES}
+        if base_url is not None:
+            settings["env"]["ANTHROPIC_BASE_URL"] = base_url.rstrip("/")
+        settings["alwaysThinkingEnabled"] = True
+    return json.dumps(settings, separators=(",", ":"), sort_keys=True)
+
+
+def _optional_effort(model_config: Mapping[str, Any]) -> str | None:
+    effort = model_config.get("reasoning_effort")
+    if effort is None:
+        return None
+    if effort not in SUPPORTED_EFFORTS:
+        raise ClaudeAdapterError("reasoning_effort is not supported by the Claude host")
+    return str(effort)
+
+
+def _optional_budget(model_config: Mapping[str, Any]) -> str | None:
+    value = model_config.get("max_budget_usd")
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ClaudeAdapterError("max_budget_usd must be a positive finite number") from exc
+    if not parsed > 0 or parsed == float("inf"):
+        raise ClaudeAdapterError("max_budget_usd must be a positive finite number")
+    return str(parsed)
 
 
 def build_command(
@@ -241,15 +375,69 @@ def build_command(
                 "--setting-sources",
                 "user,project,local",
                 "--output-format",
-                "text",
+                "stream-json",
+                "--verbose",
+                "--settings",
+                _per_launch_settings(
+                    provider, runtime_model, mode, provider_config.get("base_url"), capabilities
+                ),
             )
         )
+        effort = _optional_effort(model_config)
+        if effort is not None:
+            command.extend(("--effort", effort))
+        budget = _optional_budget(model_config)
+        if budget is not None:
+            command.extend(("--max-budget-usd", budget))
         for tool in allowed_tools(mode, capabilities):
             command.extend(("--allowedTools", tool))
         for tool in disallowed_tools(mode, capabilities):
             command.extend(("--disallowedTools", tool))
-    command.extend(("--append-system-prompt", lane_system_prompt(mode, repo_path)))
+    system_prompt = lane_system_prompt(mode, repo_path)
+    if mode == "execute" and "playwright" in _capability_set(capabilities):
+        system_prompt += PLAYWRIGHT_STARTUP_INSTRUCTION
+    command.extend(("--append-system-prompt", system_prompt))
     return command
+
+
+def _require_mcp_readiness(
+    *, executable: str, cwd: Path, capabilities: Capabilities,
+    env: Mapping[str, str], runner: Runner,
+) -> None:
+    """Health-check capability-required MCP servers before starting a model."""
+
+    for server in _required_mcp_servers(capabilities):
+        settings = json.dumps(
+            {"enabledMcpjsonServers": [server]}, separators=(",", ":"), sort_keys=True
+        )
+        command = [executable, "--settings", settings, "mcp", "get", server]
+        try:
+            completed = runner(
+                command,
+                timeout=MCP_READINESS_TIMEOUT_SECONDS,
+                cwd=cwd,
+                env=dict(env),
+                stdin=subprocess.DEVNULL,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        except OSError as exc:
+            raise ClaudeAdapterError(f"could not check {server} MCP readiness: {exc}") from exc
+        stdout = str(getattr(completed, "stdout", "") or "")
+        connected = any(
+            re.search(r"^\s*Status:\s*[^\w]*Connected\s*$", ANSI_ESCAPE.sub("", line), re.I)
+            for line in stdout.splitlines()
+        )
+        if int(completed.returncode) != 0 or not connected:
+            status = next(
+                (ANSI_ESCAPE.sub("", line).strip() for line in stdout.splitlines()
+                 if "status:" in line.lower()),
+                "status unavailable",
+            )
+            raise ClaudeAdapterError(
+                f"required MCP server {server!r} is not ready before worker launch ({status})"
+            )
 
 
 def _redact(value: object, secret: str | None) -> str:
@@ -271,8 +459,15 @@ def launch(
     capabilities: Capabilities = (),
     env: Mapping[str, str] | None = None,
     secret: str | None = None,
-    runner: Runner = subprocess.run,
+    runner: Runner = None,
+    readiness_runner: Runner = None,
 ) -> LaneResult:
+    if provider != NATIVE_PROVIDER and provider != "glm":
+        qualification = model_config.get("qualification")
+        if not isinstance(qualification, Mapping) or qualification.get("verified") is not True:
+            raise ClaudeAdapterError("external route lacks verified model transport qualification")
+        _nonempty(qualification.get("verified_on"), "qualification.verified_on")
+        _nonempty(qualification.get("source"), "qualification.source")
     repo_path = validate_worktree(repo)
     worktree_path = validate_worktree(worktree)
     granted = tuple(sorted(_capability_set(capabilities)))
@@ -300,9 +495,19 @@ def launch(
         mode=mode,
         secret=secret,
     )
+    timeout = model_config.get("timeout_seconds", 600)
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+        raise ClaudeAdapterError("timeout_seconds must be a positive integer")
+    active_runner = _bounded_process if runner is None else runner
+    active_readiness_runner = _bounded_process if readiness_runner is None else readiness_runner
+    _require_mcp_readiness(
+        executable=executable, cwd=worktree_path, capabilities=granted,
+        env=child_env, runner=active_readiness_runner,
+    )
     try:
-        completed = runner(
+        completed = active_runner(
             command,
+            timeout=timeout,
             cwd=worktree_path,
             env=child_env,
             stdin=subprocess.DEVNULL,
@@ -321,6 +526,18 @@ def launch(
         and GLM_QUOTA_PAUSE.search(f"{stdout}\n{stderr}")
         else "completed"
     )
+    resolved_model, usage, attested_models = _stream_metadata(stdout)
+    identity = model_config.get("identity_contract")
+    if int(completed.returncode) == 0 and provider != NATIVE_PROVIDER and isinstance(identity, Mapping):
+        if not attested_models:
+            completed = subprocess.CompletedProcess(command, 65, stdout, stderr)
+            stderr = (stderr + "\nidentity-unverified: response did not attest a model").lstrip()
+        elif len(attested_models) != 1:
+            completed = subprocess.CompletedProcess(command, 65, stdout, stderr)
+            stderr = (stderr + "\nidentity-unverified: response attested multiple models").lstrip()
+        elif resolved_model != model:
+            completed = subprocess.CompletedProcess(command, 65, stdout, stderr)
+            stderr = (stderr + f"\nidentity-mismatch: requested {model!r}, attested {resolved_model!r}").lstrip()
     return LaneResult(
         argv=tuple(command),
         returncode=int(completed.returncode),
@@ -337,4 +554,51 @@ def launch(
         capabilities=granted,
         allowed_tools=allowed_tools(mode, granted),
         disallowed_tools=disallowed_tools(mode, granted),
+        requested_model=model,
+        # The transport requests this selector; it cannot attest to the
+        # provider's response weight/version without a verified response field.
+        resolved_model=resolved_model,
+        reasoning_effort=(
+            model_config.get("reasoning_effort")
+            if isinstance(model_config.get("reasoning_effort"), str) else None
+        ),
+        usage=usage,
     )
+
+
+def _stream_metadata(stdout: str) -> tuple[str | None, dict[str, Any] | None, frozenset[str]]:
+    """Read attested model and usage from Claude stream-json without estimating cost."""
+
+    models: set[str] = set()
+    final_usage: dict[str, Any] | None = None
+    message_usage: dict[str, dict[str, int | float]] = {}
+    for line_number, line in enumerate(stdout.splitlines()):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, Mapping):
+            continue
+        if isinstance(event.get("model"), str) and event["model"]:
+            models.add(event["model"])
+        message = event.get("message")
+        if isinstance(message, Mapping):
+            if isinstance(message.get("model"), str) and message["model"]:
+                models.add(message["model"])
+            if isinstance(message.get("usage"), Mapping):
+                message_id = message.get("id")
+                identity = message_id if isinstance(message_id, str) and message_id else f"line:{line_number}"
+                observed = message_usage.setdefault(identity, {})
+                for key, value in message["usage"].items():
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        observed[key] = max(observed.get(key, value), value)
+        if event.get("type") == "result" and isinstance(event.get("usage"), Mapping):
+            final_usage = dict(event["usage"])
+    usage: dict[str, Any] | None = final_usage
+    if usage is None and message_usage:
+        usage = {"observation": "partial-stream"}
+        for observed in message_usage.values():
+            for key, value in observed.items():
+                usage[key] = usage.get(key, 0) + value
+    resolved = next(iter(models)) if len(models) == 1 else None
+    return resolved, usage, frozenset(models)

@@ -5,6 +5,12 @@ description: Optionally qualify Side Lane routes for a Prompt it task graph and 
 
 # Prompt it side-lane routing
 
+Optional model candidates and connectors never block ordinary Prompt it work.
+Use the public [model guide](../../docs/model-guide.md) and
+[connector guide](../../docs/connector-guide.md)
+only when the task needs an optional route or capability. Treat configured,
+available-for-this-task, executable, and authorized as separate states.
+
 Use this companion while researching and staffing a Prompt it task graph. It is
 not a replacement for Prompt it or a general provider picker. The normal Prompt
 it workflow remains fully usable when `side-lane` is not installed or has no
@@ -64,11 +70,21 @@ task-fit band, quality floor, declared token budget, per-host cost state, and
 any user-declared preference. Ask each command for its installed help; do not
 invent runner flags or pass credentials.
 
+If the installed runner supplies `candidates`, use it only to read its research
+catalog. It reports candidate identity and qualification location/state, not
+credential, connector, cost-entitlement, authorization, provider, or task
+readiness. A candidate is not a configured route. Consider task-fitting
+configured routes without waiting for the user to name a provider, but do not
+perform optional discovery as a mandatory survey when native staffing already
+meets the task.
+
 For each considered route, record one state: `absent`, `configured`,
 `auth-or-tool-missing`, `task-unqualified`, or `eligible`. Include the evidence
 source, observation time, and reason. A configured GLM route may appear in
 inventory before the user enables it; exclude it from staffing until explicit
-GLM permission exists. Native OAuth defaults to included subscription usage.
+GLM permission exists. Authentication alone does not establish cost: native
+Devin can offer metered Gemini/Grok models. Use effective model billing metadata.
+Other native OAuth routes default to included subscription usage.
 When the user says a host is on extra usage, record only that statement (for
 example Claude `extra-usage`, Codex `included-oauth`).
 
@@ -86,6 +102,14 @@ claim an equivalent route. When the user requires a particular lane and it is
 not ready, represent qualification or repair as a scoped dependency with an
 owner and acceptance evidence; do not silently drop the requirement.
 
+For newly acquired provider accounts, use the core Side Lane skill's
+[provider qualification](../side-lane/references/provider-qualification.md)
+reference. Include each task-fitting configured provider in the comparison,
+including economical variants, without presuming its flagship is preferable.
+Separate product/region/endpoint and local harness identity from model capability.
+Report unfinished setup as a dependency, not as a reason to purchase another
+account or silently use a different provider.
+
 ## Build the task profile from evidence
 
 Use facts discovered during Prompt it research rather than model names or
@@ -101,6 +125,14 @@ marketing tiers. Record the task's actual requirements:
 - `best-fit` or `cost-optimized` policy, plus explicit developer/user
   preferences and stated usage or surplus constraints, such as
   `prefer=claude` or `avoid=codex`.
+
+Classify each task before comparing routes: `light` (bounded mechanical or
+fixture work), `deep` (ambiguous debugging, architecture, or large-repository
+reasoning), `design` (visual hierarchy and design judgment), or `browser`
+(connector-backed navigation and interaction). The band is a task requirement,
+not a model tier. Require evidence for the requested band, quality floor,
+context/output estimate, host tools, connectors, and authority. Frontend coding
+or model-vision evidence alone does not qualify a design or browser task.
 
 At planning time, inspect the current runtime and documented lane inventory for
 exact available model names and their supplied capability descriptions. Include
@@ -119,8 +151,8 @@ meet the stated quality floor.
 
 A side-lane candidate is eligible only when all of these are true:
 
-1. Its exact `host + mode + provider + model` route is configured and the
-   transport protocol is verified.
+1. Its exact `host + mode + provider + gateway + model` route is configured and
+   the transport protocol is verified.
 2. Its own worker host satisfies every required connector/MCP and operational
    capability; cross-host connector parity is never assumed.
 3. It has current reviewed task-fit and behavioral-capability evidence,
@@ -155,6 +187,14 @@ the material tradeoff. If reviewed cost evidence is missing, report it as
 unknown rather than inventing a price or relaxing another gate. Show exclusions,
 assumptions, catalog/evidence timestamps, and the exact route in the brief.
 
+Estimate economics for the complete session: task tokens, known tool charges,
+dispatch/setup, retries and coordinator repair, and any independent review.
+Keep prepaid usage separate from marginal provider-key cost; unknown rates or
+overhead remain unknown and are never treated as zero. Prefer the least-cost
+sufficiently evidenced eligible fit for ordinary work. A frontier assignment
+requires task-specific evidence that an eligible economical route cannot meet
+the quality or capability requirement.
+
 Use official specifications for hard protocol/tool facts. For behavioral
 capabilities, preserve typed evidence from reproducible benchmarks, local
 evaluations, and aggregated community reports. Repeated independent reports
@@ -177,7 +217,7 @@ coordinator or qualified native helper. Never change a research task to
 
 An external `execute` lane is an implementation worker proposed for after the
 execution brief is approved. GLM remains execute-only and keeps its separate
-explicit enablement and one-run approval gates; research-team authorization
+explicit enablement and run authorization gates; research-team authorization
 does not enable GLM, provider-key use, new spend, or execute mode.
 
 ## Build the complete task graph
@@ -255,3 +295,16 @@ coordinator has accepted. A failed task blocks its dependents while unrelated
 approved tasks may continue. A later missing route or failed lane returns for a
 staffing decision; it never silently reroutes, falls back, or changes the
 primary coordinator.
+
+After approval, dispatch only the exact route in the accepted staffing row and
+record route recheck, dispatch, handoff, validation, and coordinator
+acceptance. A retry or correction stays within the approved route and scope;
+record its added session cost. If the route becomes unavailable, block its
+dependents and return for an explicit staffing decision. An independent review
+is a separate node with a distinct question, approval, and cost entry.
+
+Explicit standing authorization for cost-effective metered routing may satisfy
+run-level spend authorization. Record it in staffing and pass the runner's
+`--approve-billable-route` flag for each covered billable run without asking the
+user again. Qualification, exact model selection, task scope, and accepted-task
+cost evidence still apply. OAuth does not exempt a metered model from this flag.

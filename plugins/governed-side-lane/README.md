@@ -7,6 +7,26 @@ and canonical governance/configuration.
 The core skill works without Prompt it or organization-specific configuration.
 It requires Git, Python 3.10+, and at least one signed-in native host CLI.
 
+Optional model/account and connector setup guidance lives in the public
+[model guide](docs/model-guide.md) and
+[connector guide](docs/connector-guide.md). Neither is required to use a
+single native OpenAI or Claude host.
+
+## Provider credentials
+
+macOS uses Keychain and Windows uses Credential Manager by default. Linux uses
+an environment/file backend; other platforms can select it explicitly with
+`SIDE_LANE_CREDENTIAL_BACKEND=env`. For a configured service name `S`, it reads
+`SIDE_LANE_CREDENTIAL_<S>` first, upper-casing the name and replacing each
+non-alphanumeric character with `_`. It otherwise reads the file
+`$SIDE_LANE_CREDENTIALS_DIR/<S>`. Populate only the provider needed for a run
+from the container's secret manager. Service names cannot contain path
+separators or escape the configured directory.
+
+`side-lane credentials` reports presence only. A provider credential is read
+only after the run receives `--approve-billable-route`; credential values are
+not printed or written to audit records.
+
 Every target repository must contain a regular root `AGENTS.md` that requires
 and authoritatively links one regular root `CLAUDE.md` (or states in a
 Markdown-linked line that `CLAUDE.md` is the source of truth). Review and

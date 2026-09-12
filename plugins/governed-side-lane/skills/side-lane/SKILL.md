@@ -1,6 +1,6 @@
 ---
 name: side-lane
-description: Route an approved review or implementation task to an exact native Codex, native Claude, or explicitly configured GLM lane, including Prompt it staffing and explicit spend routing.
+description: Discover and qualify optional model lanes, then route approved tasks through exact configured workers, including Prompt it staffing and explicit spend routing.
 ---
 
 # Side lane
@@ -20,6 +20,20 @@ This skill is distributed to both Codex and Claude Code. Each product loads its
 own skill wrapper, CLI, OAuth session, and connectors; neither product borrows
 the other's identity or configuration.
 
+Optional account/model candidates and task-specific connector setup are in the
+public [model guide](../../docs/model-guide.md) and
+[connector guide](../../docs/connector-guide.md).
+They do not make a route executable: keep candidate, configured, available, and
+authorized states separate, and continue normally with one native OpenAI or
+Claude host when no optional route qualifies.
+
+For new provider setup or a first trial, read
+[provider qualification](references/provider-qualification.md). It covers
+DeepSeek, Kimi, MiniMax, xAI/Grok, and Cognition/Devin without treating a saved
+credential, subscription, or catalog entry as an executable adapter. Apply the
+same route-specific process to future providers; keep exact IDs in configuration
+and sourced model guidance rather than hardcoding a second allowlist here.
+
 Inspect the resolved runner's help. `list` shows configured route inventory, not
 current readiness. For the exact host, mode, provider, model, and repository,
 run `check-capabilities`; treat its OAuth/credential result as presence-only and
@@ -31,11 +45,26 @@ subscription. If OAuth is absent or expired, stop and offer that host's
 sign-in/refresh command; never log in automatically. Never silently substitute
 a model, provider, gateway, or paid key route.
 
+When available, `candidates` reads the research catalog only. Its
+`execution_location`, `qualification_state`, and false executable/allowlist/
+credential/authorization fields identify an evaluation subject, not a configured
+or usable route. It performs no account, quota, connector, credential, or
+authorization check. Candidates remain optional; ordinary native work proceeds
+without one.
+
 For Prompt it staffing, inspect the current runtime and documented lane
 inventory for exact available model names and supplied capability descriptions.
 Compare qualified Anthropic/Claude and Codex models with the same task-relative
 rubric and record the exact assignment reason; provider brand alone is not
 capability or reviewer-independence evidence.
+Classify each task before ranking routes: `light` for bounded mechanical or
+fixture work, `deep` for ambiguous debugging, architecture, or large-repository
+reasoning, `design` for visual hierarchy and design judgment, and `browser` for
+connector-backed navigation and interaction. These bands are task requirements,
+not model tiers. Require supplied evidence for the requested band, quality
+floor, context/output estimate, tools, host, and authority. Coding or vision
+evidence does not satisfy design or browser requirements by implication;
+unknown or stale band evidence excludes the route until refreshed.
 For ordinary work, choose the least-cost or most-efficient eligible model that
 meets the task's quality, reasoning, context, tools, host, and authority needs.
 Honor explicit developer/user preferences and stated usage or surplus
@@ -44,6 +73,11 @@ when reviewed evidence is missing. Provider diversity alone does not justify an
 independent second opinion; require a distinct question and decision value based
 on uncertainty, non-determinism, impact, irreversibility, material disagreement
 risk, or an explicit acceptance gate.
+Compare the complete session: task tokens, known tool charges, dispatch/setup,
+retries and coordinator correction, and any independent review. Keep prepaid
+subscription usage separate from marginal provider-key usage. Unknown prices or
+overhead remain unknown and are never treated as zero. A frontier route needs
+task-specific evidence that an eligible economical route cannot meet the need.
 
 GLM is optional and enters staffing only when the user explicitly enables it.
 Its only selectable model is the fixed `glm-5.3`; never propose another GLM
@@ -55,8 +89,10 @@ review governance forbids secret access.
 It uses an exact configured provider/gateway and the user's prepaid flat-rate
 subscription, so its marginal task cost is zero while available. It can rank
 cheapest only after the same worker-host capability, task-evidence, and quality
-gates. Before retrieving a credential value or launching, obtain explicit approval for that
-key-backed run and pass the compatibility flag `--approve-billable-route`.
+gates. Before retrieving a credential value or launching, confirm that user
+authorization covers the run and pass `--approve-billable-route`. Existing
+explicit standing authorization can cover eligible runs; do not ask again
+within its scope.
 If GLM reports its temporary quota pause, stop and return for a new exact route;
 never retry or fall back silently.
 The default packaged GLM gateway is direct Z.AI; OpenRouter is neither required
@@ -87,6 +123,19 @@ when the user has explicitly authorized that bounded external research team;
 generic Prompt it consent and recommendation output do not authorize launch.
 Review governance still forbids MCP/connectors and secrets. Execute lanes,
 including GLM, retain their separate approval gates.
+
+After execution approval, dispatch the exact approved route and record route
+recheck, dispatch, worktree and capability grants, handoff, validation, and
+coordinator acceptance. A failed task may receive only the approved in-scope
+retry on that same route, with its added session cost recorded. If the route
+becomes unavailable, block dependents and return for a staffing decision; never
+silently substitute a provider, model, gateway, host, or mode.
+
+An execute lane runs locally as the selected signed-in user. Its worktree is
+Git-edit isolation, not an OS/container/cloud sandbox. This does not broaden
+the approved task or authorize an external write: model inference may be hosted
+while the worker's tools remain local, and each connector-backed action keeps
+its existing explicit permission gate.
 
 For durable context that must survive movement between direct Codex, direct
 Claude Code, and side lanes, follow the installed pointer to
@@ -131,3 +180,19 @@ required words are present):
   rules.**"
 
 Links on such a line may only point at root `CLAUDE.md`.
+
+## Metered models and standing authorization
+
+Authentication and billing are separate. Native Devin OAuth can include
+metered Gemini/Grok routes; use the exact model's effective `billable` metadata,
+not the login method. Pass `--approve-billable-route` for every authorized
+billable dispatch, including OAuth routes. Keep included SWE routes marked
+non-billable only while the configured entitlement applies.
+
+If the user explicitly authorizes cost-effective metered routing, record that
+policy and apply it to eligible task-specific routes without repeated permission
+questions. Compare expected total accepted-task cost, including retries and
+review, rather than token price alone. Record the selected route, cost evidence,
+and authorization basis. Standing cost authorization does not enable an
+unconfigured provider or authorize unrelated tasks. Unknown costs do not prove
+a route is cheapest.

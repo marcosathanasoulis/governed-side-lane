@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "purpose": "Illustrative direct-provider contracts. This file is not read by side-lane and does not enable a provider, credential lookup, or dispatch.",
+  "providers": [
+    {
+      "provider": "deepseek",
+      "enabled": false,
+      "gateway": "direct-deepseek",
+      "base_url": "https://api.deepseek.com/anthropic",
+      "host": "claude",
+      "protocol": "anthropic-compatible",
+      "requested_model": "deepseek-v4-flash",
+      "execution_location": "local-user-workspace",
+      "identity_contract": {"requested_model": "deepseek-v4-flash", "resolved_model": null, "settings_precedence": "unverified"}
+    },
+    {
+      "provider": "kimi",
+      "enabled": false,
+      "gateway": "direct-kimi",
+      "base_url": "https://api.kimi.com/coding/",
+      "host": "claude",
+      "protocol": "anthropic-compatible",
+      "requested_model": "k3-256k",
+      "execution_location": "local-user-workspace",
+      "identity_contract": {"requested_model": "k3-256k", "resolved_model": null, "settings_precedence": "unverified"}
+    },
+    {
+      "provider": "minimax",
+      "enabled": false,
+      "gateway": "direct-minimax",
+      "base_url": "https://api.minimax.io/anthropic",
+      "host": "claude",
+      "protocol": "anthropic-compatible",
+      "requested_model": "MiniMax-M3",
+      "execution_location": "local-user-workspace",
+      "identity_contract": {"requested_model": "MiniMax-M3", "resolved_model": null, "settings_precedence": "unverified"}
+    }
+  ],
+  "activation_requires": ["exact runtime allowlist entry", "presence-only credential check", "per-launch nonsecret settings isolation", "local task evaluation", "explicit task authorization"]
+}

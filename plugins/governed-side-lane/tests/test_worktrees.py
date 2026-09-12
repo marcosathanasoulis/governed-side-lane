@@ -46,6 +46,8 @@ class WorktreeTests(unittest.TestCase):
             lane, host="claude", mode="review", provider="claude",
             model="claude-sonnet-5", prompt="Review", exit_status=0,
             status="## review", stdout="finding: bug in api.py", stderr="warn",
+            requested_model="claude-sonnet-5", resolved_model="claude-sonnet-5-20260901",
+            usage={"input_tokens": 12}, provider_artifact="/tmp/receipt.json",
         )
         worktrees.dispose_clean_worktree(lane)
         self.assertFalse(lane.worktree.exists())
@@ -53,6 +55,10 @@ class WorktreeTests(unittest.TestCase):
         self.assertEqual(payload["schema_version"], 2)
         self.assertEqual(payload["stdout"], "finding: bug in api.py")
         self.assertEqual(payload["stderr"], "warn")
+        self.assertEqual(payload["requested_model"], "claude-sonnet-5")
+        self.assertEqual(payload["resolved_model"], "claude-sonnet-5-20260901")
+        self.assertEqual(payload["usage"], {"input_tokens": 12})
+        self.assertEqual(payload["provider_artifact"], "/tmp/receipt.json")
 
     def test_refuses_dirty_coordinator_checkout(self) -> None:
         repo = self.make_repo()

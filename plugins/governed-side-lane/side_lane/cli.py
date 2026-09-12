@@ -22,6 +22,7 @@ from side_lane.hosts import (
 )
 from side_lane.adapters.claude import ClaudeAdapterError
 from side_lane.adapters.codex import CodexAdapterError
+from side_lane.adapters.devin import DevinAdapterError
 from side_lane.worktrees import (
     WorktreeError,
     create_worktree,
@@ -85,10 +86,13 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
                 raise SideLaneError(f"provider {provider!r} has an invalid route")
             for host, route in hosts.items():
                 models = route.get("models") if isinstance(route, dict) else None
-                if host not in {"codex", "claude"} or not route.get("protocol") or not isinstance(models, list) or not models:
+                if host not in {"codex", "claude", "devin"} or not route.get("protocol") or not isinstance(models, list) or not models:
                     raise SideLaneError(f"provider {provider!r} has an invalid host route")
                 if len(set(models)) != len(models) or not all(isinstance(model, str) and model for model in models):
                     raise SideLaneError(f"provider {provider!r} has invalid models")
+                model_configs = route.get("model_configs", {})
+                if not isinstance(model_configs, dict) or any(key not in models or not isinstance(value, dict) for key, value in model_configs.items()):
+                    raise SideLaneError(f"provider {provider!r} has invalid model_configs")
     return config
 
 
@@ -101,11 +105,24 @@ def select_route(config: Mapping[str, Any], host: str, mode: str, provider: str,
         raise SideLaneError(f"unsupported route: {host}/{mode}/{provider}")
     if model not in route["models"]:
         raise SideLaneError(f"model {model!r} is not allowed for {host}/{mode}/{provider}")
-    return provider_config, {
+    model_config: dict[str, Any] = {
         "runtime_model": model, "protocol": str(route["protocol"]), "wire_api": str(route["protocol"]),
         "gateway": provider_config["gateway"], "auth_method": provider_config["auth_method"],
         "billable": provider_config["billable"],
     }
+    for key in ("identity_contract", "reasoning_effort", "max_budget_usd", "execution_location"):
+        if key in route:
+            model_config[key] = route[key]
+    model_config.update(route.get("model_configs", {}).get(model, {}))
+    billable = model_config["billable"]
+    if not isinstance(billable, bool):
+        raise SideLaneError("model billable metadata must be boolean")
+    if billable != provider_config["billable"] and not (
+        host == "devin" and route["protocol"] == "native-devin"
+        and provider_config["auth_method"] == "oauth"
+    ):
+        raise SideLaneError("model billing override is supported only for native Devin OAuth")
+    return {**provider_config, "billable": billable}, model_config
 
 
 def validate_selection(config: Mapping[str, Any], provider: str, model: str, *, host: str = "claude", mode: str = "review") -> Mapping[str, Any]:
@@ -138,13 +155,15 @@ def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="side-lane", allow_abbrev=False)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("list")
+    candidates = sub.add_parser("candidates", allow_abbrev=False)
+    candidates.add_argument("--json", action="store_true")
     credentials = sub.add_parser("credentials", allow_abbrev=False)
     credentials.add_argument("--json", action="store_true")
     auth = sub.add_parser("auth-status", allow_abbrev=False)
-    auth.add_argument("--host", choices=("codex", "claude"), required=True)
+    auth.add_argument("--host", choices=("codex", "claude", "devin"), required=True)
     auth.add_argument("--json", action="store_true")
     check = sub.add_parser("check-capabilities", allow_abbrev=False)
-    check.add_argument("--host", choices=("codex", "claude"), required=True)
+    check.add_argument("--host", choices=("codex", "claude", "devin"), required=True)
     check.add_argument("--mode", choices=("review", "execute"), default="execute")
     check.add_argument("--provider")
     check.add_argument("--model")
@@ -156,7 +175,7 @@ def make_parser() -> argparse.ArgumentParser:
     evaluate = sub.add_parser("evaluate", allow_abbrev=False)
     evaluate.add_argument("--input", required=True)
     run = sub.add_parser("run", allow_abbrev=False)
-    run.add_argument("--host", choices=("codex", "claude"), required=True)
+    run.add_argument("--host", choices=("codex", "claude", "devin"), required=True)
     run.add_argument("--mode", choices=("review", "execute"), default="review")
     run.add_argument("--provider", required=True)
     run.add_argument("--model", required=True)
@@ -201,13 +220,22 @@ def load_recommendation_profile(path_argument: str) -> dict[str, Any]:
 
 def _ready_routes(config: Mapping[str, Any]) -> frozenset[tuple[str, str, str, str]]:
     present: set[tuple[str, str, str, str]] = set()
-    statuses = {host: auth_status(host, executable=_host_executable(host)) for host in ("codex", "claude")}
+    configured_hosts = {
+        host
+        for item in config["providers"].values()
+        for hosts in item.get("routes", {}).values()
+        for host in hosts
+    }
+    statuses = {
+        host: auth_status(host, executable=_host_executable(host))
+        for host in configured_hosts
+    }
     for provider, item in config["providers"].items():
         if item.get("auth_method") == "oauth":
             ready_hosts = {host for host, status in statuses.items() if status.ready}
         else:
             ready_hosts = (
-                {"codex", "claude"}
+                configured_hosts
                 if credential_present(item["credential_service"])
                 else set()
             )
@@ -232,23 +260,24 @@ def _recommend(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
     unknown = sorted(set(required_capabilities) - set(config["capabilities"]))
     if unknown:
         raise SideLaneError(f"unknown capabilities: {', '.join(unknown)}")
+    candidate_hosts = tuple(sorted({
+        candidate_host
+        for item in config["providers"].values()
+        for hosts in item.get("routes", {}).values()
+        for candidate_host in hosts
+    }))
     snapshots = {
         candidate_host: _capability_report(
             config, candidate_host, mode, None, None, repo
         )
-        for candidate_host in ("codex", "claude")
+        for candidate_host in candidate_hosts
     }
     normalized = dict(profile)
     normalized.update({"coordinator_host": host,
         "required_connectors": sorted(set(required_connectors)),
         "required_capabilities": sorted(set(required_capabilities)),
         "host_capabilities": {
-            candidate_host: {
-                "available_connectors": report["mcp_connectors"],
-                "available_capabilities": sorted(
-                    name for name, state in report["capabilities"].items() if state
-                ),
-            }
+            candidate_host: _recommendation_host_snapshot(report, mode)
             for candidate_host, report in snapshots.items()
         }})
     result = routing.recommend(routing.load_catalog(), normalized,
@@ -257,6 +286,38 @@ def _recommend(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
                    "required_capabilities": sorted(required_capabilities)})
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
+
+
+def _recommendation_host_snapshot(report: Mapping[str, Any], mode: str) -> dict[str, Any]:
+    """Translate presence evidence narrowly for offline route staffing.
+
+    A configured Playwright server is enough for an execute recommendation
+    because dispatch performs a live readiness check and the route catalog
+    still requires its own local evaluation and connector evidence. Other
+    merely-present capabilities remain unavailable because their authority or
+    authentication has not been verified. Review lanes expose no MCP servers.
+    """
+
+    connectors = report.get("mcp_connectors", [])
+    capabilities = report.get("capabilities", {})
+    evidence = report.get("capability_evidence", {})
+    if not isinstance(connectors, list) or not isinstance(capabilities, Mapping):
+        raise SideLaneError("capability report is malformed")
+    available = {name for name, state in capabilities.items() if state}
+    if mode != "execute":
+        available.difference_update({"playwright", "gitnexus", "codegraph"})
+    if (
+        mode == "execute"
+        and "playwright" in connectors
+        and isinstance(evidence, Mapping)
+        and isinstance(evidence.get("playwright"), Mapping)
+        and evidence["playwright"].get("state") == "present"
+    ):
+        available.add("playwright")
+    return {
+        "available_connectors": sorted(connectors) if mode == "execute" else [],
+        "available_capabilities": sorted(available),
+    }
 
 
 def _evaluate(path_argument: str) -> int:
@@ -326,7 +387,7 @@ def _capability_report(config: Mapping[str, Any], host: str, mode: str, provider
         "secret-use": {"state": "unknown", "basis": "credential values and access are never tested during preflight"},
         "database-read": {"state": "present" if shutil.which("psql") else "unavailable", "basis": "psql executable; database access not tested"},
         "workflow-write": {"state": "present" if any(marker in name for name in lowered for marker in ("asana", "slack", "teams", "github")) else "unknown", "basis": "connector-name metadata only; write authority not tested"},
-        "playwright": {"state": "present" if any("playwright" in name for name in lowered) else "unavailable", "basis": "connector-name metadata only, from the host's user-global config and this repository's project config; other projects' entries are excluded; browser launch not tested; review mode hides all MCP servers"},
+        "playwright": {"state": "present" if "playwright" in mcp_names else "unavailable", "basis": "exact connector-name metadata only, from the host's user-global config and this repository's project config; other projects' entries are excluded; browser launch not tested; review mode hides all MCP servers"},
     }
     report: dict[str, Any] = {"host": host, "mode": mode, "runtime": runtime, "host_support_dir": host_support_dir(host, runtime), "route": "not-requested", "mcp_connectors": sorted(mcp_names), "mcp_connectors_out_of_scope": sorted(out_of_scope)}
     if bool(provider) != bool(model):
@@ -350,9 +411,9 @@ def _capability_report(config: Mapping[str, Any], host: str, mode: str, provider
 def _graph_connector_evidence(capability: str, mcp_names: set[str], host: str, out_of_scope: set[str] = frozenset()) -> dict[str, str]:
     """Presence evidence for a code-graph connector.
 
-    Only the Claude execute adapter renders the fixed ``mcp__<capability>__*``
-    grants, and Claude embeds the configured server name in every tool ID
-    exactly. On that host only a server registered under the exact name is
+    The Claude and Devin execute adapters render the fixed ``mcp__<capability>__*``
+    grants, whose tool IDs embed the configured server name
+    exactly. On those hosts only a server registered under the exact name is
     callable; one that merely contains the word (``gitnexus-local``) would pass
     a substring check and then receive no usable grant, so it is reported as
     ``name-mismatch`` and fails the launch gate like any non-present state.
@@ -360,7 +421,7 @@ def _graph_connector_evidence(capability: str, mcp_names: set[str], host: str, o
     allowlist, so connector-name presence remains the evidence there.
     """
 
-    if host != "claude":
+    if host == "codex":
         if any(capability in name.lower() for name in mcp_names):
             return {"state": "present", "basis": "connector-name metadata only; Codex lanes inherit configured MCP servers directly"}
         return {"state": "unknown", "basis": "connector-name metadata only"}
@@ -401,12 +462,22 @@ def _discover_mcp_inventory(host: str, repo: Path | None = None) -> tuple[set[st
     names: set[str] = set()
     out_of_scope: set[str] = set()
     codex_home = Path(os.environ.get("CODEX_HOME", "").strip() or Path.home() / ".codex")
-    paths = ([codex_home / "config.toml"] if host == "codex"
-             else [Path.home() / ".claude.json", Path.home() / ".claude" / "settings.json"])
-    if repo is not None:
-        # Each host reads only its own project connector file; a lane inherits
-        # the selected host's connectors, never the other host's.
-        paths.append(repo / ".codex" / "config.toml" if host == "codex" else repo / ".mcp.json")
+    if host == "codex":
+        paths = [codex_home / "config.toml"]
+        if repo is not None:
+            paths.append(repo / ".codex" / "config.toml")
+    elif host == "claude":
+        paths = [Path.home() / ".claude.json", Path.home() / ".claude" / "settings.json"]
+        if repo is not None:
+            paths.append(repo / ".mcp.json")
+    elif host == "devin":
+        # Devin CLI >=3000.3 uses dedicated native MCP files, not Claude's.
+        base = Path(os.environ["APPDATA"]) if os.name == "nt" and os.environ.get("APPDATA") else Path.home() / ".config"
+        paths = [base / "devin" / "mcp_config.json"]
+        if repo is not None:
+            paths.extend([repo / ".devin" / "mcp_config.json", repo / ".devin" / "mcp_config.local.json"])
+    else:
+        return names, out_of_scope
     for path in paths:
         if not path.is_file():
             continue
@@ -449,9 +520,9 @@ def _launch(args: argparse.Namespace, config: Mapping[str, Any], repo: Path, pro
             )
     if not args.lane_name:
         raise SideLaneError(f"{args.mode} mode requires --lane-name")
-    if provider_config["auth_method"] == "oauth" and args.approve_billable_route:
-        raise SideLaneError("--approve-billable-route is invalid for native OAuth routes")
-    if provider_config["auth_method"] == "provider-key" and not args.approve_billable_route:
+    if not provider_config["billable"] and args.approve_billable_route:
+        raise SideLaneError("--approve-billable-route is invalid for non-billable native OAuth routes")
+    if provider_config["billable"] and not args.approve_billable_route:
         raise SideLaneError("billable route requires explicit --approve-billable-route for this run")
     executable = _require_host_executable(args.host)
     capabilities = tuple(sorted(set(args.capability)))
@@ -467,11 +538,17 @@ def _launch(args: argparse.Namespace, config: Mapping[str, Any], repo: Path, pro
             result = run_codex(executable=executable, repo=repo, worktree=lane.worktree, provider=args.provider,
                 model=args.model, provider_config=provider_config, model_config=model_config, prompt=prompt, mode=args.mode,
                 capabilities=capabilities, support_dir=host_support_dir(args.host, executable))
-        else:
+        elif args.host == "claude":
             from side_lane.adapters.claude import launch
             result = launch(executable=executable, repo=repo, worktree=lane.worktree, provider=args.provider,
                 model=args.model, provider_config=provider_config, model_config=model_config, prompt=prompt,
                 mode=args.mode, capabilities=capabilities, secret=secret)
+        else:
+            from side_lane.adapters.devin import launch
+            result = launch(executable=executable, repo=repo, worktree=lane.worktree,
+                provider=args.provider, model=args.model, provider_config=provider_config,
+                model_config=model_config, prompt=prompt, mode=args.mode,
+                capabilities=capabilities)
     except Exception:
         dispose_clean_worktree(lane)
         raise
@@ -484,7 +561,9 @@ def _launch(args: argparse.Namespace, config: Mapping[str, Any], repo: Path, pro
     audit = write_audit(lane, host=result.host, mode=args.mode, provider=result.provider,
         gateway=result.gateway, auth_method=result.auth_method, billable=result.billable, model=result.model,
         prompt=prompt, exit_status=result.returncode, status=status,
-        stdout=result.stdout, stderr=result.stderr)
+        stdout=result.stdout, stderr=result.stderr,
+        requested_model=result.requested_model, resolved_model=result.resolved_model,
+        usage=result.usage, provider_artifact=result.provider_artifact)
     summary.update({"branch": lane.branch, "worktree": str(lane.worktree), "git_status": status,
                     "audit": str(audit), "result_artifact": str(audit)})
     if args.mode == "review":
@@ -502,7 +581,19 @@ def run(argv: Sequence[str] | None = None) -> int:
             for mode, hosts in item["routes"].items():
                 for host, route in hosts.items():
                     for model in route["models"]:
-                        print(f"{host}\t{mode}\t{provider}\t{item['gateway']}\t{model}\t{item['auth_method']}\t{'billable' if item['billable'] else 'subscription'}")
+                        effective, _ = select_route(config, host, mode, provider, model)
+                        print(f"{host}\t{mode}\t{provider}\t{item['gateway']}\t{model}\t{item['auth_method']}\t{'billable' if effective['billable'] else 'subscription'}")
+        return 0
+    if args.command == "candidates":
+        candidates = routing.list_catalog_candidates(routing.load_catalog())
+        if args.json:
+            print(json.dumps(candidates, indent=2, sort_keys=True))
+        else:
+            for candidate in candidates:
+                print("\t".join((
+                    candidate["id"], candidate["provider"], candidate["requested_model"],
+                    candidate["execution_location"], candidate["qualification_state"], "disabled",
+                )))
         return 0
     if args.command == "credentials":
         states = {provider: ("not-used-oauth" if item["auth_method"] == "oauth" else ("present" if credential_present(item["credential_service"]) else "absent")) for provider, item in config["providers"].items()}
@@ -530,7 +621,7 @@ def main() -> None:
     try:
         raise SystemExit(run())
     except (SideLaneError, AuthError, CredentialError, GovernanceError, WorktreeError,
-            ClaudeAdapterError, CodexAdapterError, evaluation.EvaluationError,
+            ClaudeAdapterError, CodexAdapterError, DevinAdapterError, evaluation.EvaluationError,
             routing.RoutingError) as exc:
         print(f"side-lane: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
