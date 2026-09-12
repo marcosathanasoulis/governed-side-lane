@@ -48,8 +48,43 @@ class ClaudeAdapterTests(unittest.TestCase):
         child = claude.scrub_environment({
             "PATH": "/bin", "CLAUDE_CODE_USE_BEDROCK": "1",
             "CLAUDE_CODE_USE_VERTEX": "1", "CLAUDE_CODE_USE_FOUNDRY": "1",
+            "CLAUDE_CODE_EFFORT_LEVEL": "max", "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "999999",
         })
         self.assertEqual(child, {"PATH": "/bin"})
+
+    def test_direct_candidate_requires_identity_contract_and_pins_nonsecret_settings(self) -> None:
+        direct = {"gateway": "direct-kimi", "auth_method": "provider-key", "billable": True,
+                  "base_url": "https://api.kimi.com/coding/"}
+        config = {"runtime_model": "k3-256k", "protocol": "anthropic-compatible",
+                  "identity_contract": {"requested_model": "k3-256k", "resolved_model": "k3-256k",
+                                        "settings_precedence": "verified"}, "reasoning_effort": "high",
+                  "max_budget_usd": 2}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            command = claude.build_command(executable="claude", repo=repo, worktree=lane,
+                provider="kimi", model="k3-256k", provider_config=direct, model_config=config,
+                prompt="task", mode="execute")
+        settings = command[command.index("--settings") + 1]
+        self.assertIn('"enabled":false', settings)
+        self.assertIn('"CLAUDE_CODE_SUBAGENT_MODEL":"k3-256k"', settings)
+        self.assertEqual(command[command.index("--effort") + 1], "high")
+        self.assertEqual(command[command.index("--max-budget-usd") + 1], "2.0")
+        with self.assertRaisesRegex(claude.ClaudeAdapterError, "identity contract"):
+            claude.build_transport_environment({}, provider="kimi", model="k3-256k",
+                provider_config=direct, model_config={"runtime_model": "k3-256k", "protocol": "anthropic-compatible"},
+                mode="execute", secret="selected")
+        wrong_endpoint = {**direct, "base_url": "https://api.moonshot.ai/anthropic"}
+        with self.assertRaisesRegex(claude.ClaudeAdapterError, "endpoint"):
+            claude.build_transport_environment({}, provider="kimi", model="k3-256k",
+                provider_config=wrong_endpoint, model_config=config, mode="execute", secret="selected")
+        runner = mock.Mock()
+        with self.assertRaisesRegex(claude.ClaudeAdapterError, "unqualified for launch"):
+            claude.launch(executable="claude", repo="/not-used", worktree="/not-used", provider="kimi",
+                model="k3-256k", provider_config=direct, model_config=config, prompt="task",
+                secret="selected", runner=runner)
+        runner.assert_not_called()
 
     def test_glm_requires_explicit_secret_and_uses_direct_gateway(self) -> None:
         config = {"runtime_model": "glm-5.3", "protocol": "anthropic-compatible"}

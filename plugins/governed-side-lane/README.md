@@ -7,6 +7,11 @@ and canonical governance/configuration.
 The core skill works without Prompt it or organization-specific configuration.
 It requires Git, Python 3.10+, and at least one signed-in native host CLI.
 
+Optional model/account and connector setup guidance lives in the public
+[model guide](docs/model-guide.md) and
+[connector guide](docs/connector-guide.md). Neither is required to use a
+single native OpenAI or Claude host.
+
 Every target repository must contain a regular root `AGENTS.md` that requires
 and authoritatively links one regular root `CLAUDE.md` (or states in a
 Markdown-linked line that `CLAUDE.md` is the source of truth). Review and

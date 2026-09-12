@@ -20,6 +20,13 @@ This skill is distributed to both Codex and Claude Code. Each product loads its
 own skill wrapper, CLI, OAuth session, and connectors; neither product borrows
 the other's identity or configuration.
 
+Optional account/model candidates and task-specific connector setup are in the
+public [model guide](../../docs/model-guide.md) and
+[connector guide](../../docs/connector-guide.md).
+They do not make a route executable: keep candidate, configured, available, and
+authorized states separate, and continue normally with one native OpenAI or
+Claude host when no optional route qualifies.
+
 Inspect the resolved runner's help. `list` shows configured route inventory, not
 current readiness. For the exact host, mode, provider, model, and repository,
 run `check-capabilities`; treat its OAuth/credential result as presence-only and
@@ -30,6 +37,13 @@ Codex/OpenAI and Claude routes use the selected host's existing signed-in OAuth
 subscription. If OAuth is absent or expired, stop and offer that host's
 sign-in/refresh command; never log in automatically. Never silently substitute
 a model, provider, gateway, or paid key route.
+
+When available, `candidates` reads the research catalog only. Its
+`execution_location`, `qualification_state`, and false executable/allowlist/
+credential/authorization fields identify an evaluation subject, not a configured
+or usable route. It performs no account, quota, connector, credential, or
+authorization check. Candidates remain optional; ordinary native work proceeds
+without one.
 
 For Prompt it staffing, inspect the current runtime and documented lane
 inventory for exact available model names and supplied capability descriptions.
@@ -87,6 +101,12 @@ when the user has explicitly authorized that bounded external research team;
 generic Prompt it consent and recommendation output do not authorize launch.
 Review governance still forbids MCP/connectors and secrets. Execute lanes,
 including GLM, retain their separate approval gates.
+
+An execute lane runs locally as the selected signed-in user. Its worktree is
+Git-edit isolation, not an OS/container/cloud sandbox. This does not broaden
+the approved task or authorize an external write: model inference may be hosted
+while the worker's tools remain local, and each connector-backed action keeps
+its existing explicit permission gate.
 
 For durable context that must survive movement between direct Codex, direct
 Claude Code, and side lanes, follow the installed pointer to

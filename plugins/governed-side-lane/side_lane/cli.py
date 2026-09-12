@@ -101,11 +101,15 @@ def select_route(config: Mapping[str, Any], host: str, mode: str, provider: str,
         raise SideLaneError(f"unsupported route: {host}/{mode}/{provider}")
     if model not in route["models"]:
         raise SideLaneError(f"model {model!r} is not allowed for {host}/{mode}/{provider}")
-    return provider_config, {
+    model_config: dict[str, Any] = {
         "runtime_model": model, "protocol": str(route["protocol"]), "wire_api": str(route["protocol"]),
         "gateway": provider_config["gateway"], "auth_method": provider_config["auth_method"],
         "billable": provider_config["billable"],
     }
+    for key in ("identity_contract", "reasoning_effort", "max_budget_usd", "execution_location"):
+        if key in route:
+            model_config[key] = route[key]
+    return provider_config, model_config
 
 
 def validate_selection(config: Mapping[str, Any], provider: str, model: str, *, host: str = "claude", mode: str = "review") -> Mapping[str, Any]:
@@ -138,6 +142,8 @@ def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="side-lane", allow_abbrev=False)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("list")
+    candidates = sub.add_parser("candidates", allow_abbrev=False)
+    candidates.add_argument("--json", action="store_true")
     credentials = sub.add_parser("credentials", allow_abbrev=False)
     credentials.add_argument("--json", action="store_true")
     auth = sub.add_parser("auth-status", allow_abbrev=False)
@@ -503,6 +509,17 @@ def run(argv: Sequence[str] | None = None) -> int:
                 for host, route in hosts.items():
                     for model in route["models"]:
                         print(f"{host}\t{mode}\t{provider}\t{item['gateway']}\t{model}\t{item['auth_method']}\t{'billable' if item['billable'] else 'subscription'}")
+        return 0
+    if args.command == "candidates":
+        candidates = routing.list_catalog_candidates(routing.load_catalog())
+        if args.json:
+            print(json.dumps(candidates, indent=2, sort_keys=True))
+        else:
+            for candidate in candidates:
+                print("\t".join((
+                    candidate["id"], candidate["provider"], candidate["requested_model"],
+                    candidate["execution_location"], candidate["qualification_state"], "disabled",
+                )))
         return 0
     if args.command == "credentials":
         states = {provider: ("not-used-oauth" if item["auth_method"] == "oauth" else ("present" if credential_present(item["credential_service"]) else "absent")) for provider, item in config["providers"].items()}

@@ -5,6 +5,12 @@ description: Optionally qualify Side Lane routes for a Prompt it task graph and 
 
 # Prompt it side-lane routing
 
+Optional model candidates and connectors never block ordinary Prompt it work.
+Use the public [model guide](../../docs/model-guide.md) and
+[connector guide](../../docs/connector-guide.md)
+only when the task needs an optional route or capability. Treat configured,
+available-for-this-task, executable, and authorized as separate states.
+
 Use this companion while researching and staffing a Prompt it task graph. It is
 not a replacement for Prompt it or a general provider picker. The normal Prompt
 it workflow remains fully usable when `side-lane` is not installed or has no
@@ -63,6 +69,14 @@ requested mode, repository, required operational and behavioral capabilities,
 task-fit band, quality floor, declared token budget, per-host cost state, and
 any user-declared preference. Ask each command for its installed help; do not
 invent runner flags or pass credentials.
+
+If the installed runner supplies `candidates`, use it only to read its research
+catalog. It reports candidate identity and qualification location/state, not
+credential, connector, cost-entitlement, authorization, provider, or task
+readiness. A candidate is not a configured route. Consider task-fitting
+configured routes without waiting for the user to name a provider, but do not
+perform optional discovery as a mandatory survey when native staffing already
+meets the task.
 
 For each considered route, record one state: `absent`, `configured`,
 `auth-or-tool-missing`, `task-unqualified`, or `eligible`. Include the evidence

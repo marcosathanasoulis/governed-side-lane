@@ -23,6 +23,9 @@ class LaneResult:
     capabilities: tuple[str, ...] = ()
     allowed_tools: tuple[str, ...] = ()
     disallowed_tools: tuple[str, ...] = ()
+    requested_model: str | None = None
+    resolved_model: str | None = None
+    reasoning_effort: str | None = None
 
     @property
     def worktree(self) -> Path:
@@ -34,6 +37,9 @@ class LaneResult:
             "provider": self.provider,
             "gateway": self.gateway,
             "model": self.model,
+            "requested_model": self.requested_model or self.model,
+            "resolved_model": self.resolved_model,
+            "reasoning_effort": self.reasoning_effort,
             "auth_method": self.auth_method,
             "billable": self.billable,
             "cwd": str(self.cwd),

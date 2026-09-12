@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -16,7 +17,12 @@ from side_lane.results import LaneResult
 MAX_PROMPT_CHARS = 100_000
 NATIVE_PROVIDER = "claude"
 NATIVE_GATEWAY = "native-claude"
-BILLABLE_PROVIDERS = frozenset({"glm", "openrouter"})
+BILLABLE_PROVIDERS = frozenset({"glm", "openrouter", "deepseek", "kimi", "minimax"})
+FIRST_WAVE_ENDPOINTS = {
+    "deepseek": "https://api.deepseek.com/anthropic",
+    "kimi": "https://api.kimi.com/coding/",
+    "minimax": "https://api.minimax.io/anthropic",
+}
 
 SCRUB_EXACT = frozenset(
     {
@@ -36,13 +42,25 @@ SCRUB_EXACT = frozenset(
         "CLAUDE_CODE_USE_BEDROCK",
         "CLAUDE_CODE_USE_VERTEX",
         "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CODE_EFFORT_LEVEL",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
     }
 )
-SCRUB_PREFIXES = ("OPENROUTER_", "ZAI_", "ZHIPUAI_", "GLM_")
+SCRUB_PREFIXES = (
+    "ANTHROPIC_", "OPENROUTER_", "ZAI_", "ZHIPUAI_", "GLM_",
+    "DEEPSEEK_", "KIMI_", "MOONSHOT_", "MINIMAX_",
+)
+EXACT_MODEL_ENV_NAMES = (
+    "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL",
+)
 GLM_QUOTA_PAUSE = re.compile(
     r"\b(?:quota|usage limit|rate limit)\b.*\b(?:exceed(?:ed)?|reached|reset|temporar(?:y|ily)|hours?)\b",
     re.IGNORECASE | re.DOTALL,
 )
+SUPPORTED_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 
 
 # Capability-gated permission rules for headless execute lanes.
@@ -148,6 +166,8 @@ def _route_metadata(
     else:
         if provider not in BILLABLE_PROVIDERS or auth_method != "provider-key" or not billable:
             raise ClaudeAdapterError("external Claude routes must be explicit billable key routes")
+        if provider != "glm" and mode != "execute":
+            raise ClaudeAdapterError("new direct providers are unqualified for review lanes")
         expected = "anthropic-compatible-readonly" if mode == "review" else "anthropic-compatible"
         if protocol != expected:
             raise ClaudeAdapterError(f"billable Claude {mode} protocol is not verified")
@@ -155,6 +175,20 @@ def _route_metadata(
         parsed = urlparse(endpoint)
         if parsed.scheme != "https" or not parsed.netloc or parsed.query or parsed.fragment:
             raise ClaudeAdapterError("billable gateway must be a clean HTTPS endpoint")
+        expected_endpoint = FIRST_WAVE_ENDPOINTS.get(provider)
+        if expected_endpoint is not None and endpoint.rstrip("/") != expected_endpoint.rstrip("/"):
+            raise ClaudeAdapterError("provider endpoint does not match the reviewed first-wave contract")
+        # GLM predates the identity contract. Every newly configured direct
+        # provider must prove that Claude Code settings cannot substitute an
+        # alias, fast model, or subagent model behind the requested selector.
+        if provider != "glm":
+            identity = model_config.get("identity_contract")
+            if not isinstance(identity, Mapping):
+                raise ClaudeAdapterError("external route lacks an exact model identity contract")
+            if identity.get("requested_model") != model or identity.get("resolved_model") != model:
+                raise ClaudeAdapterError("external route has unresolved model identity")
+            if identity.get("settings_precedence") != "verified":
+                raise ClaudeAdapterError("external route has unverified Claude settings precedence")
     return runtime_model, gateway, auth_method, billable
 
 
@@ -180,9 +214,47 @@ def build_transport_environment(
         raise ClaudeAdapterError("explicit billable route credential is absent")
     child["ANTHROPIC_AUTH_TOKEN"] = secret
     child["ANTHROPIC_BASE_URL"] = _nonempty(provider_config.get("base_url"), "base_url").rstrip("/")
-    child["ANTHROPIC_MODEL"] = runtime_model
-    child["ANTHROPIC_SMALL_FAST_MODEL"] = runtime_model
+    for name in EXACT_MODEL_ENV_NAMES:
+        child[name] = runtime_model
     return child
+
+
+def _per_launch_settings(provider: str, model: str, mode: str) -> str:
+    """Return nonsecret settings that outrank user/project/local settings.
+
+    Execute lanes intentionally run in the user workspace under the user
+    identity.  The setting is process-local and cannot change a user's saved
+    Claude settings.  Direct compatible transports also pin every documented
+    model selector here because Kimi's settings environment overrides shell
+    environment variables.
+    """
+
+    settings: dict[str, Any] = {"sandbox": {"enabled": False}} if mode == "execute" else {}
+    if provider != NATIVE_PROVIDER:
+        settings["env"] = {name: model for name in EXACT_MODEL_ENV_NAMES}
+    return json.dumps(settings, separators=(",", ":"), sort_keys=True)
+
+
+def _optional_effort(model_config: Mapping[str, Any]) -> str | None:
+    effort = model_config.get("reasoning_effort")
+    if effort is None:
+        return None
+    if effort not in SUPPORTED_EFFORTS:
+        raise ClaudeAdapterError("reasoning_effort is not supported by the Claude host")
+    return str(effort)
+
+
+def _optional_budget(model_config: Mapping[str, Any]) -> str | None:
+    value = model_config.get("max_budget_usd")
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ClaudeAdapterError("max_budget_usd must be a positive finite number") from exc
+    if not parsed > 0 or parsed == float("inf"):
+        raise ClaudeAdapterError("max_budget_usd must be a positive finite number")
+    return str(parsed)
 
 
 def build_command(
@@ -242,8 +314,16 @@ def build_command(
                 "user,project,local",
                 "--output-format",
                 "text",
+                "--settings",
+                _per_launch_settings(provider, runtime_model, mode),
             )
         )
+        effort = _optional_effort(model_config)
+        if effort is not None:
+            command.extend(("--effort", effort))
+        budget = _optional_budget(model_config)
+        if budget is not None:
+            command.extend(("--max-budget-usd", budget))
         for tool in allowed_tools(mode, capabilities):
             command.extend(("--allowedTools", tool))
         for tool in disallowed_tools(mode, capabilities):
@@ -273,6 +353,12 @@ def launch(
     secret: str | None = None,
     runner: Runner = subprocess.run,
 ) -> LaneResult:
+    # Contract rendering is testable offline, but these providers have not
+    # passed a local response-identity/lifecycle evaluation.  Refuse before
+    # credential transport or process creation; a catalog candidate is never
+    # executable merely because its endpoint syntax is known.
+    if provider in FIRST_WAVE_ENDPOINTS:
+        raise ClaudeAdapterError("first-wave provider adapter is unqualified for launch")
     repo_path = validate_worktree(repo)
     worktree_path = validate_worktree(worktree)
     granted = tuple(sorted(_capability_set(capabilities)))
@@ -337,4 +423,12 @@ def launch(
         capabilities=granted,
         allowed_tools=allowed_tools(mode, granted),
         disallowed_tools=disallowed_tools(mode, granted),
+        requested_model=model,
+        # The transport requests this selector; it cannot attest to the
+        # provider's response weight/version without a verified response field.
+        resolved_model=None,
+        reasoning_effort=(
+            model_config.get("reasoning_effort")
+            if isinstance(model_config.get("reasoning_effort"), str) else None
+        ),
     )

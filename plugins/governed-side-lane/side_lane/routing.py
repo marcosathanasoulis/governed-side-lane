@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import date
 import json
+import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -18,6 +19,7 @@ DEFAULT_CATALOG_PATH = PACKAGE_ROOT / "config" / "routing-catalog.json"
 SUPPORTED_POLICIES = frozenset({"best-fit", "cost-optimized"})
 SUPPORTED_HOST_COST_STATES = frozenset({"included-oauth", "extra-usage", "unknown"})
 SUPPORTED_GLM_AVAILABILITY = frozenset({"available", "unknown", "temporarily-unavailable"})
+EXECUTION_LOCATIONS = frozenset({"local-user-workspace", "cloud-only", "unknown"})
 SUPPORTED_PROTOCOLS = {
     "codex": frozenset({"native-codex", "native-codex-readonly"}),
     "claude": frozenset({"native-claude", "native-claude-readonly", "anthropic-compatible", "anthropic-compatible-readonly"}),
@@ -43,6 +45,15 @@ def _positive_int(value: Any, label: str, *, allow_zero: bool = True) -> int:
     ):
         raise RoutingError(f"{label} must be {'non-negative' if allow_zero else 'positive'}")
     return value
+
+
+def _nonnegative_number(value: Any, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RoutingError(f"{label} must be a non-negative finite number")
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        raise RoutingError(f"{label} must be a non-negative finite number")
+    return number
 
 
 def load_catalog(path: Path = DEFAULT_CATALOG_PATH) -> dict[str, Any]:
@@ -121,6 +132,46 @@ def validate_catalog(catalog: Mapping[str, Any]) -> None:
             if route.get("execution_allowlisted") is not True:
                 raise RoutingError(f"route {route_id} is executable but not allowlisted")
             _validate_executable_route(route, route_id)
+    candidates = catalog.get("candidates", [])
+    if not isinstance(candidates, list):
+        raise RoutingError("routing catalog candidates must be an array")
+    candidate_ids: set[str] = set(identifiers)
+    for candidate in candidates:
+        _validate_candidate(candidate, candidate_ids)
+
+
+def _validate_candidate(candidate: object, identifiers: set[str]) -> None:
+    """Validate a research candidate without treating it as a runtime route."""
+
+    if not isinstance(candidate, Mapping):
+        raise RoutingError("every candidate must be an object")
+    identifier = candidate.get("id")
+    if not isinstance(identifier, str) or not identifier:
+        raise RoutingError("candidate id must be a non-empty string")
+    if identifier in identifiers:
+        raise RoutingError(f"duplicate candidate id: {identifier}")
+    identifiers.add(identifier)
+    for name in ("provider", "model_vendor", "requested_model", "execution_location", "qualification_state"):
+        if not isinstance(candidate.get(name), str) or not candidate[name]:
+            raise RoutingError(f"candidate {identifier} requires {name}")
+    if candidate.get("state") != "candidate" or candidate.get("default_enabled") is not False:
+        raise RoutingError(f"candidate {identifier} must remain disabled research metadata")
+    if candidate["execution_location"] not in EXECUTION_LOCATIONS:
+        raise RoutingError(f"candidate {identifier} has an invalid execution_location")
+    for name in ("gateway", "endpoint", "auth_method", "host", "harness", "mode", "protocol", "reasoning_setting", "identity_stability"):
+        value = candidate.get(name)
+        if value is not None and (not isinstance(value, str) or not value):
+            raise RoutingError(f"candidate {identifier} {name} is invalid")
+    endpoint = candidate.get("endpoint")
+    if endpoint is not None and (not endpoint.startswith("https://") or any(char.isspace() for char in endpoint)):
+        raise RoutingError(f"candidate {identifier} has an invalid HTTPS endpoint")
+    if candidate.get("resolved_model") is not None and not isinstance(candidate["resolved_model"], str):
+        raise RoutingError(f"candidate {identifier} resolved_model is invalid")
+    model_evidence = candidate.get("model_evidence")
+    _validate_reviewed_evidence(model_evidence, f"candidate {identifier} model evidence")
+    endpoint_evidence = candidate.get("endpoint_evidence")
+    if endpoint_evidence is not None:
+        _validate_reviewed_evidence(endpoint_evidence, f"candidate {identifier} endpoint evidence")
 
 
 def _validate_reviewed_evidence(value: object, label: str) -> Mapping[str, Any]:
@@ -307,6 +358,18 @@ def _profile(profile: Mapping[str, Any]) -> dict[str, Any]:
         if candidate_host not in SUPPORTED_PROTOCOLS or state not in SUPPORTED_HOST_COST_STATES:
             raise RoutingError("host_cost_state contains an invalid host or state")
         normalized_cost_state[str(candidate_host)] = str(state)
+    route_spend_state = profile.get("route_spend_state", {})
+    if not isinstance(route_spend_state, Mapping) or not all(
+        isinstance(route_id, str) and route_id and state in SUPPORTED_HOST_COST_STATES
+        for route_id, state in route_spend_state.items()
+    ):
+        raise RoutingError("route_spend_state contains an invalid route or state")
+    declared_plan_state = profile.get("declared_plan_state", {})
+    if not isinstance(declared_plan_state, Mapping) or not all(
+        isinstance(route_id, str) and route_id and isinstance(state, str) and state
+        for route_id, state in declared_plan_state.items()
+    ):
+        raise RoutingError("declared_plan_state contains an invalid route or state")
     include_glm = profile.get("include_glm", False)
     if not isinstance(include_glm, bool):
         raise RoutingError("include_glm must be boolean")
@@ -315,11 +378,57 @@ def _profile(profile: Mapping[str, Any]) -> dict[str, Any]:
         raise RoutingError("glm_availability is invalid")
     preference = profile.get("prefer")
     vendor_aliases = {"codex": "openai"}
-    if preference is not None and preference not in {"claude", "openai", "codex", "glm"}:
-        raise RoutingError("prefer must be claude, openai, codex, or glm")
+    if preference is not None and (not isinstance(preference, str) or not preference):
+        raise RoutingError("prefer must be a non-empty provider name")
     avoided = profile.get("avoid", [])
-    if not all(item in {"claude", "openai", "codex", "glm"} for item in avoided):
-        raise RoutingError("avoid must contain claude, openai, codex, or glm")
+    if not isinstance(avoided, list) or not all(isinstance(item, str) and item for item in avoided):
+        raise RoutingError("avoid must contain non-empty provider names")
+    attempts = profile.get("session_attempts")
+    if attempts is None:
+        attempts = [{
+            "uncached_input_tokens": profile.get("input_tokens", 0),
+            "cached_read_tokens": profile.get("cached_input_tokens", 0),
+            "output_tokens": profile.get("output_tokens", 0),
+            "kind": "primary",
+        }]
+    if not isinstance(attempts, list) or not attempts:
+        raise RoutingError("session_attempts must be a non-empty array")
+    normalized_attempts: list[dict[str, Any]] = []
+    for index, attempt in enumerate(attempts):
+        if not isinstance(attempt, Mapping):
+            raise RoutingError("session_attempts entries must be objects")
+        kind = attempt.get("kind", "attempt")
+        if not isinstance(kind, str) or not kind:
+            raise RoutingError("session_attempts.kind must be a non-empty string")
+        normalized_attempts.append({
+            "kind": kind,
+            "uncached_input_tokens": _positive_int(attempt.get("uncached_input_tokens", 0), f"session_attempts[{index}].uncached_input_tokens"),
+            "cached_read_tokens": _positive_int(attempt.get("cached_read_tokens", 0), f"session_attempts[{index}].cached_read_tokens"),
+            "cache_write_tokens": _positive_int(attempt.get("cache_write_tokens", 0), f"session_attempts[{index}].cache_write_tokens"),
+            "output_tokens": _positive_int(attempt.get("output_tokens", 0), f"session_attempts[{index}].output_tokens"),
+            "reasoning_tokens": _positive_int(attempt.get("reasoning_tokens", 0), f"session_attempts[{index}].reasoning_tokens"),
+            "coordinator_cost_usd": (
+                None if attempt.get("coordinator_cost_usd") is None
+                else _nonnegative_number(attempt.get("coordinator_cost_usd"), f"session_attempts[{index}].coordinator_cost_usd")
+            ),
+            "tool_cost_usd": _nonnegative_number(attempt.get("tool_cost_usd", 0), f"session_attempts[{index}].tool_cost_usd"),
+            "host_cost_usd": _nonnegative_number(attempt.get("host_cost_usd", 0), f"session_attempts[{index}].host_cost_usd"),
+        })
+    accepted_completions = profile.get("accepted_completions")
+    if accepted_completions is not None:
+        accepted_completions = _positive_int(accepted_completions, "accepted_completions")
+    session_cost_basis = profile.get("session_cost_basis", "hypothetical-workload")
+    if session_cost_basis not in {"hypothetical-workload", "route-specific-cohort"}:
+        raise RoutingError("session_cost_basis is invalid")
+    if session_cost_basis == "route-specific-cohort" and accepted_completions is None:
+        raise RoutingError("route-specific-cohort requires accepted_completions")
+    if session_cost_basis == "hypothetical-workload" and accepted_completions is not None:
+        raise RoutingError("hypothetical-workload must not include accepted_completions")
+    cohort_route_id = profile.get("cohort_route_id")
+    if session_cost_basis == "route-specific-cohort" and (not isinstance(cohort_route_id, str) or not cohort_route_id):
+        raise RoutingError("route-specific-cohort requires cohort_route_id")
+    if cohort_route_id is not None and (not isinstance(cohort_route_id, str) or not cohort_route_id):
+        raise RoutingError("cohort_route_id is invalid")
     return {
         "originating_host": host,
         "coordinator_host": host,
@@ -334,6 +443,8 @@ def _profile(profile: Mapping[str, Any]) -> dict[str, Any]:
         "required_behavioral_capabilities": frozenset(required_behavioral),
         "host_capabilities": normalized_hosts,
         "host_cost_state": normalized_cost_state,
+        "route_spend_state": dict(route_spend_state),
+        "declared_plan_state": dict(declared_plan_state),
         "include_glm": include_glm,
         "glm_availability": glm_availability,
         "input_tokens": _positive_int(profile.get("input_tokens", 0), "input_tokens"),
@@ -341,6 +452,10 @@ def _profile(profile: Mapping[str, Any]) -> dict[str, Any]:
             profile.get("cached_input_tokens", 0), "cached_input_tokens"
         ),
         "output_tokens": _positive_int(profile.get("output_tokens", 0), "output_tokens"),
+        "session_attempts": tuple(normalized_attempts),
+        "accepted_completions": accepted_completions,
+        "session_cost_basis": session_cost_basis,
+        "cohort_route_id": cohort_route_id,
         "privacy_class": profile.get("privacy_class", "ordinary"),
         "prefer": vendor_aliases.get(preference, preference),
         "declared_prefer": preference,
@@ -349,62 +464,211 @@ def _profile(profile: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _estimate_cost(
-    route: Mapping[str, Any], profile: Mapping[str, Any], now: date, max_days: int
+def estimate_session_cost(
+    cost_model: Mapping[str, Any],
+    attempts: Sequence[Mapping[str, Any]],
+    *,
+    host_cost_state: str,
+    now: date,
+    max_days: int,
+    accepted_completions: int | None = None,
+    plan_state: str | None = None,
 ) -> dict[str, Any] | None:
-    cost_model = route.get("cost_model")
-    if not isinstance(cost_model, Mapping) or not _fresh_on(
-        cost_model, "verified_on", now, max_days
-    ):
+    """Estimate one complete task session without hiding failed work.
+
+    Attempts may include primary work, retry, correction, review, or coordinator
+    handoffs.  Tool and execution-host charges are explicit USD cash overhead;
+    they cannot be combined with an unknown or non-USD model unit.  Acquisition
+    is deliberately separate from dispatch cash and is never charged to a task.
+    """
+
+    if not isinstance(cost_model, Mapping) or not _fresh_on(cost_model, "verified_on", now, max_days):
+        return None
+    if host_cost_state not in SUPPORTED_HOST_COST_STATES:
         return None
     basis = cost_model.get("basis")
-    host_state = profile["host_cost_state"].get(route.get("host"), "unknown")
-    if basis == "prepaid-flat-rate":
-        return {
-            "value": 0.0,
-            "unit": "incremental-usd",
-            "basis": basis,
-            "incremental_zero": True,
-            "host_cost_state": "prepaid-flat-rate",
-        }
-    if basis == "native-oauth" and host_state == "included-oauth":
-        return {
-            "value": 0.0,
-            "unit": "incremental-usd",
-            "basis": basis,
-            "incremental_zero": True,
-            "host_cost_state": host_state,
-        }
-    if host_state == "unknown":
+    if basis not in {"native-oauth", "workspace-credits", "external-billable", "prepaid-flat-rate"}:
         return None
-    rates = cost_model.get("rates")
-    if not isinstance(rates, Mapping):
+    if not attempts:
         return None
-    try:
-        input_price = float(rates["input_per_million"])
-        cached_price = float(rates.get("cached_input_per_million", input_price))
-        output_price = float(rates["output_per_million"])
-        unit = str(rates["unit"])
-    except (KeyError, TypeError, ValueError):
-        return None
-    if min(input_price, cached_price, output_price) < 0 or not unit:
-        return None
-    value = round(
-        (
-            profile["input_tokens"] * input_price
-            + profile["cached_input_tokens"] * cached_price
-            + profile["output_tokens"] * output_price
-        )
-        / 1_000_000,
-        8,
+    overhead = 0.0
+    normalized_attempts: list[dict[str, Any]] = []
+    for index, attempt in enumerate(attempts):
+        if not isinstance(attempt, Mapping):
+            return None
+        try:
+            normalized = {
+                "kind": str(attempt.get("kind", "attempt")),
+                "uncached_input_tokens": _nonnegative_number(attempt.get("uncached_input_tokens", 0), "uncached_input_tokens"),
+                "cached_read_tokens": _nonnegative_number(attempt.get("cached_read_tokens", 0), "cached_read_tokens"),
+                "cache_write_tokens": _nonnegative_number(attempt.get("cache_write_tokens", 0), "cache_write_tokens"),
+                "output_tokens": _nonnegative_number(attempt.get("output_tokens", 0), "output_tokens"),
+                "reasoning_tokens": _nonnegative_number(attempt.get("reasoning_tokens", 0), "reasoning_tokens"),
+                "coordinator_cost_usd": (
+                    None if attempt.get("coordinator_cost_usd") is None
+                    else _nonnegative_number(attempt.get("coordinator_cost_usd"), "coordinator_cost_usd")
+                ),
+                "tool_cost_usd": _nonnegative_number(attempt.get("tool_cost_usd", 0), "tool_cost_usd"),
+                "host_cost_usd": _nonnegative_number(attempt.get("host_cost_usd", 0), "host_cost_usd"),
+            }
+        except RoutingError:
+            return None
+        if not normalized["kind"]:
+            return None
+        normalized_attempts.append(normalized)
+        overhead += normalized["tool_cost_usd"] + normalized["host_cost_usd"]
+    included = basis == "prepaid-flat-rate" or (
+        basis == "native-oauth" and host_cost_state == "included-oauth"
     )
+    if host_cost_state == "unknown" and not included:
+        return None
+    model_value = 0.0
+    if included:
+        unit = "incremental-usd"
+    else:
+        rates = cost_model.get("rates")
+        bands = cost_model.get("rate_bands")
+        rate_sets: list[Mapping[str, Any]]
+        if bands is not None:
+            if not isinstance(bands, list):
+                return None
+            rate_sets = []
+            for attempt in normalized_attempts:
+                attempt_input = attempt["uncached_input_tokens"] + attempt["cached_read_tokens"] + attempt["cache_write_tokens"]
+                matches: list[Mapping[str, Any]] = []
+                for band in bands:
+                    if not isinstance(band, Mapping) or not isinstance(band.get("rates"), Mapping):
+                        return None
+                    required_plan = band.get("plan_state")
+                    if required_plan is not None and required_plan != plan_state:
+                        continue
+                    try:
+                        minimum = _nonnegative_number(band.get("min_input_tokens", 0), "min_input_tokens")
+                        maximum_value = band.get("max_input_tokens")
+                        maximum = None if maximum_value is None else _nonnegative_number(maximum_value, "max_input_tokens")
+                        starts = band.get("starts_on")
+                        expires = band.get("expires_on")
+                        if starts is not None and now < _as_date(starts, "starts_on"):
+                            continue
+                        if expires is not None and now > _as_date(expires, "expires_on"):
+                            continue
+                    except RoutingError:
+                        return None
+                    if attempt_input >= minimum and (maximum is None or attempt_input <= maximum):
+                        matches.append(band["rates"])
+                if len(matches) != 1:
+                    return None
+                rate_sets.append(matches[0])
+        elif isinstance(rates, Mapping):
+            rate_sets = [rates] * len(normalized_attempts)
+        else:
+            return None
+        unit: str | None = None
+        for attempt, attempt_rates in zip(normalized_attempts, rate_sets):
+            attempt_unit = attempt_rates.get("unit")
+            if not isinstance(attempt_unit, str) or not attempt_unit:
+                return None
+            if unit is None:
+                unit = attempt_unit
+            elif unit != attempt_unit:
+                return None
+            try:
+                input_rate = _nonnegative_number(attempt_rates.get("input_per_million"), "input_per_million")
+                cached_rate = _nonnegative_number(attempt_rates.get("cached_read_per_million", attempt_rates.get("cached_input_per_million", input_rate)), "cached_read_per_million")
+                output_rate = _nonnegative_number(attempt_rates.get("output_per_million"), "output_per_million")
+                cache_write_rate = attempt_rates.get("cache_write_per_million")
+                reasoning_rate = _nonnegative_number(attempt_rates.get("reasoning_per_million", output_rate), "reasoning_per_million")
+                if cache_write_rate is not None:
+                    cache_write_rate = _nonnegative_number(cache_write_rate, "cache_write_per_million")
+            except RoutingError:
+                return None
+            if attempt["cache_write_tokens"] and cache_write_rate is None:
+                return None
+            model_value += (
+                attempt["uncached_input_tokens"] * input_rate
+                + attempt["cached_read_tokens"] * cached_rate
+                + attempt["cache_write_tokens"] * (cache_write_rate or 0.0)
+                + attempt["output_tokens"] * output_rate
+                + attempt["reasoning_tokens"] * reasoning_rate
+            ) / 1_000_000
+    for attempt in normalized_attempts:
+        if attempt["coordinator_cost_usd"] is not None:
+            if unit not in {"usd", "incremental-usd"}:
+                return None
+            model_value += attempt["coordinator_cost_usd"]
+    # Tool/host overhead is cash. A non-cash model unit cannot be compared to it.
+    if overhead and unit not in {"usd", "incremental-usd"}:
+        return None
+    value = round(model_value + overhead, 8)
+    acquisition = cost_model.get("acquisition", {})
+    if acquisition is not None and not isinstance(acquisition, Mapping):
+        return None
+    acquisition_summary: dict[str, float] | None = None
+    if acquisition:
+        try:
+            monthly_fee = _nonnegative_number(acquisition.get("monthly_fee_usd", 0), "monthly_fee_usd")
+            setup_cost = _nonnegative_number(acquisition.get("setup_cost_usd", 0), "setup_cost_usd")
+            expected_overflow = _nonnegative_number(acquisition.get("expected_overflow_usd", 0), "expected_overflow_usd")
+        except RoutingError:
+            return None
+        acquisition_summary = {
+            "monthly_fee_usd": monthly_fee,
+            "setup_cost_usd": setup_cost,
+            "expected_overflow_usd": expected_overflow,
+            "total_usd": round(monthly_fee + setup_cost + expected_overflow, 8),
+        }
+    expected = None
+    if accepted_completions is not None:
+        if accepted_completions > 0:
+            expected = round(value / accepted_completions, 8)
+        # Zero successful completions intentionally has no finite cost estimate.
     return {
         "value": value,
         "unit": unit,
         "basis": basis,
         "incremental_zero": value == 0,
-        "host_cost_state": host_state,
+        "host_cost_state": "prepaid-flat-rate" if basis == "prepaid-flat-rate" else host_cost_state,
+        "attempt_count": len(normalized_attempts),
+        "tool_and_host_overhead_usd": round(overhead, 8),
+        "expected_cost_per_accepted_result": expected,
+        "accepted_completions": accepted_completions,
+        "acquisition_cost": acquisition_summary,
     }
+
+
+def _estimate_cost(
+    route: Mapping[str, Any], profile: Mapping[str, Any], now: date, max_days: int
+) -> dict[str, Any] | None:
+    cost_model = route.get("cost_model")
+    if not isinstance(cost_model, Mapping):
+        return None
+    if profile["session_cost_basis"] == "route-specific-cohort" and route.get("id") != profile["cohort_route_id"]:
+        return None
+    return estimate_session_cost(
+        cost_model,
+        profile["session_attempts"],
+        host_cost_state=profile["route_spend_state"].get(
+            str(route.get("id")), profile["host_cost_state"].get(route.get("host"), "unknown")
+        ),
+        now=now,
+        max_days=max_days,
+        accepted_completions=(
+            profile["accepted_completions"]
+            if profile["session_cost_basis"] == "route-specific-cohort" else None
+        ),
+        plan_state=profile["declared_plan_state"].get(str(route.get("id"))),
+    )
+
+
+def _route_execution_location(route: Mapping[str, Any]) -> str:
+    """Use a narrow migration inference for pre-location native records only."""
+
+    declared = route.get("execution_location")
+    if declared in EXECUTION_LOCATIONS:
+        return str(declared)
+    if route.get("protocol") in {"native-codex", "native-codex-readonly", "native-claude", "native-claude-readonly"}:
+        return "local-user-workspace"
+    return "unknown"
 
 
 def _candidate_or_reasons(
@@ -435,6 +699,9 @@ def _candidate_or_reasons(
         reasons.append("credential-absent")
     if route.get("mode") != profile["mode"]:
         reasons.append("mode-mismatch")
+    execution_location = _route_execution_location(route)
+    if profile["mode"] == "execute" and execution_location != "local-user-workspace":
+        reasons.append("not-local-user-workspace")
     host = route.get("host")
     if route.get("protocol") not in SUPPORTED_PROTOCOLS.get(host, frozenset()):
         reasons.append("unsupported-protocol")
@@ -518,6 +785,15 @@ def _candidate_or_reasons(
     )
     if profile["policy"] == "cost-optimized" and cost is None:
         reasons.append("cost-basis-missing-or-stale")
+    expected_cost: float | None = None
+    if cost is not None:
+        expected_cost = cost.get("expected_cost_per_accepted_result")
+        if expected_cost is None and profile["session_cost_basis"] == "hypothetical-workload":
+            acceptance = evidence.get("acceptance_rate") if isinstance(evidence, Mapping) else None
+            if isinstance(acceptance, (int, float)) and not isinstance(acceptance, bool) and acceptance > 0:
+                expected_cost = round(float(cost["value"]) / float(acceptance), 8)
+        if profile["policy"] == "cost-optimized" and expected_cost is None:
+            reasons.append("accepted-completion-cost-unknown")
     if reasons:
         return None, reasons
     return {
@@ -528,20 +804,25 @@ def _candidate_or_reasons(
         "billable": route.get("billable") is True,
         "model_vendor": route["model_vendor"],
         "model": route["model"],
+        "requested_model": route["model"],
+        "resolved_model": route.get("resolved_model"),
         "host": route["host"],
+        "harness": route.get("harness", "codex-cli" if route["host"] == "codex" else "claude-code"),
+        "reasoning_effort": route.get("reasoning_effort", "unknown"),
         "coordinator_host": profile["coordinator_host"],
         "connector_identity_changed": route["host"] != profile["coordinator_host"],
         "mode": route["mode"],
         "protocol": route["protocol"],
+        "execution_location": execution_location,
         "quality_score": score,
         "estimated_cost": cost,
         "estimated_cost_usd": (
             cost["value"] if cost is not None and cost["unit"] in {"usd", "incremental-usd"} else None
         ),
-        "expected_cost_per_accepted_result": (
-            None
-            if cost is None or not isinstance(evidence.get("acceptance_rate"), (int, float))
-            else round(float(cost["value"]) / float(evidence["acceptance_rate"]), 8)
+        "expected_cost_per_accepted_result": expected_cost,
+        "cost_per_accepted_basis": (
+            "observed-route-specific-cohort" if profile["session_cost_basis"] == "route-specific-cohort"
+            else "local-evaluation-rate-assumption"
         ),
         "acceptance_rate": evidence.get("acceptance_rate"),
         "behavioral_capabilities": sorted(profile["required_behavioral_capabilities"]),
@@ -610,10 +891,10 @@ def recommend(
             item for item in candidates if item["estimated_cost"]["incremental_zero"]
         ]
         pool = zero_cost or candidates
-        units = {item["estimated_cost"]["unit"] for item in pool}
-        if len(units) > 1:
+        cash_units = {"usd", "incremental-usd"}
+        if any(item["estimated_cost"]["unit"] not in cash_units for item in pool):
             exclusions.extend(
-                {"route_id": item["route_id"], "reasons": ["incommensurable-cost-unit"]}
+                {"route_id": item["route_id"], "reasons": ["noncash-cost-unit"]}
                 for item in pool
             )
             ranked = []
@@ -650,6 +931,10 @@ def recommend(
                 "cached_input": normalized["cached_input_tokens"],
                 "output": normalized["output_tokens"],
             },
+            "session_attempts": list(normalized["session_attempts"]),
+            "accepted_completions": normalized["accepted_completions"],
+            "session_cost_basis": normalized["session_cost_basis"],
+            "cohort_route_id": normalized["cohort_route_id"],
             "required_connectors": sorted(normalized["required_connectors"]),
             "available_connectors": sorted(normalized["available_connectors"]),
             "required_capabilities": sorted(normalized["required_capabilities"]),
@@ -665,6 +950,8 @@ def recommend(
                 for host, snapshot in normalized["host_capabilities"].items()
             },
             "host_cost_state": dict(sorted(normalized["host_cost_state"].items())),
+            "route_spend_state": dict(sorted(normalized["route_spend_state"].items())),
+            "declared_plan_state": dict(sorted(normalized["declared_plan_state"].items())),
             "include_glm": normalized["include_glm"],
             "glm_availability": normalized["glm_availability"],
             "declared_avoid": list(normalized["declared_avoid"]),
@@ -709,3 +996,24 @@ def discovery_review_candidates(
                 }
             )
     return sorted(candidates, key=lambda item: (item["provider"], item["model"]))
+
+
+def list_catalog_candidates(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return read-only research metadata, never provider/credential state.
+
+    The explicit status lets callers show optional services without making them
+    look available, configured, or authorized for a task.
+    """
+
+    validate_catalog(catalog)
+    items: list[dict[str, Any]] = []
+    for candidate in catalog.get("candidates", []):
+        item = dict(candidate)
+        item.update({
+            "executable": False,
+            "runtime_allowlisted": False,
+            "credential_checked": False,
+            "authorization_checked": False,
+        })
+        items.append(item)
+    return sorted(items, key=lambda item: str(item["id"]))

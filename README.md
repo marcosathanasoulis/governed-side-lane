@@ -19,8 +19,9 @@ which model should do each part. Governed Side Lane can then route an approved
 review or implementation task to the agent you selected.
 
 You choose the exact host, model, and mode. The runner gives the worker the same
-checked-in repository rules and durable context, then isolates its work in a
-dedicated Git worktree.
+checked-in repository rules and durable context, then places its edits in a
+dedicated Git worktree. That worktree is Git isolation only: execute work runs
+locally under the selected host's signed-in user identity and authority.
 
 This project is maintained independently by
 [Marcos Athanasoulis](https://github.com/marcosathanasoulis). It requires no
@@ -29,6 +30,15 @@ convention.
 
 > Public preview: the repository and direct-install marketplace are available.
 > Signed beta releases and curated marketplace submissions are still pending.
+
+## Optional models and connectors
+
+You can use this package with one signed-in OpenAI or Anthropic host. Optional
+accounts, models, APIs, and connectors are never prerequisites. See the
+[model and account guide](plugins/governed-side-lane/docs/model-guide.md) for
+dated candidate and plan guidance, and the
+[connector guide](plugins/governed-side-lane/docs/connector-guide.md) for
+task-specific local setup and qualification.
 
 ## Why it is useful
 

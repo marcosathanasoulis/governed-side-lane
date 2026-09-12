@@ -194,4 +194,6 @@ def run_codex(
         stdout=getattr(completed, "stdout", "") or "",
         stderr=getattr(completed, "stderr", "") or "",
         capabilities=tuple(sorted(set(capabilities))),
+        requested_model=model,
+        resolved_model=None,
     )

@@ -240,6 +240,18 @@ class SideLaneTests(unittest.TestCase):
         self.assertIn("openai\tnative-codex", text)
         self.assertIn("glm\tdirect-zai\tglm-5.3\tprovider-key\tbillable", text)
 
+    def test_candidates_is_offline_research_metadata(self) -> None:
+        with mock.patch("side_lane.cli.credential_present") as credential, \
+             mock.patch("side_lane.cli.auth_status") as auth, \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(cli.run(["candidates", "--json"]), 0)
+        payload = json.loads(output.getvalue())
+        self.assertTrue(payload)
+        self.assertTrue(all(item["executable"] is False for item in payload))
+        self.assertTrue(all(item["credential_checked"] is False for item in payload))
+        credential.assert_not_called()
+        auth.assert_not_called()
+
 
 class ConnectorDiscoveryTests(unittest.TestCase):
     def test_project_connector_files_are_host_specific(self) -> None:
