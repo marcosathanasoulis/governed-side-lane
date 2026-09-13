@@ -537,7 +537,7 @@ def _launch(args: argparse.Namespace, config: Mapping[str, Any], repo: Path, pro
             from side_lane.adapters.codex import run_codex
             result = run_codex(executable=executable, repo=repo, worktree=lane.worktree, provider=args.provider,
                 model=args.model, provider_config=provider_config, model_config=model_config, prompt=prompt, mode=args.mode,
-                capabilities=capabilities, support_dir=host_support_dir(args.host, executable))
+                capabilities=capabilities, support_dir=host_support_dir(args.host, executable), secret=secret)
         elif args.host == "claude":
             from side_lane.adapters.claude import launch
             result = launch(executable=executable, repo=repo, worktree=lane.worktree, provider=args.provider,

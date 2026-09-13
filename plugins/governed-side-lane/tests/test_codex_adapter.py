@@ -83,5 +83,80 @@ class CodexSupportDirTests(unittest.TestCase):
         self.assertNotIn("OPENAI_API_KEY", child)
 
 
+class CodexApiKeyRouteTests(unittest.TestCase):
+    provider = {"gateway": "codex-api-key", "auth_method": "provider-key", "billable": True,
+        "credential_service": "example-side-lane-openai", "base_url": "https://api.openai.com/v1/"}
+    native = {"gateway": "native-codex", "auth_method": "oauth", "billable": False}
+    execute = {"runtime_model": "gpt-5.6-terra", "protocol": "native-codex"}
+    review = {"runtime_model": "gpt-5.6-terra", "protocol": "native-codex-readonly"}
+
+    def repo(self, root: Path, name: str) -> Path:
+        path = root / name
+        path.mkdir()
+        (path / ".git").mkdir()
+        return path
+
+    def test_execute_command_builds_and_review_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            command = codex.build_codex_command("codex", repo, lane, "openai-api-key", "gpt-5.6-terra", self.provider, self.execute, "task")
+            self.assertEqual(command[command.index("-m") + 1], "gpt-5.6-terra")
+            self.assertIn("Injected canonical side-lane governance", command[-1])
+            with self.assertRaisesRegex(codex.CodexAdapterError, "execute-only"):
+                codex.build_codex_command("codex", repo, lane, "openai-api-key", "gpt-5.6-terra", self.provider, self.review, "review", mode="review")
+
+    def test_route_shape_is_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            for broken, pattern in (
+                ({**self.provider, "auth_method": "oauth"}, "provider-key"),
+                ({**self.provider, "billable": False}, "billable true"),
+                ({**self.provider, "credential_service": ""}, "credential_service"),
+                ({**self.provider, "gateway": "direct-openai"}, "gateway"),
+            ):
+                with self.assertRaisesRegex(codex.CodexAdapterError, pattern):
+                    codex.build_codex_command("codex", repo, lane, "openai-api-key", "gpt-5.6-terra", broken, self.execute, "task")
+
+    def test_environment_carries_only_the_launcher_secret(self) -> None:
+        inherited = {"PATH": "/bin", "OPENAI_API_KEY": "inherited-never", "ANTHROPIC_AUTH_TOKEN": "other-never",
+            "SIDE_LANE_CREDENTIAL_OTHER": "backend-never"}
+        child = codex.build_transport_environment(inherited, provider="openai-api-key", model="gpt-5.6-terra",
+            provider_config=self.provider, model_config=self.execute, mode="execute", secret="sk-test-123")
+        self.assertEqual(child["OPENAI_API_KEY"], "sk-test-123")
+        self.assertEqual(child["OPENAI_BASE_URL"], "https://api.openai.com/v1")
+        self.assertEqual(child["PATH"], "/bin")
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", child)
+        self.assertNotIn("SIDE_LANE_CREDENTIAL_OTHER", child)
+        without_base = {k: v for k, v in self.provider.items() if k != "base_url"}
+        child = codex.build_transport_environment(inherited, provider="openai-api-key", model="gpt-5.6-terra",
+            provider_config=without_base, model_config=self.execute, mode="execute", secret="sk-test-123")
+        self.assertNotIn("OPENAI_BASE_URL", child)
+
+    def test_missing_secret_and_secret_on_oauth_route_fail_closed(self) -> None:
+        with self.assertRaisesRegex(codex.CodexAdapterError, "credential is absent"):
+            codex.build_transport_environment({}, provider="openai-api-key", model="gpt-5.6-terra",
+                provider_config=self.provider, model_config=self.execute, mode="execute", secret=None)
+        with self.assertRaisesRegex(codex.CodexAdapterError, "must not receive an API key"):
+            codex.build_transport_environment({}, provider="openai", model="gpt-5.6-terra",
+                provider_config=self.native, model_config=self.execute, mode="execute", secret="sk-test-123")
+
+    def test_mocked_run_reports_billable_route_and_redacts_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "used sk-test-123 ok", "err sk-test-123"))
+            result = codex.run_codex(executable="codex", repo=repo, worktree=lane,
+                provider="openai-api-key", model="gpt-5.6-terra", provider_config=self.provider,
+                model_config=self.execute, prompt="task", env={"PATH": "/bin", "OPENAI_API_KEY": "never"},
+                secret="sk-test-123", runner=runner)
+        self.assertEqual((result.gateway, result.auth_method, result.billable), ("codex-api-key", "provider-key", True))
+        self.assertEqual(runner.call_args.kwargs["env"]["OPENAI_API_KEY"], "sk-test-123")
+        self.assertEqual(result.stdout, "used [REDACTED_PROVIDER_KEY] ok")
+        self.assertEqual(result.stderr, "err [REDACTED_PROVIDER_KEY]")
+        self.assertNotIn("sk-test-123", " ".join(result.argv))
+
+
 if __name__ == "__main__":
     unittest.main()

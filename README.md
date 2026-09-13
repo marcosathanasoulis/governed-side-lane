@@ -40,6 +40,20 @@ dated candidate and plan guidance, and the
 [connector guide](plugins/governed-side-lane/docs/connector-guide.md) for
 task-specific local setup and qualification.
 
+### Optional Codex API-key route (hosts without an OAuth session)
+
+`gateway=codex-api-key`, `auth=provider-key`, `billable=true` is an explicit,
+execute-only Codex route for hosts that have no signed-in Codex session, such
+as a cloud worker. It is selected purely from the provider config: the launcher
+reads the credential named by `credential_service` and the adapter hands it to
+the Codex CLI as `OPENAI_API_KEY` (plus `OPENAI_BASE_URL` when `base_url` is
+set). Every other inherited provider credential is still scrubbed, the key is
+redacted from captured output, review mode refuses the route (review forbids
+secret access), and `--approve-billable-route` is required for each run exactly
+as for other provider-key routes. Native `gateway=native-codex` OAuth routes are
+unchanged and never fall back to this route. The shipped catalog does not
+enable it; a downstream overlay adds the provider block.
+
 ## Why it is useful
 
 - **Stay in one coordinator app.** Keep the main conversation in Codex or
