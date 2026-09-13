@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.4 - 2026-09-13
+
+- Default all Claude-host and Devin-host worker processes to 30 minutes,
+  including configured compatible provider routes; preserve explicit overrides.
+- Explain timeout scope and upgrade behavior in the shared Side Lane skill.
+- Bump both host plugin manifests, the Claude marketplace entry, and source
+  metadata together so installed plugin caches can recognize this release.
+
 ## 0.4.3 - 2026-09-11
 
 - Claude-host connector discovery is scope-aware. Only root-level `mcpServers`

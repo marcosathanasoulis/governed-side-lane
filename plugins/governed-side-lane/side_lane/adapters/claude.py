@@ -495,7 +495,7 @@ def launch(
         mode=mode,
         secret=secret,
     )
-    timeout = model_config.get("timeout_seconds", 600)
+    timeout = model_config.get("timeout_seconds", 1800)
     if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
         raise ClaudeAdapterError("timeout_seconds must be a positive integer")
     active_runner = _bounded_process if runner is None else runner

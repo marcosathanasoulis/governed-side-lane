@@ -13,6 +13,22 @@ class ClaudeAdapterTests(unittest.TestCase):
     native = {"gateway": "native-claude", "auth_method": "oauth", "billable": False}
     glm = {"gateway": "direct-zai", "auth_method": "provider-key", "billable": True, "base_url": "https://api.z.ai/api/anthropic"}
 
+    def test_launch_default_timeout_and_explicit_override(self) -> None:
+        for mode in ("review", "execute"):
+            for override, expected in ((None, 1800), (2400, 2400)):
+                with self.subTest(mode=mode, override=override), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    config = {"runtime_model": "claude-sonnet-5", "protocol":
+                              "native-claude-readonly" if mode == "review" else "native-claude"}
+                    if override is not None:
+                        config["timeout_seconds"] = override
+                    worker = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "done", ""))
+                    claude.launch(executable="claude", repo=self.repo(root, "repo"),
+                        worktree=self.repo(root, "lane"), provider="claude", model="claude-sonnet-5",
+                        provider_config=self.native, model_config=config, prompt="task",
+                        mode=mode, env={"PATH": "/bin"}, runner=worker)
+                    self.assertEqual(worker.call_args.kwargs["timeout"], expected)
+
     def test_bounded_process_accepts_subprocess_run_capture_kwargs(self) -> None:
         completed = claude._bounded_process(
             [sys.executable, "-c", "print('captured')"], timeout=5,
