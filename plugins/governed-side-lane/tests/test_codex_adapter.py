@@ -85,7 +85,7 @@ class CodexSupportDirTests(unittest.TestCase):
 
 class CodexApiKeyRouteTests(unittest.TestCase):
     provider = {"gateway": "codex-api-key", "auth_method": "provider-key", "billable": True,
-        "credential_service": "crediblemind-side-lane-openai", "base_url": "https://api.openai.com/v1/"}
+        "credential_service": "example-side-lane-openai", "base_url": "https://api.openai.com/v1/"}
     native = {"gateway": "native-codex", "auth_method": "oauth", "billable": False}
     execute = {"runtime_model": "gpt-5.6-terra", "protocol": "native-codex"}
     review = {"runtime_model": "gpt-5.6-terra", "protocol": "native-codex-readonly"}
