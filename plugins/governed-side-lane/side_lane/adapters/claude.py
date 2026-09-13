@@ -423,7 +423,7 @@ def _require_mcp_readiness(
                 capture_output=True,
                 check=False,
             )
-        except OSError as exc:
+        except (OSError, subprocess.SubprocessError) as exc:
             raise ClaudeAdapterError(f"could not check {server} MCP readiness: {_redact(exc, secret)}") from None
         stdout = str(getattr(completed, "stdout", "") or "")
         connected = any(

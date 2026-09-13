@@ -93,6 +93,21 @@ class RedactionTests(unittest.TestCase):
             self.assertNotIn(SECRET[:13], str(caught.exception))
             worker.assert_not_called()
 
+    def test_mcp_readiness_subprocess_exception_is_redacted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            worker = mock.Mock()
+            readiness = mock.Mock(side_effect=subprocess.SubprocessError(SECRET[:13]))
+            try:
+                self.launch(Path(directory), worker, capabilities=('playwright',),
+                            readiness_runner=readiness)
+            except claude.ClaudeAdapterError:
+                rendered = traceback.format_exc()
+            else:
+                self.fail('expected readiness error')
+            self.assertNotIn(SECRET[:13], rendered)
+            self.assertIn(MARKER, rendered)
+            worker.assert_not_called()
+
     @mock.patch('side_lane.qualification.check_auth_overrides')
     def test_qualification_redacts_before_excerpting_and_parsing(self, _check):
         with tempfile.TemporaryDirectory() as directory:
