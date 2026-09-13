@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Codex lanes (both `native-codex` and `codex-api-key`) run `codex exec --json`
+  and capture the final `turn.completed` usage block (`input_tokens`,
+  `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`,
+  `reasoning_output_tokens`) plus the attested model into the lane result; the
+  raw stream still lands in `stdout` with secrets redacted.
+- The `codex-api-key` route exports the launcher-read secret as `CODEX_API_KEY`
+  as well as `OPENAI_API_KEY`, because Codex CLI 0.154.0 authenticates only
+  from `CODEX_API_KEY` (or `codex login --with-api-key`) and ignores
+  `OPENAI_API_KEY`. Inherited `CODEX_API_KEY` / `CODEX_ACCESS_TOKEN` are
+  scrubbed on every route; `CODEX_HOME` is preserved as a config path.
+
 ## 0.4.7 - 2026-09-13
 
 - Version-only release. The `v0.4.6` tag was created on `37b687a`, the

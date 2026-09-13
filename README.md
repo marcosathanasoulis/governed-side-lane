@@ -46,8 +46,14 @@ task-specific local setup and qualification.
 execute-only Codex route for hosts that have no signed-in Codex session, such
 as a cloud worker. It is selected purely from the provider config: the launcher
 reads the credential named by `credential_service` and the adapter hands it to
-the Codex CLI as `OPENAI_API_KEY` (plus `OPENAI_BASE_URL` when `base_url` is
-set). Every other inherited provider credential is still scrubbed, the key is
+the Codex CLI as both `CODEX_API_KEY` and `OPENAI_API_KEY` (plus
+`OPENAI_BASE_URL` when `base_url` is set); Codex CLI 0.154.0 authenticates only
+from `CODEX_API_KEY` (or `codex login --with-api-key`) and ignores
+`OPENAI_API_KEY`, which is kept for older CLIs and `base_url` gateways. Any
+inherited `CODEX_API_KEY` / `CODEX_ACCESS_TOKEN` is scrubbed before the route's
+own export (`CODEX_HOME` is a config path and survives). Both Codex routes run
+`codex exec --json` and report the final `turn.completed` token usage in the
+lane result. Every other inherited provider credential is still scrubbed, the key is
 redacted from captured output, review mode refuses the route (review forbids
 secret access), and `--approve-billable-route` is required for each run exactly
 as for other provider-key routes. Native `gateway=native-codex` OAuth routes are
