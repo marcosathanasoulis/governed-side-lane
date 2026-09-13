@@ -124,6 +124,15 @@ generic Prompt it consent and recommendation output do not authorize launch.
 Review governance still forbids MCP/connectors and secrets. Execute lanes,
 including GLM, retain their separate approval gates.
 
+Claude-host and Devin-host workers default to a 30-minute (1,800-second)
+process timeout. An explicit model route's positive integer `timeout_seconds`
+overrides that default; inspect the installed configuration before reporting
+an effective limit. Native Codex routes have no Side Lane process timeout.
+Provider request limits, host-service limits, readiness checks, and explicit
+task budgets are separate. A timeout change applies to subsequent launches;
+it cannot extend an already-running worker. Keep partial results and report
+failure under the existing retry and authorization rules.
+
 After execution approval, dispatch the exact approved route and record route
 recheck, dispatch, worktree and capability grants, handoff, validation, and
 coordinator acceptance. A failed task may receive only the approved in-scope

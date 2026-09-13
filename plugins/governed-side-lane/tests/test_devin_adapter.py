@@ -24,6 +24,26 @@ class DevinAdapterTests(unittest.TestCase):
                               "source": "mocked local report"}, "timeout_seconds": 600}
         return provider, route
 
+    def test_launch_default_timeout_and_explicit_override(self) -> None:
+        for override, expected in ((None, 1800), (2400, 2400)):
+            with self.subTest(override=override), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                provider, route = self.config()
+                route.pop("timeout_seconds")
+                if override is not None:
+                    route["timeout_seconds"] = override
+                process = mock.Mock(pid=41, returncode=0)
+                def popen(command, **kwargs):
+                    Path(command[command.index("--export") + 1]).write_text(
+                        json.dumps({"steps": [{"model_name": "swe-2-medium"}]}))
+                    process.communicate.return_value = ("done", "")
+                    return process
+                devin.launch(executable="devin", repo=self.repo(root, "repo"),
+                    worktree=self.repo(root, "lane"), provider="devin", model="swe-2-medium",
+                    provider_config=provider, model_config=route, prompt="task", popen=popen,
+                    user_config_path=root / "missing.json")
+                process.communicate.assert_called_once_with(timeout=expected)
+
     def test_command_pins_model_exports_atif_and_has_no_sandbox(self) -> None:
         provider, route = self.config("moonshot.cn/anthropic/kimi-k2.7-code")
         with tempfile.TemporaryDirectory() as directory:
