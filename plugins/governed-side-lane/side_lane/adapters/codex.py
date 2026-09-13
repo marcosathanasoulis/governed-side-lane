@@ -6,14 +6,22 @@ Two gateways are accepted, both selected purely from the provider config:
   billable, review or execute. No API key may reach the child.
 - ``codex-api-key``: an explicit, billable, execute-only provider-key route
   for hosts with no OAuth session (e.g. a cloud worker). The launcher-read
-  secret is handed to the Codex CLI as ``OPENAI_API_KEY`` (plus
-  ``OPENAI_BASE_URL`` when the provider config carries ``base_url``); every
-  other inherited provider credential is still scrubbed, and the secret is
-  redacted from captured output.
+  secret is handed to the Codex CLI as both ``CODEX_API_KEY`` and
+  ``OPENAI_API_KEY`` (plus ``OPENAI_BASE_URL`` when the provider config
+  carries ``base_url``). Codex CLI 0.154.0 authenticates only from
+  ``CODEX_API_KEY`` (or ``codex login --with-api-key``) and ignores
+  ``OPENAI_API_KEY``; the latter is kept for older CLIs and base-URL
+  gateways. Every other inherited provider credential is still scrubbed, and
+  the secret is redacted from captured output.
+
+Both routes run ``codex exec --json`` so the JSONL event stream can be read
+for the final ``turn.completed`` usage block; the raw stream stays in
+``stdout`` unchanged apart from secret redaction.
 """
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -32,11 +40,15 @@ SUPPORTED_GATEWAYS = frozenset({NATIVE_GATEWAY, API_KEY_GATEWAY})
 NATIVE_PROTOCOLS = frozenset({"native-codex", "native-codex-readonly"})
 REDACTED_SECRET = "[REDACTED_PROVIDER_KEY]"
 
+# ``CODEX_*`` is listed by exact name rather than prefix: ``CODEX_HOME`` is a
+# config path the CLI needs, not a credential, and must survive scrubbing.
 PROVIDER_CREDENTIAL_ENV_NAMES = frozenset(
     {
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_BASE_URL",
+        "CODEX_API_KEY",
+        "CODEX_ACCESS_TOKEN",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "OPENROUTER_API_KEY",
@@ -167,6 +179,9 @@ def build_transport_environment(
         raise CodexAdapterError("provider-key Codex routes must use the codex-api-key gateway")
     if not isinstance(secret, str) or not secret:
         raise CodexAdapterError("explicit billable route credential is absent")
+    # Codex CLI 0.154.0 reads CODEX_API_KEY only; OPENAI_API_KEY is kept for
+    # older CLIs and OpenAI-compatible base_url gateways.
+    child["CODEX_API_KEY"] = secret
     child["OPENAI_API_KEY"] = secret
     base_url = provider_config.get("base_url")
     if isinstance(base_url, str) and base_url:
@@ -208,6 +223,7 @@ def build_codex_command(
     command = [
         executable,
         "exec",
+        "--json",
         "--ephemeral",
         "-C",
         str(worktree_path),
@@ -279,6 +295,8 @@ def run_codex(
         )
     except OSError as exc:
         raise CodexAdapterError(f"could not start Codex executable: {exc}") from exc
+    stdout = getattr(completed, "stdout", "")
+    resolved_model, usage = _stream_metadata(stdout if isinstance(stdout, str) else "")
     return LaneResult(
         argv=argv,
         returncode=int(completed.returncode),
@@ -289,9 +307,38 @@ def run_codex(
         model=model,
         auth_method=auth_method,
         billable=billable,
-        stdout=_redact(getattr(completed, "stdout", ""), secret),
+        stdout=_redact(stdout, secret),
         stderr=_redact(getattr(completed, "stderr", ""), secret),
         capabilities=tuple(sorted(set(capabilities))),
         requested_model=model,
-        resolved_model=None,
+        resolved_model=resolved_model,
+        usage=usage,
     )
+
+
+def _stream_metadata(stdout: str) -> tuple[str | None, dict[str, Any] | None]:
+    """Read the attested model and final usage from ``codex exec --json`` JSONL.
+
+    Codex CLI 0.154 emits one JSON object per line; the last ``turn.completed``
+    event carries ``usage`` (``input_tokens``, ``cached_input_tokens``,
+    ``cache_write_input_tokens``, ``output_tokens``, ``reasoning_output_tokens``).
+    Non-JSON lines are ignored. No cost is estimated here.
+    """
+
+    resolved_model: str | None = None
+    usage: dict[str, Any] | None = None
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, Mapping):
+            continue
+        event_type = event.get("type")
+        if event_type in {"thread.started", "turn.started"}:
+            model = event.get("model")
+            if isinstance(model, str) and model:
+                resolved_model = model
+        elif event_type == "turn.completed" and isinstance(event.get("usage"), Mapping):
+            usage = dict(event["usage"])
+    return resolved_model, usage
