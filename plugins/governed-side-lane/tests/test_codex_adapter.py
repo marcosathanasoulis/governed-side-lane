@@ -105,6 +105,8 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertEqual(codex._stream_metadata("plain text\n\n"), (None, None))
         self.assertEqual(codex._stream_metadata('{"type":"turn.completed","usage":"n/a"}'), (None, None))
         self.assertEqual(codex._stream_metadata("[1, 2]\n42\n"), (None, None))
+        # Non-string ``type`` values must be ignored, not raise ``TypeError``.
+        self.assertEqual(codex._stream_metadata('{"type": []}\n{"type": {}}\n{"type": 7}\n'), (None, None))
         self.assertEqual(
             codex._stream_metadata('{"type":"turn.completed","usage":{"input_tokens":3}}'),
             (None, {"input_tokens": 3}),

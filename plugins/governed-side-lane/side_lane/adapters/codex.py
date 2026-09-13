@@ -335,6 +335,10 @@ def _stream_metadata(stdout: str) -> tuple[str | None, dict[str, Any] | None]:
         if not isinstance(event, Mapping):
             continue
         event_type = event.get("type")
+        if not isinstance(event_type, str):
+            # A non-string ``type`` (list, dict, number) would make the set
+            # membership test raise TypeError; treat it as an irrelevant line.
+            continue
         if event_type in {"thread.started", "turn.started"}:
             model = event.get("model")
             if isinstance(model, str) and model:
