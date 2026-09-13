@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.8 - 2026-09-13
 
 - Codex lanes (both `native-codex` and `codex-api-key`) run `codex exec --json`
   and capture the final `turn.completed` usage block (`input_tokens`,
@@ -12,6 +12,8 @@
   from `CODEX_API_KEY` (or `codex login --with-api-key`) and ignores
   `OPENAI_API_KEY`. Inherited `CODEX_API_KEY` / `CODEX_ACCESS_TOKEN` are
   scrubbed on every route; `CODEX_HOME` is preserved as a config path.
+- Ignore JSONL events whose `type` is not a string instead of aborting the
+  lane.
 
 ## 0.4.7 - 2026-09-13
 
