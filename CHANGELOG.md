@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.7 - 2026-09-13
+
+- Version-only release. The `v0.4.6` tag was created on `37b687a`, the
+  `codex-api-key` merge, before the 0.4.6 version-bump commit landed on
+  `main`, so its manifests still read 0.4.5. Published tags are never
+  re-pointed; 0.4.7 is the same code with correct version metadata. Skip
+  `v0.4.6` when pinning.
+
 ## 0.4.6 - 2026-09-13
 
 - Codex adapter accepts a second, config-selected gateway `codex-api-key`
