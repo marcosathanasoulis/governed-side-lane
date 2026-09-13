@@ -43,6 +43,11 @@ class RedactionTests(unittest.TestCase):
             for stop in range(start + 8, len(SECRET) + 1):
                 self.assertEqual(redact_provider_secret(SECRET[start:stop], SECRET), MARKER)
 
+    def test_fragments_are_not_limited_to_token_charset(self):
+        for secret in ('abcde:fghijKLM', 'abcde@fghijKLM', 'abcde\u00e9fghijKLM'):
+            with self.subTest(secret=secret):
+                self.assertEqual(redact_provider_secret(secret[:11], secret), MARKER)
+
     def directories(self, root):
         repo, lane = root / 'repo', root / 'lane'
         for path in (repo, lane):

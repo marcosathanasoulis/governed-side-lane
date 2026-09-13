@@ -11,7 +11,6 @@ import re
 
 MARKER = '[REDACTED_PROVIDER_KEY]'
 MIN_FRAGMENT = 8
-TOKEN = re.compile(r'[A-Za-z0-9_./+=-]{8,}')
 MASKED = re.compile(r'([A-Za-z0-9_+/=-]*)(\.{3,}|…|\*{2,})([A-Za-z0-9_+/=-]*)')
 
 
@@ -33,8 +32,7 @@ def redact_provider_secret(value: object, secret: str | None) -> str:
     for offset in range(len(secret) - MIN_FRAGMENT + 1):
         windows.setdefault(secret[offset:offset + MIN_FRAGMENT], []).append(offset)
 
-    def token(match: re.Match) -> str:
-        candidate = match.group(0)
+    def fragments(candidate: str) -> str:
         spans = []
         offset = 0
         while offset <= len(candidate) - MIN_FRAGMENT:
@@ -60,4 +58,4 @@ def redact_provider_secret(value: object, secret: str | None) -> str:
         pieces.append(candidate[end:])
         return ''.join(pieces)
 
-    return TOKEN.sub(token, text)
+    return fragments(text)
