@@ -15,6 +15,7 @@ import subprocess
 from typing import Any, Mapping
 
 from side_lane.adapters import claude
+from side_lane.redaction import redact_provider_secret
 
 
 def bounded_process(command, *, timeout, **kwargs):
@@ -87,11 +88,15 @@ def qualify_claude(*, executable: str, repo: Path, worktree: Path,
     env.pop('CLAUDE_CODE_OAUTH_TOKEN', None)
     env['CLAUDE_CODE_MAX_OUTPUT_TOKENS'] = '4096'
     env['MAX_THINKING_TOKENS'] = '1024'
-    completed = runner(command, timeout=timeout, cwd=worktree, env=env,
-                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                       stderr=subprocess.PIPE, text=True)
-    stdout = (completed.stdout or '').replace(secret, '[REDACTED]')
-    stderr = (completed.stderr or '').replace(secret, '[REDACTED]')
+    try:
+        completed = runner(command, timeout=timeout, cwd=worktree, env=env,
+                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, text=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError('could not start qualification worker: ' +
+                         redact_provider_secret(exc, secret)) from None
+    stdout = redact_provider_secret(completed.stdout, secret)
+    stderr = redact_provider_secret(completed.stderr, secret)
     try:
         result = json.loads(stdout)
     except json.JSONDecodeError:
