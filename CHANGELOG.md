@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.6 - 2026-09-13
+
+- Codex adapter accepts a second, config-selected gateway `codex-api-key`
+  (`auth_method: provider-key`, `billable: true`, execute-only) for hosts with
+  no signed-in Codex session, such as a cloud worker. The launcher-read
+  credential reaches the Codex CLI as `OPENAI_API_KEY` (plus `OPENAI_BASE_URL`
+  when the provider config sets `base_url`); every other inherited provider
+  credential is still scrubbed, the secret is redacted from captured output,
+  review mode refuses the route, and the lane result reports the real gateway,
+  auth method and billable flag.
+- `native-codex` OAuth routes are unchanged and still refuse any secret. The
+  shipped catalog does not enable the new route; a downstream overlay adds the
+  provider block.
+
 ## 0.4.5 - 2026-09-13
 
 - Redact known provider-key fragments and explicitly masked prefix/suffix
