@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 from side_lane.credentials import scrub_backend_environment
 from side_lane.governance import known_capabilities, lane_system_prompt, tool_policy
 from side_lane.results import LaneResult
+from side_lane.redaction import redact_provider_secret
 
 
 MAX_PROMPT_CHARS = 100_000
@@ -402,7 +403,7 @@ def build_command(
 
 def _require_mcp_readiness(
     *, executable: str, cwd: Path, capabilities: Capabilities,
-    env: Mapping[str, str], runner: Runner,
+    env: Mapping[str, str], runner: Runner, secret: str | None = None,
 ) -> None:
     """Health-check capability-required MCP servers before starting a model."""
 
@@ -422,8 +423,8 @@ def _require_mcp_readiness(
                 capture_output=True,
                 check=False,
             )
-        except OSError as exc:
-            raise ClaudeAdapterError(f"could not check {server} MCP readiness: {exc}") from exc
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ClaudeAdapterError(f"could not check {server} MCP readiness: {_redact(exc, secret)}") from None
         stdout = str(getattr(completed, "stdout", "") or "")
         connected = any(
             re.search(r"^\s*Status:\s*[^\w]*Connected\s*$", ANSI_ESCAPE.sub("", line), re.I)
@@ -436,13 +437,12 @@ def _require_mcp_readiness(
                 "status unavailable",
             )
             raise ClaudeAdapterError(
-                f"required MCP server {server!r} is not ready before worker launch ({status})"
+                f"required MCP server {server!r} is not ready before worker launch ({_redact(status, secret)})"
             )
 
 
 def _redact(value: object, secret: str | None) -> str:
-    text = str(value or "")
-    return text.replace(secret, "[REDACTED_PROVIDER_KEY]") if secret else text
+    return redact_provider_secret(value, secret)
 
 
 def launch(
@@ -502,7 +502,7 @@ def launch(
     active_readiness_runner = _bounded_process if readiness_runner is None else readiness_runner
     _require_mcp_readiness(
         executable=executable, cwd=worktree_path, capabilities=granted,
-        env=child_env, runner=active_readiness_runner,
+        env=child_env, runner=active_readiness_runner, secret=secret,
     )
     try:
         completed = active_runner(
@@ -515,8 +515,8 @@ def launch(
             capture_output=True,
             check=False,
         )
-    except OSError as exc:
-        raise ClaudeAdapterError(f"could not start Claude Code: {exc}") from exc
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ClaudeAdapterError(f"could not start Claude Code: {_redact(exc, secret)}") from None
     stdout = _redact(getattr(completed, "stdout", ""), secret)
     stderr = _redact(getattr(completed, "stderr", ""), secret)
     availability = (

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.5 - 2026-09-13
+
+- Redact known provider-key fragments and explicitly masked prefix/suffix
+  displays in worker stdout/stderr, startup/readiness errors, and qualification
+  output before parsing or excerpting. Suppress raw launch exception chaining.
+- Preserve nonsecret model/usage diagnostics and existing timeout limits.
+- This protects runner-returned output; it cannot retroactively clean host-owned
+  transcripts or detect every encoding or arbitrarily short fragment. Never
+  intentionally emit credential fragments. Tests use only synthetic keys.
+
 ## 0.4.4 - 2026-09-13
 
 - Default all Claude-host and Devin-host worker processes to 30 minutes,
