@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.9 - 2026-09-14
+
+- Published from the maintainer's private development repository. The public
+  repository is now a publish target: its `main` branch is updated by an
+  export that runs this repository's own validator, tests and a leakage scan
+  before every push, and release tags remain SSH-signed by the maintainer.
+  External pull requests are still welcome and are ported by hand.
+
 ## 0.4.8 - 2026-09-13
 
 - Codex lanes (both `native-codex` and `codex-api-key`) run `codex exec --json`

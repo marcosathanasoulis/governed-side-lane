@@ -178,6 +178,16 @@ Either way, links on that line may only point at root `CLAUDE.md`.
 The target owns the contents of `CLAUDE.md`. No organization-specific template
 or global configuration is downloaded by this package.
 
+## Source of truth and contributions
+
+The code in this repository is developed in the maintainer's private development
+repository and published here. Every publish re-runs the validator, the unit
+tests and a leakage scan on the exported tree. Releases remain signed tags
+verified by `scripts/update.py` against `config/allowed_signers`, so the update
+path for users is unchanged. Pull requests here are reviewed and, when accepted,
+ported into the private repository by hand and appear in the next published
+release. Do not expect direct merges into `main`.
+
 ## Claude marketplace installation
 
 From Claude Code:

@@ -13,5 +13,11 @@ Contributions are welcome through reviewed pull requests.
    README.
 6. Do not merge your own pull request when another maintainer is available.
 
+## How changes land
+
+Public pull requests are reviewed and, when accepted, ported by hand into the
+private source of truth. The public `main` branch is a publish target and does
+not accept direct merges. Changes appear in the next published release.
+
 By contributing, you agree that your contribution is licensed under
 Apache-2.0.
