@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.10 - 2026-09-14
+
+- Devin's PreToolUse policy hook now grants an argument-free command under its
+  `Bash(<command> *)` rule: `git status` and `git worktree list` matched
+  neither `git status *` nor `git worktree list *` (fnmatch requires the
+  literal space), so they were blocked as "outside canonical capability
+  grants" while `git log --oneline -10` passed. Deny rules such as
+  `Bash(git push --force*)` and unrelated commands (`git statusx`, `git push`
+  without a grant) behave as before. Observed in side-lane run
+  eae6a4055b154009a88ded0ea91aa2dd (devin/grok-4-6-medium, 2026-09-14).
+
 ## 0.4.9 - 2026-09-14
 
 - Published from the maintainer's private development repository. The public

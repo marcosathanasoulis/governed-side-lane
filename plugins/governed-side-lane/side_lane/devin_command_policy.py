@@ -92,6 +92,17 @@ def unsafe_shell_syntax(command: str) -> str | None:
     return None
 
 
+def bare_rule_pattern(pattern: str | None) -> str | None:
+    """Return the argument-free command a ``<command> *`` pattern also grants."""
+
+    if not pattern or not pattern.endswith(" *"):
+        return None
+    bare = " ".join(pattern[:-2].split())
+    if not bare or any(character in bare for character in "*?["):
+        return None
+    return bare
+
+
 def matching_rule(command: object, rules: Sequence[str], *, anywhere: bool = False) -> str | None:
     """Return the first canonical rule matching a command."""
 
@@ -102,6 +113,14 @@ def matching_rule(command: object, rules: Sequence[str], *, anywhere: bool = Fal
         pattern = bash_rule_pattern(rule)
         if pattern and (fnmatchcase(normalized, pattern)
                         or (anywhere and fnmatchcase(normalized, f"*{pattern}"))):
+            return rule
+        # ``Bash(git status *)`` grants the bare command too: Claude's glob
+        # reads "this command with any arguments", but fnmatch requires the
+        # literal space, so ``git status`` alone would otherwise fall outside
+        # the grant while ``git status --short`` passes.
+        bare = bare_rule_pattern(pattern)
+        if bare and (normalized == bare
+                     or (anywhere and fnmatchcase(normalized, f"*{bare}"))):
             return rule
     return None
 

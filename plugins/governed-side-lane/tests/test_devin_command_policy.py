@@ -37,6 +37,39 @@ class DevinCommandPolicyTests(unittest.TestCase):
                 {"tool_name": "exec", "tool_input": {"command": command}}, allowed, ())
             self.assertEqual(decision["decision"], "block")
 
+    def test_bare_command_matches_trailing_wildcard_grant(self) -> None:
+        allowed = ["Bash(git status *)", "Bash(git worktree list *)", "Bash(git log *)"]
+        for command in ("git status", "git worktree list", "  git   status  ",
+                        "git log --oneline -10", "git log -1 --format=%H"):
+            with self.subTest(command=command):
+                self.assertIsNone(policy.evaluate_event(
+                    {"tool_name": "exec", "tool_input": {"command": command}}, allowed, ()))
+        for command in ("git statusx", "git push", "git push origin main",
+                        "git worktree", "git worktree add ../x"):
+            with self.subTest(command=command):
+                decision = policy.evaluate_event(
+                    {"tool_name": "exec", "tool_input": {"command": command}}, allowed, ())
+                self.assertEqual(decision["decision"], "block")
+                self.assertEqual(decision["reason"],
+                                 "command is outside canonical capability grants")
+        self.assertEqual(policy.matching_rule("git status", allowed), "Bash(git status *)")
+        self.assertIsNone(policy.bare_rule_pattern("git push --force*"))
+        self.assertIsNone(policy.bare_rule_pattern("./node_modules/.bin/*"))
+
+    def test_bare_command_deny_rules_still_match_anywhere(self) -> None:
+        allowed = ["Bash(git *)"]
+        denied = ["Bash(git push --force*)", "Bash(git reset --hard *)"]
+        for command in ("git push --force", "git push --force origin main",
+                        "git reset --hard", "git reset --hard HEAD~1"):
+            with self.subTest(command=command):
+                decision = policy.evaluate_event(
+                    {"tool_name": "exec", "tool_input": {"command": command}}, allowed, denied)
+                self.assertEqual(decision["decision"], "block")
+                self.assertIn("command denied by canonical rule", decision["reason"])
+        self.assertIsNone(policy.evaluate_event(
+            {"tool_name": "exec", "tool_input": {"command": "git reset --soft HEAD~1"}},
+            allowed, denied))
+
     def test_blocks_shell_composition_and_substitution(self) -> None:
         allowed = ["Bash(git status *)", "Bash(echo *)"]
         commands = (
