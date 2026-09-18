@@ -10,7 +10,9 @@ model, or help implementing part of a larger task. It can also help avoid extra
 usage costs: if you know one product is in extra usage while another still has
 included capacity, you can tell your current agent to use the other one. The
 choice is always made by you; Governed Side Lane does not inspect your account,
-check how much usage you have left, or switch providers automatically.
+check how much usage you have left, or switch providers automatically. A
+coordinator may make only the documented visible reassignment to a named,
+preapproved backup after an availability failure.
 
 The skill works on its own, and it also works with
 [Prompt it](https://github.com/marcosathanasoulis/prompt-it). Prompt it helps
@@ -57,7 +59,9 @@ lane result. Every other inherited provider credential is still scrubbed, the ke
 redacted from captured output, review mode refuses the route (review forbids
 secret access), and `--approve-billable-route` is required for each run exactly
 as for other provider-key routes. Native `gateway=native-codex` OAuth routes are
-unchanged and never fall back to this route. The shipped `config/models.json`
+unchanged and never automatically or generically fall back to this route; an
+exact preapproved backup may be reassigned only through the documented
+availability-failure switch. The shipped `config/models.json`
 now includes the `openai-api-key` provider block (explicit-only, billable)
 directly, so no downstream overlay is needed to enable it. The sibling
 `anthropic` provider block is the first-party Anthropic API-key route: its key
@@ -85,8 +89,8 @@ each model's qualification is recorded.
   checkout.
 - **Keep routing auditable.** Host, provider, model, mode, lane name, and
   capabilities are explicit. Missing authentication and unavailable routes
-  fail closed rather than falling back to a different or potentially billable
-  provider.
+  fail closed rather than triggering generic fallback; a coordinator may use
+  only the one named, approved backup under the governance policy.
 
 For example, while working in Claude Code you can request a read-only Codex
 review of a proposed change. While working in Codex you can ask Claude for an
@@ -137,7 +141,8 @@ explicitly configured, key-backed, and potentially billable.
   them under `mcp_connectors_out_of_scope` instead of counting them.
   Codex execute lanes use Codex's own sandbox semantics, not this allowlist.
 - Native Codex and Claude routes use each host's own OAuth session.
-- Optional GLM is execute-only, explicit, key-backed, and never a fallback.
+- Optional GLM is execute-only, explicit, key-backed, and never a generic
+  fallback; only fixed `glm-5.3` is eligible when explicitly approved.
 - Host-private memory and connectors are never presented as synchronized.
 - Lane worktrees live under the coordinator repo's own `.side-lanes/`
   directory, which the runner auto-excludes from that repo's `git status` so

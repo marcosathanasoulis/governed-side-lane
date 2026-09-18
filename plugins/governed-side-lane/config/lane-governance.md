@@ -26,6 +26,35 @@ loading.
 - Personal host memory, user-global instruction files, and hooks are not shared
   lane memory and must not be assumed to exist.
 
+## Preapproved backup reassignment
+
+The runner always executes the exact requested route and has no generic
+fallback. A coordinator may reassign only an affected approved delegated node
+to its one preapproved backup after a qualifying availability failure. The
+brief must have named both exact routes and covered the switch condition. This
+does not expand generic Prompt it research consent: a pre-brief external review
+still needs its explicitly approved bounded route and scope, and a backup keeps
+the same review/execute mode, tool restrictions, and reviewer independence.
+
+Before the reassignment, refresh the backup's availability, task fit, required
+tools, privacy/data boundary, quality floor, scope, and spend authority. Ensure
+the primary is terminal or stopped before the backup starts. Preserve its
+diff, commits, handoff and validation evidence, reconcile any in-flight cloud
+execution or existing gateway failover, and transfer exclusive ownership with a
+compact checkpoint. Log the trigger, refresh result, both routes, preserved
+artifacts and handoff. This is a visible coordinator reassignment without
+another permission pause, never a silent substitution.
+
+Only effective cooldown, `manual_off`, `needs_topup`, or explicit
+provider/model-unavailable, quota, or rate-limit failure after applicable
+bounded retries qualifies. Failed tests, output quality, ambiguous timeouts,
+auth errors, null recommendation data and credential presence do not. Do not
+probe quotas or clear manual state. No third route, cycle, or parallel writer
+is allowed. If the backup is unavailable or needs new authority, pause that
+node and its dependents while unrelated approved nodes continue. GLM remains
+fixed to `glm-5.3` and execute-only; switching away to an approved non-GLM
+backup is allowed, but no alternate GLM model is.
+
 ## Review mode
 
 - Perform read-only review, investigation, or design critique using only the

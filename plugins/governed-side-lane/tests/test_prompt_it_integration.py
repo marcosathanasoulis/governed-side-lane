@@ -10,12 +10,16 @@ SKILL = (
     / "prompt-it-side-lane-routing"
     / "SKILL.md"
 )
+GOVERNANCE = Path(__file__).resolve().parents[1] / "config" / "lane-governance.md"
+README = Path(__file__).resolve().parents[3] / "README.md"
 
 
 class PromptItIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.text = " ".join(SKILL.read_text(encoding="utf-8").split())
+        cls.governance = " ".join(GOVERNANCE.read_text(encoding="utf-8").split())
+        cls.readme = " ".join(README.read_text(encoding="utf-8").split())
 
     def test_optional_runner_preserves_normal_prompt_it_flow(self) -> None:
         self.assertIn("normal Prompt it workflow remains fully usable", self.text)
@@ -60,6 +64,19 @@ class PromptItIntegrationTests(unittest.TestCase):
         self.assertIn("cost-optimized", self.text)
         self.assertIn("extra-usage statement", self.text)
         self.assertIn("Community consensus alone never activates", self.text)
+
+    def test_preapproved_backup_is_a_bounded_visible_reassignment(self) -> None:
+        self.assertIn("one preapproved backup", self.text)
+        self.assertIn("availability failure", self.text)
+        self.assertIn("without another permission pause", self.text)
+        self.assertIn("primary is terminal or stopped", self.governance)
+        self.assertIn("No third route, cycle, or parallel writer", self.governance)
+        self.assertIn("GLM remains fixed to `glm-5.3`", self.governance)
+
+    def test_native_oauth_does_not_generically_fall_back_to_api_key(self) -> None:
+        self.assertIn("never automatically or generically fall back to this route", self.readme)
+        self.assertIn("exact preapproved backup", self.readme)
+        self.assertNotIn("unchanged and never fall back to this route", self.readme)
 
 
 if __name__ == "__main__":

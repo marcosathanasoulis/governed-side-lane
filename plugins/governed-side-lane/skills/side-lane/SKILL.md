@@ -81,7 +81,7 @@ task-specific evidence that an eligible economical route cannot meet the need.
 
 GLM is optional and enters staffing only when the user explicitly enables it.
 Its only selectable model is the fixed `glm-5.3`; never propose another GLM
-model or fallback.
+model or generic GLM fallback.
 It may appear as configured inventory before enablement; exclude it from
 staffing until the explicit GLM gate passes.
 It is execute-only: review mode cannot use a provider key because canonical
@@ -93,8 +93,9 @@ gates. Before retrieving a credential value or launching, confirm that user
 authorization covers the run and pass `--approve-billable-route`. Existing
 explicit standing authorization can cover eligible runs; do not ask again
 within its scope.
-If GLM reports its temporary quota pause, stop and return for a new exact route;
-never retry or fall back silently.
+If GLM reports its temporary quota pause, do not retry or fall back silently.
+The coordinator may use only the one approved non-GLM backup under the
+preapproved-backup reassignment policy below.
 The default packaged GLM gateway is direct Z.AI; OpenRouter is neither required
 nor packaged as a default developer route.
 
@@ -136,9 +137,12 @@ failure under the existing retry and authorization rules.
 After execution approval, dispatch the exact approved route and record route
 recheck, dispatch, worktree and capability grants, handoff, validation, and
 coordinator acceptance. A failed task may receive only the approved in-scope
-retry on that same route, with its added session cost recorded. If the route
-becomes unavailable, block dependents and return for a staffing decision; never
-silently substitute a provider, model, gateway, host, or mode.
+retry on that same route, with its added session cost recorded. The runner never
+selects a fallback. For a qualifying availability failure, the coordinator may
+visibly reassign only to the one preapproved backup after refreshing readiness.
+`config/lane-governance.md#preapproved-backup-reassignment` defines the trigger
+evidence, stop/preservation/reconciliation sequence, ownership, GLM restriction,
+and no-permission-pause condition.
 
 An execute lane runs locally as the selected signed-in user. Its worktree is
 Git-edit isolation, not an OS/container/cloud sandbox. This does not broaden

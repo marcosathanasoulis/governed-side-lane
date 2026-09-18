@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.17 - 2026-09-18
+
+- Permit a coordinator-visible reassignment to the one exact, preapproved
+  backup after a qualifying availability failure. The runner still executes
+  only its requested route; refresh readiness and authority, preserve partial
+  work, prevent parallel writers and third routes, and retain fixed
+  execute-only `glm-5.3` governance.
+
 ## 0.4.16 - 2026-09-18
 
 - `claude-fable-5-1` on the `anthropic` direct route is now `qualification.verified: true`:

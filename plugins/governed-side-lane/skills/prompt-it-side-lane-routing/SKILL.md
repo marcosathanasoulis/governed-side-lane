@@ -163,12 +163,13 @@ A side-lane candidate is eligible only when all of these are true:
 
 GLM is a stricter explicit gate: include only the fixed `glm-5.3` model when the
 user enables GLM for that staffing decision; never propose another GLM model or
-fallback. Its prepaid flat-rate subscription has zero marginal task cost while
+generic GLM fallback. Its prepaid flat-rate subscription has zero marginal task cost while
 available, so it may rank cheapest only after its exact route, Claude
 worker-host capabilities, behavioral evidence, and quality floor pass.
 Do not probe quota with a paid request. A recognized quota-pause response makes
 GLM temporarily unavailable and returns to Prompt it; never use GLM or another
-model as a silent fallback or third connector identity.
+model as a silent fallback or third connector identity outside the documented
+one preapproved backup reassignment.
 
 Unknown, stale, unverified, or missing connector/capability/task evidence
 excludes a candidate; it does not invite a guess. Missing or stale cost evidence
@@ -259,6 +260,19 @@ authorization. Each affected row must identify:
   behavioral evidence, cost assumptions, and reasons for excluded candidates;
 - the coordinator's review/acceptance responsibility.
 
+For every delegated node, also name a primary and one
+preapproved backup, or explicitly state that no qualified backup exists. For
+both routes record the exact host/provider/gateway/auth/model/mode, required
+tools, task-fit evidence, availability observation and source, spend authority,
+and reason for the fit. The approved brief covers both routes and the switch
+condition. A stale, unavailable, unqualified, or unauthorized route is not a
+ready backup. Prefer a different availability-failure domain when qualified;
+the same provider can cover model-specific loss but not a provider-wide outage.
+Generic Prompt it research consent remains unchanged: a pre-brief external
+review still needs its explicitly approved bounded route and scope, and its
+backup preserves review/execute mode, tool restrictions, and reviewer
+independence.
+
 Before execution-brief approval, an external lane may be dispatched only when
 the user has explicitly authorized a bounded external research team and the
 assigned task is a qualified `review` route for data gathering, source
@@ -293,15 +307,18 @@ already covers the exact run. Use the shared `side-lane` skill from the
 originating host and dispatch only ready tasks whose prerequisites the
 coordinator has accepted. A failed task blocks its dependents while unrelated
 approved tasks may continue. A later missing route or failed lane returns for a
-staffing decision; it never silently reroutes, falls back, or changes the
-primary coordinator.
+staffing decision unless it is a qualifying availability failure for the one
+preapproved backup.
 
 After approval, dispatch only the exact route in the accepted staffing row and
 record route recheck, dispatch, handoff, validation, and coordinator
 acceptance. A retry or correction stays within the approved route and scope;
-record its added session cost. If the route becomes unavailable, block its
-dependents and return for an explicit staffing decision. An independent review
-is a separate node with a distinct question, approval, and cost entry.
+record its added session cost. On a qualifying availability failure, the
+coordinator may refresh the sole backup and visibly reassign without another
+permission pause. Follow `config/lane-governance.md#preapproved-backup-reassignment`
+for the canonical trigger, stop/preservation/reconciliation sequence, ownership,
+GLM restriction, and pause behavior. An independent review is a separate node
+with a distinct question, approval, and cost entry.
 
 Explicit standing authorization for cost-effective metered routing may satisfy
 run-level spend authorization. Record it in staffing and pass the runner's
