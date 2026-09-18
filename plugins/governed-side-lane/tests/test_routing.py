@@ -355,7 +355,7 @@ class RoutingTests(unittest.TestCase):
             "claude-opus-5": {"input_per_million": 5, "output_per_million": 25},
             "claude-fable-5-1": {"input_per_million": 10, "output_per_million": 50},
             "claude-sonnet-5": {"input_per_million": 2, "output_per_million": 10},
-            "claude-haiku-4-5": {"input_per_million": 1, "output_per_million": 5},
+            "claude-haiku-4-5-20251001": {"input_per_million": 1, "output_per_million": 5},
         })
         for item in catalog["routes"]:
             if item["provider"] not in ("openai-api-key", "anthropic"):

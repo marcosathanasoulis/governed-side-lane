@@ -135,7 +135,7 @@
           "input_per_million": 2,
           "output_per_million": 10
         },
-        "claude-haiku-4-5": {
+        "claude-haiku-4-5-20251001": {
           "input_per_million": 1,
           "output_per_million": 5
         }
@@ -660,14 +660,14 @@
       "execution_location": "local-user-workspace"
     },
     {
-      "id": "claude-execute-direct-anthropic-haiku-4-5",
+      "id": "claude-execute-direct-anthropic-haiku-4-5-20251001",
       "provider": "anthropic",
       "gateway": "direct-anthropic",
       "auth_method": "provider-key",
       "billable": true,
       "explicit_only": true,
       "model_vendor": "claude",
-      "model": "claude-haiku-4-5",
+      "model": "claude-haiku-4-5-20251001",
       "host": "claude",
       "mode": "execute",
       "state": "discoverable",

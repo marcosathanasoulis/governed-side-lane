@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.15 - 2026-09-18
+
+- The `direct-anthropic` execute route now uses haiku's exact dated id
+  `claude-haiku-4-5-20251001`; the API resolves the `claude-haiku-4-5`
+  alias to the dated id, which breaks the requested/resolved identity
+  contract, so only the dated id is allowlisted (price unchanged at
+  $1/$5 per million tokens).
+- `claude-opus-5`, `claude-sonnet-5`, and `claude-haiku-4-5-20251001` are
+  qualified as of 2026-09-18 via a developer-authorized
+  `side_lane.qualification.qualify_claude` paid trial against
+  `https://api.anthropic.com` — the `X-Api-Key` path is confirmed end to
+  end for transport and local adapter.
+- `claude-fable-5-1` remains unverified: Claude Code 2.1.247 returned
+  "400 ... does not support this model; version 2.1.251 or newer is
+  required" on the 2026-09-18 trial; retry pending a newer CLI.
+
 ## 0.4.14 - 2026-09-18
 
 - New `anthropic` provider-key execute route (gateway `direct-anthropic`,

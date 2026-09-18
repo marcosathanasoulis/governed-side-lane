@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from side_lane import cli
 from side_lane.adapters import claude
 
 
@@ -380,6 +381,42 @@ class FirstPartyAnthropicKeyRouteTests(unittest.TestCase):
                 runner=mock.Mock(return_value=subprocess.CompletedProcess(
                     [], 7, "leak selected", "leak selected")))
         self.assertNotIn("selected", result.stdout + result.stderr)
+
+    def test_shipped_qualification_gate_admits_verified_models_and_rejects_fable(self) -> None:
+        models = json.loads((Path(__file__).parents[1] / "config/models.json").read_text(encoding="utf-8"))
+        for model in ("claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"):
+            with self.subTest(model=model):
+                provider_config, model_config = cli.select_route(
+                    models, "claude", "execute", "anthropic", model)
+                qualification = model_config["qualification"]
+                self.assertIs(qualification["verified"], True)
+                self.assertTrue(qualification["verified_on"])
+                self.assertTrue(qualification["source"])
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    repo, lane = root / "repo", root / "lane"
+                    for path in (repo, lane):
+                        path.mkdir()
+                        (path / ".git").write_text("gitdir: /tmp/example\n", encoding="utf-8")
+                    stdout = "\n".join((json.dumps({"type": "system", "model": model}),
+                                        json.dumps({"type": "result", "usage": {"input_tokens": 1}})))
+                    runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout, ""))
+                    result = claude.launch(executable="claude", repo=repo, worktree=lane,
+                        provider="anthropic", model=model, provider_config=provider_config,
+                        model_config=model_config, prompt="task", secret="selected",
+                        env={"PATH": "/bin"}, runner=runner)
+                runner.assert_called_once()
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(result.resolved_model, model)
+        provider_config, model_config = cli.select_route(
+            models, "claude", "execute", "anthropic", "claude-fable-5-1")
+        runner = mock.Mock()
+        with self.assertRaisesRegex(claude.ClaudeAdapterError,
+                                    "external route lacks verified model transport qualification"):
+            claude.launch(executable="claude", repo="/not-used", worktree="/not-used",
+                provider="anthropic", model="claude-fable-5-1", provider_config=provider_config,
+                model_config=model_config, prompt="task", secret="selected", runner=runner)
+        runner.assert_not_called()
 
 
 class AllowedToolsTests(unittest.TestCase):

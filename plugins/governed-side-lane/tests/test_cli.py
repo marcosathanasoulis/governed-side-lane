@@ -1082,7 +1082,7 @@ class SideLaneTests(unittest.TestCase):
         text = output.getvalue()
         self.assertIn("openai\tnative-codex", text)
         self.assertIn("glm\tdirect-zai\tglm-5.3\tprovider-key\tbillable", text)
-        for model in ("claude-opus-5", "claude-fable-5-1", "claude-sonnet-5", "claude-haiku-4-5"):
+        for model in ("claude-opus-5", "claude-fable-5-1", "claude-sonnet-5", "claude-haiku-4-5-20251001"):
             self.assertIn(f"claude\texecute\tanthropic\tdirect-anthropic\t{model}\tprovider-key\tbillable", text)
         self.assertNotIn("claude\treview\tanthropic\t", text)
         for model in ("gpt-5.5", "gpt-5.5-pro", "gpt-5.3-codex"):

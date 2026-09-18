@@ -112,16 +112,21 @@ V4.1 Flash behind the current Flash selector; retired `deepseek-v4-flash` reques
 redirect, so an echoed selector alone does not prove immutable model weights.
 The configured explicit key routes are the first-party Anthropic
 `direct-anthropic` gateway (`claude-opus-5`, `claude-fable-5-1`,
-`claude-sonnet-5`, `claude-haiku-4-5`; the key travels as `X-Api-Key`, not a
+`claude-sonnet-5`, `claude-haiku-4-5-20251001`; the key travels as `X-Api-Key`, not a
 bearer token) and the OpenAI `codex-api-key` gateway (`gpt-5.6-luna`,
 `gpt-5.6-terra`, `gpt-5.6-sol`, `gpt-6-astra`, `gpt-5.5`, `gpt-5.5-pro`,
-`gpt-5.3-codex`); both remain unqualified until their first governed run.
-The Anthropic route is unlaunchable until a developer-authorized
+`gpt-5.3-codex`); the OpenAI route remains unqualified until its first
+governed run. On the Anthropic route a developer-authorized
 `side_lane.qualification.qualify_claude` trial — secret drawn from the
 route's configured credential service and passed via the environment, never
-on argv — records `qualification.verified: true` with
-`verified_on` and `source`, mirroring how the deepseek and kimi routes were
-qualified on 2026-09-11; only then does the first governed run apply.
+on argv — qualified `claude-opus-5`, `claude-sonnet-5`, and
+`claude-haiku-4-5-20251001` on 2026-09-18 (the `X-Api-Key` path confirmed
+end to end, mirroring how the deepseek and kimi routes were qualified on
+2026-09-11), so those three are launchable; `claude-fable-5-1` stays
+unverified until a retry with Claude Code >= 2.1.251 (2.1.247 returned 400
+unsupported model on 2026-09-18). The alias `claude-haiku-4-5` is rejected
+because the API resolves it to the dated id, breaking the
+requested/resolved identity contract; the exact dated id is the one to name.
 
 Devin CLI exposes an account-specific model inventory. Discover it with
 `devin models list --format json`, pin the exact model UID, and distinguish
