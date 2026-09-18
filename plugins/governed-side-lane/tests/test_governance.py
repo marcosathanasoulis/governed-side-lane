@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import subprocess
 
+from side_lane import cli
 from side_lane.governance import GovernanceError, lane_system_prompt, validate_repository
 from side_lane.adapters import claude, codex
 
@@ -26,6 +27,15 @@ class GovernanceParityTests(unittest.TestCase):
         self.assertIn("do not edit", prompts["review"].lower())
         self.assertIn("open pull requests", prompts["execute"])
 
+    def test_scratch_file_rule_renders_in_both_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            for mode in ("review", "execute"):
+                prompt = lane_system_prompt(mode, repo)
+                self.assertIn(".side-lane-scratch/", prompt, mode)
+                self.assertIn("outside the lane worktree", prompt, mode)
+                self.assertIn("end a non-interactive session", prompt, mode)
+
     def test_every_allowlisted_command_contains_its_canonical_mode_prompt(self) -> None:
         models = json.loads((ROOT / "config/models.json").read_text(encoding="utf-8"))
         with tempfile.TemporaryDirectory() as directory:
@@ -38,13 +48,15 @@ class GovernanceParityTests(unittest.TestCase):
                 for mode, hosts in provider["routes"].items():
                     for host, route in hosts.items():
                         for model in route["models"]:
-                            model_config = {"runtime_model": model, "protocol": route["protocol"]}
+                            provider_config, model_config = cli.select_route(
+                                models, host, mode, provider_name, model
+                            )
                             worktree = lane
                             if host == "codex":
-                                command = codex.build_codex_command("codex", repo, worktree, provider_name, model, provider, model_config, "task", mode=mode)
+                                command = codex.build_codex_command("codex", repo, worktree, provider_name, model, provider_config, model_config, "task", mode=mode)
                             else:
                                 command = claude.build_command(executable="claude", repo=repo, worktree=worktree,
-                                    provider=provider_name, model=model, provider_config=provider,
+                                    provider=provider_name, model=model, provider_config=provider_config,
                                     model_config=model_config, prompt="task", mode=mode)
                             rendered = "\n".join(command)
                             self.assertIn(lane_system_prompt(mode, repo), rendered)

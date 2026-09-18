@@ -28,6 +28,9 @@ from side_lane.worktrees import (
     create_worktree,
     dispose_clean_worktree,
     git_status,
+    lane_delivery,
+    publish_lane_branch,
+    verify_lane,
     write_audit,
 )
 
@@ -35,19 +38,61 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = PACKAGE_ROOT / "config" / "models.json"
 MAX_PROMPT_CHARS = 100_000
 MAX_PROFILE_CHARS = 100_000
-REVIEW_UNSAFE = tuple(re.compile(p, re.I) for p in (
-    r"\b(?:edit|modify|write|delete|create)\s+(?:the\s+|a\s+)?(?:files?|code|repo)",
-    r"(?:^|[.!?]\s+)(?:please\s+)?(?:fix|implement|refactor|update|add|remove|rename|replace|change)\b",
-    r"\b(?:fix|implement|refactor|update|add|remove|rename|replace|change)\s+(?:[\w.-]+/)*[\w.-]+\.[A-Za-z0-9]+\b",
-    r"\b(?:apply|produce)\s+(?:a\s+)?(?:patch|diff)", r"\b(?:commit|push|merge|deploy)\b",
-    r"\b(?:bypass|disable|skip)\s+(?:permissions?|sandbox|guardrails?)\b",
-))
-EXECUTE_UNSAFE = tuple(re.compile(p, re.I) for p in (
-    r"--(?:dangerously-skip-permissions|allow-dangerously-skip-permissions|ignore-user-config)",
-    r"\b(?:force[- ]?push|deploy|merge\s+(?:the\s+)?(?:pr|branch))\b",
-    r"\b(?:insert|update|delete|drop|alter|truncate|create)\s+(?:into\s+|table\s+|database\s+)",
-    r"\b(?:change|grant|revoke|rotate|delete)\s+(?:iam|credentials?|secrets?|cloud resources?)\b",
-))
+REVIEW_UNSAFE = tuple(
+    re.compile(p, re.I)
+    for p in (
+        r"\b(?:edit|modify|write|delete|create)\s+(?:the\s+|a\s+)?(?:files?|code|repo)",
+        r"(?:^|[.!?]\s+)(?:please\s+)?(?:fix|implement|refactor|update|add|remove|rename|replace|change)\b",
+        r"\b(?:fix|implement|refactor|update|add|remove|rename|replace|change)\s+(?:[\w.-]+/)*[\w.-]+\.[A-Za-z0-9]+\b",
+        r"\b(?:apply|produce)\s+(?:a\s+)?(?:patch|diff)",
+        # Imperative/verb usage only, for exactly the reason the EXECUTE_UNSAFE
+        # "deploy" alternative below is shaped this way. A bare
+        # \b(?:commit|push|merge|deploy)\b made review mode unusable for its most
+        # common job: "review commit a321031a" read as an instruction to commit,
+        # and so did a prompt telling the reviewer "do not commit, push" — the
+        # noun and the negation both matched. Block the instruction to write
+        # history, not every mention of the word.
+        # The two lookaheads keep a sentence-INITIAL verb from swallowing a noun
+        # phrase: "Merge commit 7a8ed4ab introduced ...", "Push notifications are
+        # broken", "Deploy scripts live in ...", "commit a321031a on branch foo".
+        # A `git commit/push/merge` COMMAND is refused outright (lane-governance.md
+        # "Review mode": do not edit, patch, commit, push, deploy). Anchored to a
+        # line start or backtick so the command form is caught while prose that
+        # merely names it — "inspect git push output" — is not.
+        r"(?:^|[\n`])\s*git\s+(?:commit|push|merge)\b"
+        r"|(?:^|[.!?]\s+)(?:please\s+)?(?:commit|push|merge|deploy)\b(?![.\-_/])"
+        r"(?!\s+(?:commit|message|conflict|notification|script|hash|sha|log|token|key)s?\b)"
+        r"(?!\s+[0-9a-f]{7,40}\b)"
+        # Negated wording is a PROHIBITION, not an instruction: "Do not commit the
+        # changes." must reach the reviewer. Fixed-width lookbehinds, which is all
+        # Python's re allows; "not " also covers "must not ", "should not ".
+        r"|(?<!not )(?<!n't )(?<!never )"
+        r"\b(?:commit|push|merge|deploy)\s+(?:it|this|that|them|these|those|the|your|my|our|to|now)\b"
+        r"|\brun\s+the\s+(?:commit|push|merge|deploy)\b",
+        r"\b(?:bypass|disable|skip)\s+(?:permissions?|sandbox|guardrails?)\b",
+    )
+)
+# The "deploy" alternative below intentionally matches only verb/imperative
+# usage of the word ("deploy it", "run the deploy", a sentence-initial
+# "Deploy ..."), never the filename (deploy.py), a noun ("deployment", "the
+# deploy script", "deploy config/workflow", DEPLOYMENT_TYPE), or the word
+# inside a path or identifier. The goal is to block the instruction to ship
+# code, not to ban naming the tooling that does it.
+# The internal BE gateway repo's functions/sideLaneGateway/prompt_governance.py
+# mirrors these EXECUTE_UNSAFE regexes verbatim and must be re-synced
+# whenever this tuple changes.
+EXECUTE_UNSAFE = tuple(
+    re.compile(p, re.I)
+    for p in (
+        r"--(?:dangerously-skip-permissions|allow-dangerously-skip-permissions|ignore-user-config)",
+        r"\b(?:force[- ]?push|merge\s+(?:the\s+)?(?:pr|branch))\b"
+        r"|(?:^|[.!?]\s+)(?:please\s+)?deploy\b(?![.\-_/])"
+        r"|\bdeploy\s+(?:it|this|the|to|now|that)\b"
+        r"|\brun\s+the\s+deploy\b",
+        r"\b(?:insert|update|delete|drop|alter|truncate|create)\s+(?:into\s+|table\s+|database\s+)",
+        r"\b(?:change|grant|revoke|rotate|delete)\s+(?:iam|credentials?|secrets?|cloud resources?)\b",
+    )
+)
 
 
 LAUNCHABLE_STATES = frozenset({"verified", "present"})
@@ -68,35 +113,65 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
         config = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise SideLaneError(f"cannot load model allowlist: {exc}") from exc
-    if config.get("schema_version") != 3 or not isinstance(config.get("providers"), dict):
+    if config.get("schema_version") != 3 or not isinstance(
+        config.get("providers"), dict
+    ):
         raise SideLaneError("model allowlist requires schema_version 3")
     if not isinstance(config.get("capabilities"), list):
         raise SideLaneError("capability allowlist is invalid")
     for provider, item in config["providers"].items():
-        if not isinstance(item, dict) or item.get("auth_method") not in {"oauth", "provider-key"} or not item.get("gateway"):
-            raise SideLaneError(f"provider {provider!r} has invalid auth/gateway metadata")
-        if item["auth_method"] == "oauth" and item.get("billable") is not False:
-            raise SideLaneError(f"native provider {provider!r} must be non-billable OAuth")
-        if item["auth_method"] == "provider-key" and (
-            item.get("billable") is not True or not item.get("credential_service") or item.get("explicit_only") is not True
+        if (
+            not isinstance(item, dict)
+            or item.get("auth_method") not in {"oauth", "provider-key"}
+            or not item.get("gateway")
         ):
-            raise SideLaneError(f"key provider {provider!r} must be billable and explicit-only")
+            raise SideLaneError(
+                f"provider {provider!r} has invalid auth/gateway metadata"
+            )
+        if item["auth_method"] == "oauth" and item.get("billable") is not False:
+            raise SideLaneError(
+                f"native provider {provider!r} must be non-billable OAuth"
+            )
+        if item["auth_method"] == "provider-key" and (
+            item.get("billable") is not True
+            or not item.get("credential_service")
+            or item.get("explicit_only") is not True
+        ):
+            raise SideLaneError(
+                f"key provider {provider!r} must be billable and explicit-only"
+            )
         for mode, hosts in item.get("routes", {}).items():
             if mode not in {"review", "execute"} or not isinstance(hosts, dict):
                 raise SideLaneError(f"provider {provider!r} has an invalid route")
             for host, route in hosts.items():
                 models = route.get("models") if isinstance(route, dict) else None
-                if host not in {"codex", "claude", "devin"} or not route.get("protocol") or not isinstance(models, list) or not models:
-                    raise SideLaneError(f"provider {provider!r} has an invalid host route")
-                if len(set(models)) != len(models) or not all(isinstance(model, str) and model for model in models):
+                if (
+                    host not in {"codex", "claude", "devin"}
+                    or not route.get("protocol")
+                    or not isinstance(models, list)
+                    or not models
+                ):
+                    raise SideLaneError(
+                        f"provider {provider!r} has an invalid host route"
+                    )
+                if len(set(models)) != len(models) or not all(
+                    isinstance(model, str) and model for model in models
+                ):
                     raise SideLaneError(f"provider {provider!r} has invalid models")
                 model_configs = route.get("model_configs", {})
-                if not isinstance(model_configs, dict) or any(key not in models or not isinstance(value, dict) for key, value in model_configs.items()):
-                    raise SideLaneError(f"provider {provider!r} has invalid model_configs")
+                if not isinstance(model_configs, dict) or any(
+                    key not in models or not isinstance(value, dict)
+                    for key, value in model_configs.items()
+                ):
+                    raise SideLaneError(
+                        f"provider {provider!r} has invalid model_configs"
+                    )
     return config
 
 
-def select_route(config: Mapping[str, Any], host: str, mode: str, provider: str, model: str) -> tuple[Mapping[str, Any], dict[str, Any]]:
+def select_route(
+    config: Mapping[str, Any], host: str, mode: str, provider: str, model: str
+) -> tuple[Mapping[str, Any], dict[str, Any]]:
     provider_config = config["providers"].get(provider)
     if not isinstance(provider_config, Mapping):
         raise SideLaneError(f"unknown provider: {provider}")
@@ -104,13 +179,23 @@ def select_route(config: Mapping[str, Any], host: str, mode: str, provider: str,
     if route is None:
         raise SideLaneError(f"unsupported route: {host}/{mode}/{provider}")
     if model not in route["models"]:
-        raise SideLaneError(f"model {model!r} is not allowed for {host}/{mode}/{provider}")
+        raise SideLaneError(
+            f"model {model!r} is not allowed for {host}/{mode}/{provider}"
+        )
     model_config: dict[str, Any] = {
-        "runtime_model": model, "protocol": str(route["protocol"]), "wire_api": str(route["protocol"]),
-        "gateway": provider_config["gateway"], "auth_method": provider_config["auth_method"],
+        "runtime_model": model,
+        "protocol": str(route["protocol"]),
+        "wire_api": str(route["protocol"]),
+        "gateway": provider_config["gateway"],
+        "auth_method": provider_config["auth_method"],
         "billable": provider_config["billable"],
     }
-    for key in ("identity_contract", "reasoning_effort", "max_budget_usd", "execution_location"):
+    for key in (
+        "identity_contract",
+        "reasoning_effort",
+        "max_budget_usd",
+        "execution_location",
+    ):
         if key in route:
             model_config[key] = route[key]
     model_config.update(route.get("model_configs", {}).get(model, {}))
@@ -118,14 +203,24 @@ def select_route(config: Mapping[str, Any], host: str, mode: str, provider: str,
     if not isinstance(billable, bool):
         raise SideLaneError("model billable metadata must be boolean")
     if billable != provider_config["billable"] and not (
-        host == "devin" and route["protocol"] == "native-devin"
+        host == "devin"
+        and route["protocol"] == "native-devin"
         and provider_config["auth_method"] == "oauth"
     ):
-        raise SideLaneError("model billing override is supported only for native Devin OAuth")
+        raise SideLaneError(
+            "model billing override is supported only for native Devin OAuth"
+        )
     return {**provider_config, "billable": billable}, model_config
 
 
-def validate_selection(config: Mapping[str, Any], provider: str, model: str, *, host: str = "claude", mode: str = "review") -> Mapping[str, Any]:
+def validate_selection(
+    config: Mapping[str, Any],
+    provider: str,
+    model: str,
+    *,
+    host: str = "claude",
+    mode: str = "review",
+) -> Mapping[str, Any]:
     return select_route(config, host, mode, provider, model)[1]
 
 
@@ -136,7 +231,9 @@ def validate_governance(repo_argument: str) -> Path:
         raise SideLaneError(str(exc)) from exc
 
 
-def load_prompt(prompt: str | None, prompt_file: str | None, mode: str = "review") -> str:
+def load_prompt(
+    prompt: str | None, prompt_file: str | None, mode: str = "review"
+) -> str:
     if prompt_file:
         path = Path(prompt_file).expanduser()
         if not path.is_file():
@@ -146,7 +243,10 @@ def load_prompt(prompt: str | None, prompt_file: str | None, mode: str = "review
         value = prompt or ""
     if not value.strip() or len(value) > MAX_PROMPT_CHARS:
         raise SideLaneError("prompt is empty or too long")
-    if any(pattern.search(value) for pattern in (REVIEW_UNSAFE if mode == "review" else EXECUTE_UNSAFE)):
+    if any(
+        pattern.search(value)
+        for pattern in (REVIEW_UNSAFE if mode == "review" else EXECUTE_UNSAFE)
+    ):
         raise SideLaneError(f"prompt requests an action prohibited in {mode} mode")
     return value
 
@@ -181,9 +281,35 @@ def make_parser() -> argparse.ArgumentParser:
     run.add_argument("--model", required=True)
     run.add_argument("--repo", required=True)
     run.add_argument("--lane-name")
-    run.add_argument("--worktree-root", help="directory for lane worktrees; default <repo>/.side-lanes/worktrees, or $SIDE_LANE_WORKTREE_ROOT; relative paths are anchored to the repo")
+    run.add_argument(
+        "--worktree-root",
+        help="directory for lane worktrees; default <repo>/.side-lanes/worktrees, or $SIDE_LANE_WORKTREE_ROOT; relative paths are anchored to the repo",
+    )
     run.add_argument("--capability", action="append", default=[])
     run.add_argument("--approve-billable-route", action="store_true")
+    run.add_argument(
+        "--allow-no-commit",
+        action="store_true",
+        help="accept a lane that produced no commit; without it an execute lane that "
+        "leaves work uncommitted, or changes nothing at all, exits 3 instead of "
+        "reporting success",
+    )
+    run.add_argument(
+        "--no-publish",
+        action="store_true",
+        help="skip pushing a delivered execute lane's branch to its remote; without "
+        "it a lane that delivers pushes its branch so the commits are "
+        "remote-contained instead of stranded on the launching machine",
+    )
+    run.add_argument(
+        "--verify",
+        metavar="CMD",
+        help="after an execute lane delivers, run this shell command in the lane "
+        "worktree (e.g. its test suite); a non-zero exit fails the run with exit "
+        "code 5 even though the lane delivered. Verification does not suppress "
+        "the normal publication attempt, which --no-publish and a failed push "
+        "can still leave without a remote branch",
+    )
     prompt = run.add_mutually_exclusive_group(required=True)
     prompt.add_argument("--prompt")
     prompt.add_argument("--prompt-file")
@@ -204,14 +330,18 @@ def load_recommendation_profile(path_argument: str) -> dict[str, Any]:
         raise SideLaneError(f"recommendation profile is not valid JSON: {exc}") from exc
     if not isinstance(profile, dict):
         raise SideLaneError("recommendation profile must be a JSON object")
-    forbidden = re.compile(r"(?:api[_-]?key|credential|secret|quota|billing|usage)", re.I)
+    forbidden = re.compile(
+        r"(?:api[_-]?key|credential|secret|quota|billing|usage)", re.I
+    )
     pending: list[object] = [profile]
     while pending:
         value = pending.pop()
         if isinstance(value, dict):
             for key, child in value.items():
                 if forbidden.search(str(key)):
-                    raise SideLaneError(f"recommendation profile contains prohibited field: {key}")
+                    raise SideLaneError(
+                        f"recommendation profile contains prohibited field: {key}"
+                    )
                 pending.append(child)
         elif isinstance(value, list):
             pending.extend(value)
@@ -242,7 +372,10 @@ def _ready_routes(config: Mapping[str, Any]) -> frozenset[tuple[str, str, str, s
         for mode, hosts in item.get("routes", {}).items():
             for host, route in hosts.items():
                 if host in ready_hosts:
-                    present.update((provider, host, mode, model) for model in route.get("models", []))
+                    present.update(
+                        (provider, host, mode, model)
+                        for model in route.get("models", [])
+                    )
     return frozenset(present)
 
 
@@ -253,19 +386,31 @@ def _recommend(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
     mode = profile.get("mode")
     if host not in {"codex", "claude"} or mode not in {"review", "execute"}:
         raise SideLaneError("recommendation profile requires coordinator_host and mode")
-    required_connectors, required_capabilities = profile.get("required_connectors", []), profile.get("required_capabilities", [])
-    for label, value in (("required_connectors", required_connectors), ("required_capabilities", required_capabilities)):
-        if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+    required_connectors, required_capabilities = (
+        profile.get("required_connectors", []),
+        profile.get("required_capabilities", []),
+    )
+    for label, value in (
+        ("required_connectors", required_connectors),
+        ("required_capabilities", required_capabilities),
+    ):
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) and item for item in value
+        ):
             raise SideLaneError(f"{label} must be a list of non-empty strings")
     unknown = sorted(set(required_capabilities) - set(config["capabilities"]))
     if unknown:
         raise SideLaneError(f"unknown capabilities: {', '.join(unknown)}")
-    candidate_hosts = tuple(sorted({
-        candidate_host
-        for item in config["providers"].values()
-        for hosts in item.get("routes", {}).values()
-        for candidate_host in hosts
-    }))
+    candidate_hosts = tuple(
+        sorted(
+            {
+                candidate_host
+                for item in config["providers"].values()
+                for hosts in item.get("routes", {}).values()
+                for candidate_host in hosts
+            }
+        )
+    )
     snapshots = {
         candidate_host: _capability_report(
             config, candidate_host, mode, None, None, repo
@@ -273,22 +418,37 @@ def _recommend(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
         for candidate_host in candidate_hosts
     }
     normalized = dict(profile)
-    normalized.update({"coordinator_host": host,
-        "required_connectors": sorted(set(required_connectors)),
-        "required_capabilities": sorted(set(required_capabilities)),
-        "host_capabilities": {
-            candidate_host: _recommendation_host_snapshot(report, mode)
-            for candidate_host, report in snapshots.items()
-        }})
-    result = routing.recommend(routing.load_catalog(), normalized,
-        runtime_allowlist=routing.allowlist_from_models(config), credential_present_routes=_ready_routes(config))
-    result.update({"presence_only": True, "originating_host_unchanged": True,
-                   "required_capabilities": sorted(required_capabilities)})
+    normalized.update(
+        {
+            "coordinator_host": host,
+            "required_connectors": sorted(set(required_connectors)),
+            "required_capabilities": sorted(set(required_capabilities)),
+            "host_capabilities": {
+                candidate_host: _recommendation_host_snapshot(report, mode)
+                for candidate_host, report in snapshots.items()
+            },
+        }
+    )
+    result = routing.recommend(
+        routing.load_catalog(),
+        normalized,
+        runtime_allowlist=routing.allowlist_from_models(config),
+        credential_present_routes=_ready_routes(config),
+    )
+    result.update(
+        {
+            "presence_only": True,
+            "originating_host_unchanged": True,
+            "required_capabilities": sorted(required_capabilities),
+        }
+    )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
 
-def _recommendation_host_snapshot(report: Mapping[str, Any], mode: str) -> dict[str, Any]:
+def _recommendation_host_snapshot(
+    report: Mapping[str, Any], mode: str
+) -> dict[str, Any]:
     """Translate presence evidence narrowly for offline route staffing.
 
     A configured Playwright server is enough for an execute recommendation
@@ -373,34 +533,95 @@ def _require_host_executable(host: str) -> str:
         raise SideLaneError(str(exc)) from exc
 
 
-def _capability_report(config: Mapping[str, Any], host: str, mode: str, provider: str | None, model: str | None, repo: Path | None = None) -> dict[str, Any]:
+def _capability_report(
+    config: Mapping[str, Any],
+    host: str,
+    mode: str,
+    provider: str | None,
+    model: str | None,
+    repo: Path | None = None,
+) -> dict[str, Any]:
     runtime = _host_executable(host)
     mcp_names, out_of_scope = _discover_mcp_inventory(host, repo)
     lowered = {name.lower() for name in mcp_names}
     evidence = {
-        "workspace-write": {"state": "verified" if mode == "execute" else "unavailable", "basis": "active lane mode"},
-        "shell": {"state": "verified" if runtime else "unavailable", "basis": "selected host executable"},
-        "git-push": {"state": "present" if shutil.which("git") else "unavailable", "basis": "git executable; remote write authority not tested"},
-        "gitnexus": _graph_connector_evidence("gitnexus", mcp_names, host, out_of_scope),
-        "codegraph": _graph_connector_evidence("codegraph", mcp_names, host, out_of_scope),
-        "gcloud-read": {"state": "present" if shutil.which("gcloud") else "unavailable", "basis": "gcloud executable; account/project access not tested"},
-        "secret-use": {"state": "unknown", "basis": "credential values and access are never tested during preflight"},
-        "database-read": {"state": "present" if shutil.which("psql") else "unavailable", "basis": "psql executable; database access not tested"},
-        "workflow-write": {"state": "present" if any(marker in name for name in lowered for marker in ("asana", "slack", "teams", "github")) else "unknown", "basis": "connector-name metadata only; write authority not tested"},
-        "playwright": {"state": "present" if "playwright" in mcp_names else "unavailable", "basis": "exact connector-name metadata only, from the host's user-global config and this repository's project config; other projects' entries are excluded; browser launch not tested; review mode hides all MCP servers"},
+        "workspace-write": {
+            "state": "verified" if mode == "execute" else "unavailable",
+            "basis": "active lane mode",
+        },
+        "shell": {
+            "state": "verified" if runtime else "unavailable",
+            "basis": "selected host executable",
+        },
+        "git-push": {
+            "state": "present" if shutil.which("git") else "unavailable",
+            "basis": "git executable; remote write authority not tested",
+        },
+        "gitnexus": _graph_connector_evidence(
+            "gitnexus", mcp_names, host, out_of_scope
+        ),
+        "codegraph": _graph_connector_evidence(
+            "codegraph", mcp_names, host, out_of_scope
+        ),
+        "gcloud-read": {
+            "state": "present" if shutil.which("gcloud") else "unavailable",
+            "basis": "gcloud executable; account/project access not tested",
+        },
+        "secret-use": {
+            "state": "unknown",
+            "basis": "credential values and access are never tested during preflight",
+        },
+        "database-read": {
+            "state": "present" if shutil.which("psql") else "unavailable",
+            "basis": "psql executable; database access not tested",
+        },
+        "workflow-write": {
+            "state": "present"
+            if any(
+                marker in name
+                for name in lowered
+                for marker in ("asana", "slack", "teams", "github")
+            )
+            else "unknown",
+            "basis": "connector-name metadata only; write authority not tested",
+        },
+        "playwright": {
+            "state": "present" if "playwright" in mcp_names else "unavailable",
+            "basis": "exact connector-name metadata only, from the host's user-global config and this repository's project config; other projects' entries are excluded; browser launch not tested; review mode hides all MCP servers",
+        },
     }
-    report: dict[str, Any] = {"host": host, "mode": mode, "runtime": runtime, "host_support_dir": host_support_dir(host, runtime), "route": "not-requested", "mcp_connectors": sorted(mcp_names), "mcp_connectors_out_of_scope": sorted(out_of_scope)}
+    report: dict[str, Any] = {
+        "host": host,
+        "mode": mode,
+        "runtime": runtime,
+        "host_support_dir": host_support_dir(host, runtime),
+        "route": "not-requested",
+        "mcp_connectors": sorted(mcp_names),
+        "mcp_connectors_out_of_scope": sorted(out_of_scope),
+    }
     if bool(provider) != bool(model):
         raise SideLaneError("provider and model must be supplied together")
     if provider and model:
         provider_config, route = select_route(config, host, mode, provider, model)
-        report.update({"route": "configured", **{key: route[key] for key in ("gateway", "auth_method", "billable")}})
+        report.update(
+            {
+                "route": "configured",
+                **{key: route[key] for key in ("gateway", "auth_method", "billable")},
+            }
+        )
         if route["auth_method"] == "oauth":
             report["auth"] = auth_status(host, executable=runtime).as_dict()
         else:
-            report["configured_override"] = "present" if credential_present(provider_config["credential_service"]) else "absent"
+            report["configured_override"] = (
+                "present"
+                if credential_present(provider_config["credential_service"])
+                else "absent"
+            )
             report["requires_one_run_approval"] = True
-    report["capability_evidence"] = {name: evidence.get(name, {"state": "unknown", "basis": "no evidence"}) for name in config["capabilities"]}
+    report["capability_evidence"] = {
+        name: evidence.get(name, {"state": "unknown", "basis": "no evidence"})
+        for name in config["capabilities"]
+    }
     report["capabilities"] = {
         name: report["capability_evidence"][name]["state"] == "verified"
         for name in config["capabilities"]
@@ -408,7 +629,12 @@ def _capability_report(config: Mapping[str, Any], host: str, mode: str, provider
     return report
 
 
-def _graph_connector_evidence(capability: str, mcp_names: set[str], host: str, out_of_scope: set[str] = frozenset()) -> dict[str, str]:
+def _graph_connector_evidence(
+    capability: str,
+    mcp_names: set[str],
+    host: str,
+    out_of_scope: set[str] = frozenset(),
+) -> dict[str, str]:
     """Presence evidence for a code-graph connector.
 
     The Claude and Devin execute adapters render the fixed ``mcp__<capability>__*``
@@ -423,10 +649,16 @@ def _graph_connector_evidence(capability: str, mcp_names: set[str], host: str, o
 
     if host == "codex":
         if any(capability in name.lower() for name in mcp_names):
-            return {"state": "present", "basis": "connector-name metadata only; Codex lanes inherit configured MCP servers directly"}
+            return {
+                "state": "present",
+                "basis": "connector-name metadata only; Codex lanes inherit configured MCP servers directly",
+            }
         return {"state": "unknown", "basis": "connector-name metadata only"}
     if capability in mcp_names:
-        return {"state": "present", "basis": f"connector registered under the exact name {capability!r}; tool access not tested"}
+        return {
+            "state": "present",
+            "basis": f"connector registered under the exact name {capability!r}; tool access not tested",
+        }
     if capability in out_of_scope:
         return {
             "state": "unknown",
@@ -447,7 +679,9 @@ def _discover_mcp_names(host: str, repo: Path | None = None) -> set[str]:
     return _discover_mcp_inventory(host, repo)[0]
 
 
-def _discover_mcp_inventory(host: str, repo: Path | None = None) -> tuple[set[str], set[str]]:
+def _discover_mcp_inventory(
+    host: str, repo: Path | None = None
+) -> tuple[set[str], set[str]]:
     """Return ``(in_scope, out_of_scope)`` connector names for a lane on ``host``.
 
     Claude reads MCP servers from the root-level ``mcpServers`` of its user
@@ -461,21 +695,35 @@ def _discover_mcp_inventory(host: str, repo: Path | None = None) -> tuple[set[st
 
     names: set[str] = set()
     out_of_scope: set[str] = set()
-    codex_home = Path(os.environ.get("CODEX_HOME", "").strip() or Path.home() / ".codex")
+    codex_home = Path(
+        os.environ.get("CODEX_HOME", "").strip() or Path.home() / ".codex"
+    )
     if host == "codex":
         paths = [codex_home / "config.toml"]
         if repo is not None:
             paths.append(repo / ".codex" / "config.toml")
     elif host == "claude":
-        paths = [Path.home() / ".claude.json", Path.home() / ".claude" / "settings.json"]
+        paths = [
+            Path.home() / ".claude.json",
+            Path.home() / ".claude" / "settings.json",
+        ]
         if repo is not None:
             paths.append(repo / ".mcp.json")
     elif host == "devin":
         # Devin CLI >=3000.3 uses dedicated native MCP files, not Claude's.
-        base = Path(os.environ["APPDATA"]) if os.name == "nt" and os.environ.get("APPDATA") else Path.home() / ".config"
+        base = (
+            Path(os.environ["APPDATA"])
+            if os.name == "nt" and os.environ.get("APPDATA")
+            else Path.home() / ".config"
+        )
         paths = [base / "devin" / "mcp_config.json"]
         if repo is not None:
-            paths.extend([repo / ".devin" / "mcp_config.json", repo / ".devin" / "mcp_config.local.json"])
+            paths.extend(
+                [
+                    repo / ".devin" / "mcp_config.json",
+                    repo / ".devin" / "mcp_config.local.json",
+                ]
+            )
     else:
         return names, out_of_scope
     for path in paths:
@@ -495,10 +743,35 @@ def _discover_mcp_inventory(host: str, repo: Path | None = None) -> tuple[set[st
     return names, out_of_scope - names
 
 
-def _launch(args: argparse.Namespace, config: Mapping[str, Any], repo: Path, prompt: str) -> int:
-    provider_config, model_config = select_route(config, args.host, args.mode, args.provider, args.model)
+#: Execute lane finished without its work reaching git. Distinct from the
+#: worker's own non-zero exit and from argparse's 2.
+LANE_NOT_DELIVERED = 3
+
+#: Lane tree could not be inspected at all. Fail closed rather than claim a
+#: delivery nobody verified.
+LANE_DELIVERY_UNVERIFIED = 4
+
+#: A delivered lane failed its caller-supplied verification command
+#: (``--verify``). The lane reached git and its branch was still published;
+#: the work itself does not pass its own checks. Distinct from
+#: LANE_NOT_DELIVERED (nothing landed to inspect) and from the worker's own
+#: non-zero exit (the work never claimed to be finished).
+LANE_VERIFY_FAILED = 5
+
+
+def _launch(
+    args: argparse.Namespace, config: Mapping[str, Any], repo: Path, prompt: str
+) -> int:
+    provider_config, model_config = select_route(
+        config, args.host, args.mode, args.provider, args.model
+    )
     if args.capability and args.mode != "execute":
         raise SideLaneError("--capability is supported only in execute mode")
+    if getattr(args, "verify", None) and args.mode != "execute":
+        # A review lane disposes its worktree before any verification could
+        # run, so accepting the flag there would be a silent no-op the
+        # operator believes happened. Fail closed instead.
+        raise SideLaneError("--verify is supported only in execute mode")
     unknown = sorted(set(args.capability) - set(config["capabilities"]))
     if unknown:
         raise SideLaneError(f"unknown capabilities: {', '.join(unknown)}")
@@ -511,7 +784,8 @@ def _launch(args: argparse.Namespace, config: Mapping[str, Any], repo: Path, pro
             config, args.host, args.mode, args.provider, args.model, repo
         )["capability_evidence"]
         missing = [
-            name for name in args.capability
+            name
+            for name in args.capability
             if evidence.get(name, {}).get("state") not in LAUNCHABLE_STATES
         ]
         if missing:
@@ -521,12 +795,18 @@ def _launch(args: argparse.Namespace, config: Mapping[str, Any], repo: Path, pro
     if not args.lane_name:
         raise SideLaneError(f"{args.mode} mode requires --lane-name")
     if not provider_config["billable"] and args.approve_billable_route:
-        raise SideLaneError("--approve-billable-route is invalid for non-billable native OAuth routes")
+        raise SideLaneError(
+            "--approve-billable-route is invalid for non-billable native OAuth routes"
+        )
     if provider_config["billable"] and not args.approve_billable_route:
-        raise SideLaneError("billable route requires explicit --approve-billable-route for this run")
+        raise SideLaneError(
+            "billable route requires explicit --approve-billable-route for this run"
+        )
     executable = _require_host_executable(args.host)
     capabilities = tuple(sorted(set(args.capability)))
-    lane = create_worktree(repo, args.lane_name, worktree_root=getattr(args, "worktree_root", None))
+    lane = create_worktree(
+        repo, args.lane_name, worktree_root=getattr(args, "worktree_root", None)
+    )
     secret: str | None = None
     try:
         if provider_config["auth_method"] == "oauth":
@@ -535,20 +815,52 @@ def _launch(args: argparse.Namespace, config: Mapping[str, Any], repo: Path, pro
             secret = read_credential(provider_config["credential_service"])
         if args.host == "codex":
             from side_lane.adapters.codex import run_codex
-            result = run_codex(executable=executable, repo=repo, worktree=lane.worktree, provider=args.provider,
-                model=args.model, provider_config=provider_config, model_config=model_config, prompt=prompt, mode=args.mode,
-                capabilities=capabilities, support_dir=host_support_dir(args.host, executable), secret=secret)
+
+            result = run_codex(
+                executable=executable,
+                repo=repo,
+                worktree=lane.worktree,
+                provider=args.provider,
+                model=args.model,
+                provider_config=provider_config,
+                model_config=model_config,
+                prompt=prompt,
+                mode=args.mode,
+                capabilities=capabilities,
+                support_dir=host_support_dir(args.host, executable),
+                secret=secret,
+            )
         elif args.host == "claude":
             from side_lane.adapters.claude import launch
-            result = launch(executable=executable, repo=repo, worktree=lane.worktree, provider=args.provider,
-                model=args.model, provider_config=provider_config, model_config=model_config, prompt=prompt,
-                mode=args.mode, capabilities=capabilities, secret=secret)
+
+            result = launch(
+                executable=executable,
+                repo=repo,
+                worktree=lane.worktree,
+                provider=args.provider,
+                model=args.model,
+                provider_config=provider_config,
+                model_config=model_config,
+                prompt=prompt,
+                mode=args.mode,
+                capabilities=capabilities,
+                secret=secret,
+            )
         else:
             from side_lane.adapters.devin import launch
-            result = launch(executable=executable, repo=repo, worktree=lane.worktree,
-                provider=args.provider, model=args.model, provider_config=provider_config,
-                model_config=model_config, prompt=prompt, mode=args.mode,
-                capabilities=capabilities)
+
+            result = launch(
+                executable=executable,
+                repo=repo,
+                worktree=lane.worktree,
+                provider=args.provider,
+                model=args.model,
+                provider_config=provider_config,
+                model_config=model_config,
+                prompt=prompt,
+                mode=args.mode,
+                capabilities=capabilities,
+            )
     except Exception:
         dispose_clean_worktree(lane)
         raise
@@ -558,19 +870,130 @@ def _launch(args: argparse.Namespace, config: Mapping[str, Any], repo: Path, pro
         print(result.stderr, file=sys.stderr)
     summary = result.as_dict()
     status = git_status(lane)
-    audit = write_audit(lane, host=result.host, mode=args.mode, provider=result.provider,
-        gateway=result.gateway, auth_method=result.auth_method, billable=result.billable, model=result.model,
-        prompt=prompt, exit_status=result.returncode, status=status,
-        stdout=result.stdout, stderr=result.stderr,
-        requested_model=result.requested_model, resolved_model=result.resolved_model,
-        usage=result.usage, provider_artifact=result.provider_artifact)
-    summary.update({"branch": lane.branch, "worktree": str(lane.worktree), "git_status": status,
-                    "audit": str(audit), "result_artifact": str(audit)})
+    audit = write_audit(
+        lane,
+        host=result.host,
+        mode=args.mode,
+        provider=result.provider,
+        gateway=result.gateway,
+        auth_method=result.auth_method,
+        billable=result.billable,
+        model=result.model,
+        prompt=prompt,
+        exit_status=result.returncode,
+        status=status,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        requested_model=result.requested_model,
+        resolved_model=result.resolved_model,
+        usage=result.usage,
+        provider_artifact=result.provider_artifact,
+    )
+    summary.update(
+        {
+            "branch": lane.branch,
+            "worktree": str(lane.worktree),
+            "git_status": status,
+            "audit": str(audit),
+            "result_artifact": str(audit),
+        }
+    )
     if args.mode == "review":
         dispose_clean_worktree(lane)
         summary["worktree_disposed"] = True
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return result.returncode
+
+    # Execute mode: a zero exit is not evidence the work landed. A worker can
+    # write correct files, exit 0, and leave them untracked — the run then
+    # reports success for work that vanishes with the worktree. Ask the tree.
+    try:
+        delivery = lane_delivery(lane)
+    except WorktreeError as exc:
+        # Fail closed: this repository fails closed when worktree state is
+        # uncertain, and an unverifiable tree is exactly that. An earlier
+        # revision kept the worker's exit code here, which turned "we could not
+        # look" into a green run — the very failure this check exists to
+        # prevent, one level up.
+        summary["delivered"] = None
+        # Same contract as below: no verdict was rendered, so none is claimed.
+        summary["verified"] = None
+        summary["delivery_unverified"] = str(exc)
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        print(
+            f"side-lane: could not verify lane delivery, so it is not claimed: {exc}",
+            file=sys.stderr,
+        )
+        return result.returncode or LANE_DELIVERY_UNVERIFIED
+
+    summary["committed"] = delivery.committed
+    summary["uncommitted"] = list(delivery.uncommitted)
+    summary["delivered"] = delivery.delivered
+    # 2026-09-17: a lane told to run the test suite ran it 18 times, saw
+    # JSONDecodeError nine times, committed the failing tests anyway, and
+    # exited 0 — caught only because a human re-ran the suite by hand. A
+    # lane's claim about tests is prose in a transcript; the runner must
+    # check. Verification runs only for a delivered lane (an undelivered one
+    # already fails), and it runs BEFORE publication on purpose: publication
+    # must still happen either way, because preserving the branch is what
+    # stops work being stranded on one machine, and failing work is exactly
+    # the work someone needs to be able to look at.
+    verify = None
+    if getattr(args, "verify", None) and delivery.delivered:
+        verify = verify_lane(lane, args.verify)
+        summary["verified"] = verify.passed
+        summary["verify_command"] = verify.command
+        summary["verify_exit"] = verify.exit_code
+        summary["verify_output"] = verify.output
+    else:
+        # None, not False: nobody rendered a verdict, and the summary must
+        # not imply one was reached and lost.
+        summary["verified"] = None
+    publish_warning = None
+    if not result.returncode and delivery.delivered:
+        # A delivered lane's commits live on one machine until they are pushed:
+        # measured 2026-09-17, 40 commits across 36 worktrees were on no remote,
+        # and nothing ever reclaimed the trees. Pushing makes the commits
+        # remote-contained, which is what lets worktree_doctor's PRUNE path
+        # reclaim the worktree later with its guards intact. A failed push is
+        # reported, never fatal: the work is committed with or without the
+        # remote, and failing here would be worse than today's behavior.
+        if getattr(args, "no_publish", False):
+            summary["published"] = None
+        else:
+            try:
+                summary["published_ref"] = publish_lane_branch(lane)
+                summary["published"] = True
+            except WorktreeError as exc:
+                summary["published"] = False
+                summary["publish_error"] = str(exc)
+                publish_warning = (
+                    f"side-lane: lane delivered but could not publish the branch: {exc}"
+                )
     print(json.dumps(summary, indent=2, sort_keys=True))
-    return result.returncode
+    if publish_warning:
+        print(publish_warning, file=sys.stderr)
+    if verify is not None and not verify.passed:
+        # The command and its output tail are the whole evidence; without
+        # them the operator is back to trusting prose.
+        print(
+            f"side-lane: verification failed (exit {verify.exit_code}) "
+            f"for command: {verify.command}\n{verify.output}",
+            file=sys.stderr,
+        )
+    if result.returncode:
+        return result.returncode
+    if verify is not None and not verify.passed:
+        return LANE_VERIFY_FAILED
+    if delivery.delivered:
+        return 0
+    # --allow-no-commit covers a lane whose intended outcome is no commit. It
+    # does NOT excuse a lane that committed and then abandoned the rest: that
+    # is partial delivery, and the abandoned half is lost either way.
+    if getattr(args, "allow_no_commit", False) and not delivery.uncommitted:
+        return 0
+    print(f"side-lane: {delivery.failure_reason()}", file=sys.stderr)
+    return LANE_NOT_DELIVERED
 
 
 def run(argv: Sequence[str] | None = None) -> int:
@@ -582,7 +1005,9 @@ def run(argv: Sequence[str] | None = None) -> int:
                 for host, route in hosts.items():
                     for model in route["models"]:
                         effective, _ = select_route(config, host, mode, provider, model)
-                        print(f"{host}\t{mode}\t{provider}\t{item['gateway']}\t{model}\t{item['auth_method']}\t{'billable' if effective['billable'] else 'subscription'}")
+                        print(
+                            f"{host}\t{mode}\t{provider}\t{item['gateway']}\t{model}\t{item['auth_method']}\t{'billable' if effective['billable'] else 'subscription'}"
+                        )
         return 0
     if args.command == "candidates":
         candidates = routing.list_catalog_candidates(routing.load_catalog())
@@ -590,39 +1015,83 @@ def run(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(candidates, indent=2, sort_keys=True))
         else:
             for candidate in candidates:
-                print("\t".join((
-                    candidate["id"], candidate["provider"], candidate["requested_model"],
-                    candidate["execution_location"], candidate["qualification_state"], "disabled",
-                )))
+                print(
+                    "\t".join(
+                        (
+                            candidate["id"],
+                            candidate["provider"],
+                            candidate["requested_model"],
+                            candidate["execution_location"],
+                            candidate["qualification_state"],
+                            "disabled",
+                        )
+                    )
+                )
         return 0
     if args.command == "credentials":
-        states = {provider: ("not-used-oauth" if item["auth_method"] == "oauth" else ("present" if credential_present(item["credential_service"]) else "absent")) for provider, item in config["providers"].items()}
-        print(json.dumps(states, sort_keys=True) if args.json else "\n".join(f"{key}\t{value}" for key, value in states.items()))
+        states = {
+            provider: (
+                "not-used-oauth"
+                if item["auth_method"] == "oauth"
+                else (
+                    "present"
+                    if credential_present(item["credential_service"])
+                    else "absent"
+                )
+            )
+            for provider, item in config["providers"].items()
+        }
+        print(
+            json.dumps(states, sort_keys=True)
+            if args.json
+            else "\n".join(f"{key}\t{value}" for key, value in states.items())
+        )
         return 0
     if args.command == "auth-status":
         status = auth_status(args.host, executable=_host_executable(args.host))
         payload = status.as_dict()
-        print(json.dumps(payload, sort_keys=True) if args.json else "\n".join(f"{key}\t{value}" for key, value in payload.items()))
+        print(
+            json.dumps(payload, sort_keys=True)
+            if args.json
+            else "\n".join(f"{key}\t{value}" for key, value in payload.items())
+        )
         return 0 if status.ready else 1
     if args.command == "check-capabilities":
         repo = validate_governance(args.repo) if args.repo else None
-        report = _capability_report(config, args.host, args.mode, args.provider, args.model, repo)
-        print(json.dumps(report, sort_keys=True) if args.json else "\n".join(f"{key}\t{value}" for key, value in report.items()))
+        report = _capability_report(
+            config, args.host, args.mode, args.provider, args.model, repo
+        )
+        print(
+            json.dumps(report, sort_keys=True)
+            if args.json
+            else "\n".join(f"{key}\t{value}" for key, value in report.items())
+        )
         return 0
     if args.command == "recommend":
         return _recommend(args, config)
     if args.command == "evaluate":
         return _evaluate(args.input)
     repo = validate_governance(args.repo)
-    return _launch(args, config, repo, load_prompt(args.prompt, args.prompt_file, args.mode))
+    return _launch(
+        args, config, repo, load_prompt(args.prompt, args.prompt_file, args.mode)
+    )
 
 
 def main() -> None:
     try:
         raise SystemExit(run())
-    except (SideLaneError, AuthError, CredentialError, GovernanceError, WorktreeError,
-            ClaudeAdapterError, CodexAdapterError, DevinAdapterError, evaluation.EvaluationError,
-            routing.RoutingError) as exc:
+    except (
+        SideLaneError,
+        AuthError,
+        CredentialError,
+        GovernanceError,
+        WorktreeError,
+        ClaudeAdapterError,
+        CodexAdapterError,
+        DevinAdapterError,
+        evaluation.EvaluationError,
+        routing.RoutingError,
+    ) as exc:
         print(f"side-lane: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 

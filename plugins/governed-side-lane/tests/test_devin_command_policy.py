@@ -1,6 +1,7 @@
 import io
 import json
 from pathlib import Path
+import re
 import tempfile
 import unittest
 from unittest import mock
@@ -100,6 +101,141 @@ class DevinCommandPolicyTests(unittest.TestCase):
             with self.subTest(payload=payload):
                 decision = policy.evaluate_event(payload, allowed, ())
                 self.assertEqual(decision["decision"], "block")
+        self.assertEqual(policy.evaluate_event({"tool_name": "read"}, allowed, ())["reason"],
+                         "invalid hook event")
+
+    def test_policy_hook_matcher_lists_exactly_the_covered_tools(self) -> None:
+        self.assertEqual(policy.policy_hook_matcher(), "^(exec|write|edit|str_replace)$")
+        matcher = re.compile(policy.policy_hook_matcher())
+        for tool in policy.COVERED_TOOL_NAMES:
+            self.assertIsNotNone(matcher.match(tool), tool)
+        for tool in ("read", "grep", "glob", "exec-other", "mcp__github__create_issue"):
+            self.assertIsNone(matcher.match(tool), tool)
+
+    def test_write_tools_are_contained_to_the_lane_worktree(self) -> None:
+        allowed = ["Bash(env)"]
+        with tempfile.TemporaryDirectory() as directory:
+            worktree = Path(directory) / "lane"
+            (worktree / "src").mkdir(parents=True)
+            for tool in policy.FILE_MUTATING_TOOL_NAMES:
+                with self.subTest(tool=tool):
+                    self.assertIsNone(policy.evaluate_event(
+                        {"tool_name": tool, "tool_input": {"file_path": str(worktree / "src" / "new.py")}},
+                        allowed, (), worktree=str(worktree)))
+                    decision = policy.evaluate_event(
+                        {"tool_name": tool, "tool_input": {"file_path": "/tmp/pr1678_sim.py"}},
+                        allowed, (), worktree=str(worktree))
+                    self.assertEqual(decision["decision"], "block")
+                    self.assertEqual(decision["reason"],
+                                     "writes outside the lane worktree are not permitted; "
+                                     f"use {worktree}/.side-lane-scratch/ for scratch files")
+                    scratch = policy.evaluate_event(
+                        {"tool_name": tool,
+                         "tool_input": {"file_path": str(worktree / ".side-lane-scratch" / "sim.py")}},
+                        allowed, (), worktree=str(worktree))
+                    self.assertIsNone(scratch)
+            # Relative targets resolve against the lane worktree, not the host cwd.
+            self.assertIsNone(policy.evaluate_event(
+                {"tool_name": "write", "tool_input": {"file_path": "notes.md"}},
+                allowed, (), worktree=str(worktree)))
+            # A symlink inside the worktree that escapes it resolves outside and blocks.
+            escape = worktree / "escape-link"
+            escape.symlink_to(Path("/tmp"))
+            decision = policy.evaluate_event(
+                {"tool_name": "write", "tool_input": {"file_path": str(escape / "x.py")}},
+                allowed, (), worktree=str(worktree))
+            self.assertEqual(decision["decision"], "block")
+            self.assertIn("outside the lane worktree", decision["reason"])
+
+    def test_write_tools_fail_closed_without_worktree_or_target(self) -> None:
+        allowed = ["Bash(env)"]
+        decision = policy.evaluate_event(
+            {"tool_name": "write", "tool_input": {"file_path": "/tmp/x.py"}}, allowed, ())
+        self.assertEqual(decision["decision"], "block")
+        self.assertIn("lane worktree", decision["reason"])
+        with tempfile.TemporaryDirectory() as directory:
+            worktree = Path(directory) / "lane"
+            worktree.mkdir()
+            for tool_input in ({}, {"file_path": ""}, {"file_path": "  "},
+                               {"command": "touch x"}, "not-a-dict"):
+                with self.subTest(tool_input=tool_input):
+                    decision = policy.evaluate_event(
+                        {"tool_name": "edit", "tool_input": tool_input},
+                        allowed, (), worktree=str(worktree))
+                    self.assertEqual(decision["decision"], "block")
+                    self.assertIn("missing", decision["reason"])
+
+    def test_git_dash_c_inside_worktree_matches_the_bare_grant(self) -> None:
+        allowed = ["Bash(git log *)", "Bash(git status *)"]
+        with tempfile.TemporaryDirectory() as directory:
+            worktree = Path(directory) / "lane"
+            (worktree / "pkg").mkdir(parents=True)
+            for command in (f"git -C {worktree} log --oneline -5",
+                            f"git -C '{worktree}' log -1",
+                            f"git -C {worktree} status --short",
+                            f"git -C {worktree}/pkg status --short",
+                            "git -C . status"):
+                with self.subTest(command=command):
+                    self.assertIsNone(policy.evaluate_event(
+                        {"tool_name": "exec", "tool_input": {"command": command}},
+                        allowed, (), worktree=str(worktree)))
+            for command in (f"git -C {worktree.parent} log --oneline -5",
+                            "git -C /etc status --short",
+                            f"git -C {worktree} push origin main",
+                            f"git -C {worktree} log; touch /tmp/x"):
+                with self.subTest(command=command):
+                    decision = policy.evaluate_event(
+                        {"tool_name": "exec", "tool_input": {"command": command}},
+                        allowed, (), worktree=str(worktree))
+                    self.assertEqual(decision["decision"], "block")
+            # Deny rules still match through the stripped prefix.
+            decision = policy.evaluate_event(
+                {"tool_name": "exec",
+                 "tool_input": {"command": f"git -C {worktree} push --force origin main"}},
+                ["Bash(git push *)"], ["Bash(git push --force*)"], worktree=str(worktree))
+            self.assertEqual(decision["decision"], "block")
+            self.assertIn("command denied by canonical rule", decision["reason"])
+
+    def test_dash_c_shell_expandable_targets_fail_closed(self) -> None:
+        # A literal $HOME/~/$(pwd) token must never be treated as an in-worktree
+        # path here: the shell (or a re-parsing provider) expands it later to
+        # something outside the worktree, so the command must be evaluated
+        # as-is (and fail to match a bare grant) rather than stripped.
+        allowed = ["Bash(git status *)"]
+        with tempfile.TemporaryDirectory() as directory:
+            worktree = Path(directory) / "lane"
+            worktree.mkdir()
+            # $HOME/~ carry no shell-composition syntax, so they reach the -C
+            # normalisation and must fail the (unstripped) canonical match.
+            for command in ('git -C "$HOME" status', "git -C ~ status", "git -C ~/x status"):
+                with self.subTest(command=command):
+                    decision = policy.evaluate_event(
+                        {"tool_name": "exec", "tool_input": {"command": command}},
+                        allowed, (), worktree=str(worktree))
+                    self.assertEqual(decision["decision"], "block")
+                    self.assertEqual(decision["reason"],
+                                     "command is outside canonical capability grants")
+            # $(...) / backticks are already rejected as unsafe shell syntax
+            # before the -C normalisation runs at all; still a fail-closed block.
+            for command in ('git -C "$(pwd)" status', "git -C `pwd` status"):
+                with self.subTest(command=command):
+                    decision = policy.evaluate_event(
+                        {"tool_name": "exec", "tool_input": {"command": command}},
+                        allowed, (), worktree=str(worktree))
+                    self.assertEqual(decision["decision"], "block")
+
+    def test_write_targets_with_shell_expansion_fail_closed(self) -> None:
+        allowed = ["Bash(env)"]
+        with tempfile.TemporaryDirectory() as directory:
+            worktree = Path(directory) / "lane"
+            worktree.mkdir()
+            for target in ("$HOME/x.py", "~/x.py", "~", "$(pwd)/x.py"):
+                with self.subTest(target=target):
+                    decision = policy.evaluate_event(
+                        {"tool_name": "write", "tool_input": {"file_path": target}},
+                        allowed, (), worktree=str(worktree))
+                    self.assertEqual(decision["decision"], "block")
+                    self.assertIn("outside the lane worktree", decision["reason"])
 
     def test_hook_cli_fails_closed_on_bad_policy_and_exits_two_when_blocking(self) -> None:
         payload = {"tool_name": "exec", "tool_input": {"command": "git push --force"}}
@@ -115,6 +251,25 @@ class DevinCommandPolicyTests(unittest.TestCase):
             rules.write_text("{}")
             with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))):
                 self.assertEqual(policy.main([str(rules)]), 2)
+
+    def test_hook_cli_reads_worktree_from_rules_for_write_containment(self) -> None:
+        payload = {"tool_name": "write", "tool_input": {"file_path": "/tmp/pr1678_sim.py"}}
+        with tempfile.TemporaryDirectory() as directory:
+            worktree = Path(directory) / "lane"
+            worktree.mkdir()
+            rules = Path(directory) / "rules.json"
+            rules.write_text(json.dumps({"allowed": ["Bash(env)"], "denied": [],
+                                         "worktree": str(worktree)}))
+            stdout = io.StringIO()
+            with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), \
+                    mock.patch("sys.stdout", stdout):
+                self.assertEqual(policy.main([str(rules)]), 2)
+            self.assertIn(".side-lane-scratch/", json.loads(stdout.getvalue())["reason"])
+            for invalid_worktree in ("", "   ", 7, None):
+                rules.write_text(json.dumps({"allowed": ["Bash(env)"], "denied": [],
+                                             "worktree": invalid_worktree}))
+                with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))):
+                    self.assertEqual(policy.main([str(rules)]), 2)
 
 
 if __name__ == "__main__":

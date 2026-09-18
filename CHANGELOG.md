@@ -1,5 +1,86 @@
 # Changelog
 
+## 0.4.14 - 2026-09-18
+
+- New `anthropic` provider-key execute route (gateway `direct-anthropic`,
+  base URL `https://api.anthropic.com`) for `claude-opus-5`,
+  `claude-fable-5-1`, `claude-sonnet-5`, and `claude-haiku-4-5`. Claude Code
+  sends `ANTHROPIC_API_KEY` as `X-Api-Key` (first-party key auth) and
+  `ANTHROPIC_AUTH_TOKEN` as `Authorization: Bearer` (proxy/OAuth-style), so
+  this gateway exports the secret under `ANTHROPIC_API_KEY` only; every other
+  billable direct gateway keeps `ANTHROPIC_AUTH_TOKEN` unchanged (source:
+  code.claude.com/docs/en/env-vars). The route is execute-only, explicit
+  `--approve-billable-route`, requires an identity contract, and stays
+  unverified until the first governed run on the cloud worker.
+- The `openai-api-key` execute route additionally allowlists `gpt-5.5`,
+  `gpt-5.5-pro`, and `gpt-5.3-codex` with the same transport contract as the
+  existing ids; Codex CLI support for `-pro` ids is unconfirmed until the
+  first run.
+- Both routing catalogs now carry the metered-spend rate cards
+  `openai-api-list-price-usd-2026-09-18` (OpenAI API list prices for the
+  seven `openai-api-key` models) and
+  `anthropic-api-list-price-usd-2026-09-18` (Anthropic API list prices for
+  the four `direct-anthropic` models), and every `openai-api-key` and
+  `anthropic` route references its card through a `external-billable`
+  cost model.
+- The qualification harness can now qualify the `anthropic` route:
+  `claude.FIRST_WAVE_ENDPOINTS` admits `https://api.anthropic.com`, so
+  `side_lane.qualification.qualify_claude` can run the developer-authorized
+  paid trial (secret injected via the environment, `ANTHROPIC_API_KEY` /
+  `X-Api-Key`) that a model needs before `qualification.verified` flips to
+  `true`; the catalog keeps `verified: false` with the trial recorded as
+  `pending` until that run happens.
+
+## 0.4.13 - 2026-09-17
+
+- Devin adapter: grant the `git -C <lane worktree>` and `git -C .` spellings
+  of every allowed git subcommand, so a non-interactive run is not ended by
+  Devin's confirmation prompt (gateway run 99e5ec8a). Deny rules unchanged;
+  the PreToolUse hook still normalises and blocks.
+
+## 0.4.12 - 2026-09-15
+
+- `EXECUTE_UNSAFE`'s second pattern now matches "deploy" only as a
+  verb/imperative ("deploy it/this/the/to/now", "run the deploy", or a
+  sentence-initial "Deploy ..."), not as a filename (`deploy.py`), a noun
+  ("deployment", "the deploy script", "deploy config/workflow",
+  `DEPLOYMENT_TYPE`), or the word inside a path or identifier. A coordinator
+  had been refused with "prompt requests an action prohibited in execute
+  mode" for merely naming the release script or describing its config; the
+  force-push and "merge the PR/branch" alternatives, the other three
+  patterns, and the error message are unchanged.
+  The internal BE gateway repo's `functions/sideLaneGateway/prompt_governance.py`
+  mirrors these regexes verbatim and must be re-synced.
+- Follow-up: the sentence-initial `deploy` branch now also carries a negative
+  lookahead so a filename/path/identifier immediately following the word
+  (`deploy.py`, `Deploy-runbook.md`, `deploy_config`, `deploy/`) is accepted at
+  the start of a sentence too, and `that` joins the `deploy it/this/the/to/now`
+  alternation.
+
+## 0.4.11 - 2026-09-15
+
+- Every lane worktree is now created with a git-excluded
+  `.side-lane-scratch/` directory for throwaway scripts, notes, and
+  intermediate output. `git status` and `git add -A` never see it (the entry
+  lives in the shared `.git/info/exclude`), it never fails the dirty checks
+  around lane creation and disposal, and it is removed with the worktree. The
+  canonical governance Common section now directs scratch files there and
+  forbids writing outside the lane worktree.
+- Devin's PreToolUse policy hook now covers the file-mutating `write`, `edit`,
+  and `str_replace` tools in addition to `exec`. A write whose target resolves
+  outside the lane worktree is blocked by the hook with a pointer to
+  `.side-lane-scratch/` instead of reaching Devin's `accept-edits`
+  confirmation, which printed "rejected a tool call that requires
+  confirmation" and ended the non-interactive session with exit 0 (run
+  aa9331fa, devin/swe-2-high, 2026-09-15, failed `no_report` after a `write`
+  to `/tmp/pr1678_sim.py`). The lane worktree path reaches the hook through a
+  new `worktree` key in `devin-command-policy.json`.
+- An `exec` command with a leading `git -C <lane-worktree>` now matches the
+  canonical grants as the bare git command, so
+  `git -C <worktree> log --oneline -5` passes `Bash(git log *)` (observed
+  blocked in the same run). Any other `-C` target must still match a rule
+  literally, and deny rules match through the stripped prefix.
+
 ## 0.4.10 - 2026-09-14
 
 - Devin's PreToolUse policy hook now grants an argument-free command under its

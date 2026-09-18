@@ -18,6 +18,11 @@ loading.
   force-push, write protected or shared branches, or mutate IAM, credentials,
   cloud infrastructure, production data, or application configuration.
 - A dedicated Git worktree is edit isolation, not an operating-system sandbox.
+- Scratch files (throwaway scripts, notes, intermediate output) go only under
+  `.side-lane-scratch/` at the lane worktree root, which is git-excluded.
+  Never write anywhere outside the lane worktree (for example `/tmp`): the
+  host may refuse the write, and a refused call can end a non-interactive session
+  with no result.
 - Personal host memory, user-global instruction files, and hooks are not shared
   lane memory and must not be assumed to exist.
 

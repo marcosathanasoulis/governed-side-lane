@@ -118,8 +118,109 @@ class DevinAdapterTests(unittest.TestCase):
         self.assertNotIn("Exec(git push * --force)", config["permissions"]["deny"])
         self.assertEqual(config["hooks"]["PreToolUse"][0], inherited_hook)
         policy_hook = config["hooks"]["PreToolUse"][1]
-        self.assertEqual(policy_hook["matcher"], "^exec$")
+        self.assertEqual(policy_hook["matcher"], "^(exec|write|edit|str_replace)$")
         self.assertEqual(policy_hook["hooks"][0]["command"], "python policy.py rules.json")
+
+    def test_runtime_config_grants_dash_c_spelling_of_allowed_git_commands(self) -> None:
+        config = devin._runtime_config("swe-2-medium", ("shell",), worktree=Path("/lane"))
+        allow = config["permissions"]["allow"]
+        self.assertIn("Exec(git status)", allow)
+        self.assertIn("Exec(git -C /lane status)", allow)
+        self.assertIn("Exec(git -C . status)", allow)
+        self.assertIn("Exec(git -C /lane commit)", allow)
+        self.assertNotIn("Exec(git -C /lane)", allow)
+        self.assertNotIn("Exec(git -C .)", allow)
+        self.assertNotIn("Exec(git)", allow)
+        self.assertFalse(any("*" in rule for rule in allow if rule.startswith("Exec(")))
+        # Every `-C` grant sits after every canonical git grant in list order.
+        canonical = [index for index, rule in enumerate(allow)
+                     if rule.startswith("Exec(git ") and not rule.startswith("Exec(git -C ")]
+        dash_c = [index for index, rule in enumerate(allow) if rule.startswith("Exec(git -C ")]
+        self.assertTrue(canonical and dash_c)
+        self.assertLess(max(canonical), min(dash_c))
+
+    def test_runtime_config_dash_c_grant_quotes_a_worktree_path_with_spaces(self) -> None:
+        # Devin matches grants against the command as spelled; a path that
+        # needs quoting must appear in the grant exactly as the model must
+        # type it, and a plain path stays unquoted.
+        config = devin._runtime_config("swe-2-medium", ("shell",),
+                                       worktree=Path("/tmp/my lanes/lane"))
+        allow = config["permissions"]["allow"]
+        self.assertIn("Exec(git -C '/tmp/my lanes/lane' status)", allow)
+        self.assertNotIn("Exec(git -C /tmp/my lanes/lane status)", allow)
+        plain = devin._runtime_config("swe-2-medium", ("shell",), worktree=Path("/lane"))
+        self.assertIn("Exec(git -C /lane status)", plain["permissions"]["allow"])
+
+    def test_runtime_config_without_worktree_has_no_dash_c_grants(self) -> None:
+        config = devin._runtime_config("swe-2-medium", ("shell",))
+        self.assertFalse(any("-C" in rule for rule in config["permissions"]["allow"]))
+
+    def test_runtime_config_dash_c_never_touches_deny(self) -> None:
+        config = devin._runtime_config("swe-2-medium", ("git-push",), worktree=Path("/lane"))
+        self.assertIn("Exec(git push --force)", config["permissions"]["deny"])
+        self.assertFalse(any("-C" in rule for rule in config["permissions"]["deny"]))
+
+    def test_launch_policy_rules_carry_the_lane_worktree(self) -> None:
+        model = "swe-2-medium"
+        provider, route = self.config(model)
+        process = mock.Mock(pid=41, returncode=0)
+        captured: dict = {}
+        def popen(command, **_kwargs):
+            config = json.loads(Path(command[command.index("--config") + 1]).read_text())
+            captured["config"] = config
+            hook = next(entry for entry in config["hooks"]["PreToolUse"]
+                        if "devin_command_policy" in entry["hooks"][0]["command"])
+            captured["rules_path"] = hook["hooks"][0]["command"].split()[-1]
+            Path(command[command.index("--export") + 1]).write_text(
+                json.dumps({"steps": [{"model_name": model}]}))
+            process.communicate.return_value = ("done", "")
+            return process
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lane = self.repo(root, "lane")
+            devin.launch(executable="devin", repo=self.repo(root, "repo"),
+                worktree=lane, provider="devin", model=model,
+                provider_config=provider, model_config=route, prompt="Implement it",
+                popen=popen, capabilities=("shell",), user_config_path=root / "missing.json")
+            rules = json.loads(Path(captured["rules_path"]).read_text())
+        self.assertEqual(rules["worktree"], str(lane.resolve()))
+        self.assertTrue(all(isinstance(rule, str) for rule in rules["allowed"]))
+        self.assertIn(f"Exec(git -C {lane.resolve()} status)",
+                      captured["config"]["permissions"]["allow"])
+
+    def test_launch_installs_write_containment_hook_with_no_command_capabilities(self) -> None:
+        # A capability-free execute lane (no shell/workspace-write/git-push)
+        # still uses Devin's write/edit/str_replace tools, so the containment
+        # hook must be installed even though the Bash allowlist is empty.
+        model = "swe-2-medium"
+        provider, route = self.config(model)
+        process = mock.Mock(pid=41, returncode=0)
+        captured: dict = {}
+        def popen(command, **_kwargs):
+            config = json.loads(Path(command[command.index("--config") + 1]).read_text())
+            hook = next(entry for entry in config["hooks"]["PreToolUse"]
+                        if "devin_command_policy" in entry["hooks"][0]["command"])
+            captured["rules_path"] = hook["hooks"][0]["command"].split()[-1]
+            Path(command[command.index("--export") + 1]).write_text(
+                json.dumps({"steps": [{"model_name": model}]}))
+            process.communicate.return_value = ("done", "")
+            return process
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lane = self.repo(root, "lane")
+            devin.launch(executable="devin", repo=self.repo(root, "repo"),
+                worktree=lane, provider="devin", model=model,
+                provider_config=provider, model_config=route, prompt="Implement it",
+                popen=popen, capabilities=(), user_config_path=root / "missing.json")
+            rules = json.loads(Path(captured["rules_path"]).read_text())
+        self.assertEqual(rules["worktree"], str(lane.resolve()))
+        self.assertEqual(rules["allowed"], [])
+        # An outside write is still blocked by the installed hook.
+        from side_lane import devin_command_policy as policy
+        decision = policy.evaluate_event(
+            {"tool_name": "write", "tool_input": {"file_path": "/tmp/outside.py"}},
+            rules["allowed"], rules["denied"], worktree=rules["worktree"])
+        self.assertEqual(decision["decision"], "block")
 
     def test_billable_is_explicit_and_passed_through(self) -> None:
         model = "swe-2-medium"

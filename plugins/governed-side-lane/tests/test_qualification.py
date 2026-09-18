@@ -40,6 +40,38 @@ class QualificationTests(unittest.TestCase):
             self.assertEqual(kwargs['env']['ANTHROPIC_AUTH_TOKEN'],'fake-secret')
             self.assertFalse(result['activated'])
 
+    @mock.patch('side_lane.qualification.check_auth_overrides')
+    def test_anthropic_first_party_route_qualifies_with_x_api_key(self, check):
+        with tempfile.TemporaryDirectory() as d:
+            repo=Path(d)/'repo';lane=Path(d)/'lane'
+            for p in (repo,lane): p.mkdir();(p/'.git').write_text('fixture')
+            model='claude-sonnet-5';endpoint='https://api.anthropic.com'
+            probe=dict(provider='anthropic',requested_model=model,resolved_model=model,
+                       endpoint=endpoint,http_status=200,ready=True)
+            runner=mock.Mock(return_value=subprocess.CompletedProcess([],0,'{"result":"ok"}',''))
+            result=qualify_claude(executable='claude',repo=repo,worktree=lane,provider='anthropic',
+                model=model,endpoint=endpoint,secret='fake-secret',transport_probe=probe,
+                prompt='fixture',approved=True,runner=runner)
+            env=runner.call_args.kwargs['env']
+            self.assertEqual(env['ANTHROPIC_API_KEY'],'fake-secret')
+            self.assertNotIn('ANTHROPIC_AUTH_TOKEN',env)
+            self.assertEqual(result['provider'],'anthropic')
+            self.assertFalse(result['activated'])
+
+    def test_provider_outside_the_harness_map_is_still_rejected(self):
+        runner=mock.Mock()
+        with tempfile.TemporaryDirectory() as d:
+            repo=Path(d)/'repo';lane=Path(d)/'lane'
+            for p in (repo,lane): p.mkdir()
+            model='claude-sonnet-5';endpoint='https://example.invalid/anthropic'
+            probe=dict(provider='unlisted',requested_model=model,resolved_model=model,
+                       endpoint=endpoint,http_status=200,ready=True)
+            with self.assertRaisesRegex(ValueError,'not supported'):
+                qualify_claude(executable='claude',repo=repo,worktree=lane,provider='unlisted',
+                    model=model,endpoint=endpoint,secret='fake-secret',transport_probe=probe,
+                    prompt='fixture',approved=True,runner=runner)
+            runner.assert_not_called()
+
 class LifecycleTests(unittest.TestCase):
     @mock.patch('side_lane.qualification.os.killpg')
     @mock.patch('side_lane.qualification.subprocess.Popen')

@@ -339,6 +339,32 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(cards["openai-chatgpt-workspace-credits-2026-08-29"]["models"]["gpt-5.6-sol"]["output_per_million"], 500)
         self.assertEqual(cards["anthropic-api-list-price-proxy-2026-08-29"]["applicability"], "comparison-proxy-not-native-oauth-spend")
 
+    def test_api_key_rate_cards_and_external_billable_cost_models_are_exact(self) -> None:
+        catalog = routing.load_catalog()
+        cards = catalog["rate_cards"]
+        self.assertEqual(cards["openai-api-list-price-usd-2026-09-18"]["models"], {
+            "gpt-5.6-luna": {"input_per_million": 0.20, "output_per_million": 1.20},
+            "gpt-5.6-terra": {"input_per_million": 2.00, "output_per_million": 12.00},
+            "gpt-5.6-sol": {"input_per_million": 4.00, "output_per_million": 20.00},
+            "gpt-6-astra": {"input_per_million": 10.00, "output_per_million": 50.00},
+            "gpt-5.5": {"input_per_million": 5.00, "output_per_million": 30.00},
+            "gpt-5.5-pro": {"input_per_million": 30.00, "output_per_million": 180.00},
+            "gpt-5.3-codex": {"input_per_million": 1.75, "output_per_million": 14.00},
+        })
+        self.assertEqual(cards["anthropic-api-list-price-usd-2026-09-18"]["models"], {
+            "claude-opus-5": {"input_per_million": 5, "output_per_million": 25},
+            "claude-fable-5-1": {"input_per_million": 10, "output_per_million": 50},
+            "claude-sonnet-5": {"input_per_million": 2, "output_per_million": 10},
+            "claude-haiku-4-5": {"input_per_million": 1, "output_per_million": 5},
+        })
+        for item in catalog["routes"]:
+            if item["provider"] not in ("openai-api-key", "anthropic"):
+                continue
+            cost_model = item["cost_model"]
+            self.assertEqual(cost_model["basis"], "external-billable", item["model"])
+            card = cards[cost_model["source"].removeprefix("rate_cards.")]
+            self.assertIn(item["model"], card["models"], item["model"])
+
     def test_catalog_path_environment_override_uses_private_evidence_registry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "private-catalog.json"

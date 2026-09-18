@@ -80,6 +80,66 @@
           "output_per_million": 50
         }
       }
+    },
+    "openai-api-list-price-usd-2026-09-18": {
+      "unit": "api-list-price-usd",
+      "applicability": "provider-key-metered-spend",
+      "verified_on": "2026-09-18",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "models": {
+        "gpt-5.6-luna": {
+          "input_per_million": 0.2,
+          "output_per_million": 1.2
+        },
+        "gpt-5.6-terra": {
+          "input_per_million": 2,
+          "output_per_million": 12
+        },
+        "gpt-5.6-sol": {
+          "input_per_million": 4,
+          "output_per_million": 20
+        },
+        "gpt-6-astra": {
+          "input_per_million": 10,
+          "output_per_million": 50
+        },
+        "gpt-5.5": {
+          "input_per_million": 5,
+          "output_per_million": 30
+        },
+        "gpt-5.5-pro": {
+          "input_per_million": 30,
+          "output_per_million": 180
+        },
+        "gpt-5.3-codex": {
+          "input_per_million": 1.75,
+          "output_per_million": 14
+        }
+      }
+    },
+    "anthropic-api-list-price-usd-2026-09-18": {
+      "unit": "api-list-price-usd",
+      "applicability": "provider-key-metered-spend",
+      "verified_on": "2026-09-18",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "models": {
+        "claude-opus-5": {
+          "input_per_million": 5,
+          "output_per_million": 25
+        },
+        "claude-fable-5-1": {
+          "input_per_million": 10,
+          "output_per_million": 50
+        },
+        "claude-sonnet-5": {
+          "input_per_million": 2,
+          "output_per_million": 10
+        },
+        "claude-haiku-4-5": {
+          "input_per_million": 1,
+          "output_per_million": 5
+        }
+      }
     }
   },
   "metadata_sources": [
@@ -376,6 +436,248 @@
         "basis": "prepaid-flat-rate",
         "verified_on": "2026-08-29",
         "source": "user-declared subscription terms; exact model route remains unverified"
+      },
+      "execution_location": "local-user-workspace"
+    },
+    {
+      "id": "codex-execute-api-key-gpt-5-6-luna",
+      "provider": "openai-api-key",
+      "gateway": "codex-api-key",
+      "auth_method": "provider-key",
+      "billable": true,
+      "explicit_only": true,
+      "model_vendor": "openai",
+      "model": "gpt-5.6-luna",
+      "host": "codex",
+      "mode": "execute",
+      "state": "discoverable",
+      "execution_allowlisted": true,
+      "allowlist_ref": "config/models.json#providers.openai-api-key.routes.execute.codex",
+      "protocol": "native-codex",
+      "cost_model": {
+        "basis": "external-billable",
+        "verified_on": "2026-09-18",
+        "source": "rate_cards.openai-api-list-price-usd-2026-09-18"
+      },
+      "execution_location": "local-user-workspace"
+    },
+    {
+      "id": "codex-execute-api-key-gpt-5-6-terra",
+      "provider": "openai-api-key",
+      "gateway": "codex-api-key",
+      "auth_method": "provider-key",
+      "billable": true,
+      "explicit_only": true,
+      "model_vendor": "openai",
+      "model": "gpt-5.6-terra",
+      "host": "codex",
+      "mode": "execute",
+      "state": "discoverable",
+      "execution_allowlisted": true,
+      "allowlist_ref": "config/models.json#providers.openai-api-key.routes.execute.codex",
+      "protocol": "native-codex",
+      "cost_model": {
+        "basis": "external-billable",
+        "verified_on": "2026-09-18",
+        "source": "rate_cards.openai-api-list-price-usd-2026-09-18"
+      },
+      "execution_location": "local-user-workspace"
+    },
+    {
+      "id": "codex-execute-api-key-gpt-5-6-sol",
+      "provider": "openai-api-key",
+      "gateway": "codex-api-key",
+      "auth_method": "provider-key",
+      "billable": true,
+      "explicit_only": true,
+      "model_vendor": "openai",
+      "model": "gpt-5.6-sol",
+      "host": "codex",
+      "mode": "execute",
+      "state": "discoverable",
+      "execution_allowlisted": true,
+      "allowlist_ref": "config/models.json#providers.openai-api-key.routes.execute.codex",
+      "protocol": "native-codex",
+      "cost_model": {
+        "basis": "external-billable",
+        "verified_on": "2026-09-18",
+        "source": "rate_cards.openai-api-list-price-usd-2026-09-18"
+      },
+      "execution_location": "local-user-workspace"
+    },
+    {
+      "id": "codex-execute-api-key-gpt-6-astra",
+      "provider": "openai-api-key",
+      "gateway": "codex-api-key",
+      "auth_method": "provider-key",
+      "billable": true,
+      "explicit_only": true,
+      "model_vendor": "openai",
+      "model": "gpt-6-astra",
+      "host": "codex",
+      "mode": "execute",
+      "state": "discoverable",
+      "execution_allowlisted": true,
+      "allowlist_ref": "config/models.json#providers.openai-api-key.routes.execute.codex",
+      "protocol": "native-codex",
+      "cost_model": {
+        "basis": "external-billable",
+        "verified_on": "2026-09-18",
+        "source": "rate_cards.openai-api-list-price-usd-2026-09-18"
+      },
+      "execution_location": "local-user-workspace"
+    },
+    {
+      "id": "codex-execute-api-key-gpt-5-5",
+      "provider": "openai-api-key",
+      "gateway": "codex-api-key",
+      "auth_method": "provider-key",
+      "billable": true,
+      "explicit_only": true,
+      "model_vendor": "openai",
+      "model": "gpt-5.5",
+      "host": "codex",
+      "mode": "execute",
+      "state": "discoverable",
+      "execution_allowlisted": true,
+      "allowlist_ref": "config/models.json#providers.openai-api-key.routes.execute.codex",
+      "protocol": "native-codex",
+      "cost_model": {
+        "basis": "external-billable",
+        "verified_on": "2026-09-18",
+        "source": "rate_cards.openai-api-list-price-usd-2026-09-18"
+      },
+      "execution_location": "local-user-workspace"
+    },
+    {
+      "id": "codex-execute-api-key-gpt-5-5-pro",
+      "provider": "openai-api-key",
+      "gateway": "codex-api-key",
+      "auth_method": "provider-key",
+      "billable": true,
+      "explicit_only": true,
+      "model_vendor": "openai",
+      "model": "gpt-5.5-pro",
+      "host": "codex",
+      "mode": "execute",
+      "state": "discoverable",
+      "execution_allowlisted": true,
+      "allowlist_ref": "config/models.json#providers.openai-api-key.routes.execute.codex",
+      "protocol": "native-codex",
+      "cost_model": {
+        "basis": "external-billable",
+        "verified_on": "2026-09-18",
+        "source": "rate_cards.openai-api-list-price-usd-2026-09-18"
+      },
+      "execution_location": "local-user-workspace"
+    },
+    {
+      "id": "codex-execute-api-key-gpt-5-3-codex",
+      "provider": "openai-api-key",
+      "gateway": "codex-api-key",
+      "auth_method": "provider-key",
+      "billable": true,
+      "explicit_only": true,
+      "model_vendor": "openai",
+      "model": "gpt-5.3-codex",
+      "host": "codex",
+      "mode": "execute",
+      "state": "discoverable",
+      "execution_allowlisted": true,
+      "allowlist_ref": "config/models.json#providers.openai-api-key.routes.execute.codex",
+      "protocol": "native-codex",
+      "cost_model": {
+        "basis": "external-billable",
+        "verified_on": "2026-09-18",
+        "source": "rate_cards.openai-api-list-price-usd-2026-09-18"
+      },
+      "execution_location": "local-user-workspace"
+    },
+    {
+      "id": "claude-execute-direct-anthropic-opus-5",
+      "provider": "anthropic",
+      "gateway": "direct-anthropic",
+      "auth_method": "provider-key",
+      "billable": true,
+      "explicit_only": true,
+      "model_vendor": "claude",
+      "model": "claude-opus-5",
+      "host": "claude",
+      "mode": "execute",
+      "state": "discoverable",
+      "execution_allowlisted": true,
+      "allowlist_ref": "config/models.json#providers.anthropic.routes.execute.claude",
+      "protocol": "anthropic-compatible",
+      "cost_model": {
+        "basis": "external-billable",
+        "verified_on": "2026-09-18",
+        "source": "rate_cards.anthropic-api-list-price-usd-2026-09-18"
+      },
+      "execution_location": "local-user-workspace"
+    },
+    {
+      "id": "claude-execute-direct-anthropic-fable-5-1",
+      "provider": "anthropic",
+      "gateway": "direct-anthropic",
+      "auth_method": "provider-key",
+      "billable": true,
+      "explicit_only": true,
+      "model_vendor": "claude",
+      "model": "claude-fable-5-1",
+      "host": "claude",
+      "mode": "execute",
+      "state": "discoverable",
+      "execution_allowlisted": true,
+      "allowlist_ref": "config/models.json#providers.anthropic.routes.execute.claude",
+      "protocol": "anthropic-compatible",
+      "cost_model": {
+        "basis": "external-billable",
+        "verified_on": "2026-09-18",
+        "source": "rate_cards.anthropic-api-list-price-usd-2026-09-18"
+      },
+      "execution_location": "local-user-workspace"
+    },
+    {
+      "id": "claude-execute-direct-anthropic-sonnet-5",
+      "provider": "anthropic",
+      "gateway": "direct-anthropic",
+      "auth_method": "provider-key",
+      "billable": true,
+      "explicit_only": true,
+      "model_vendor": "claude",
+      "model": "claude-sonnet-5",
+      "host": "claude",
+      "mode": "execute",
+      "state": "discoverable",
+      "execution_allowlisted": true,
+      "allowlist_ref": "config/models.json#providers.anthropic.routes.execute.claude",
+      "protocol": "anthropic-compatible",
+      "cost_model": {
+        "basis": "external-billable",
+        "verified_on": "2026-09-18",
+        "source": "rate_cards.anthropic-api-list-price-usd-2026-09-18"
+      },
+      "execution_location": "local-user-workspace"
+    },
+    {
+      "id": "claude-execute-direct-anthropic-haiku-4-5",
+      "provider": "anthropic",
+      "gateway": "direct-anthropic",
+      "auth_method": "provider-key",
+      "billable": true,
+      "explicit_only": true,
+      "model_vendor": "claude",
+      "model": "claude-haiku-4-5",
+      "host": "claude",
+      "mode": "execute",
+      "state": "discoverable",
+      "execution_allowlisted": true,
+      "allowlist_ref": "config/models.json#providers.anthropic.routes.execute.claude",
+      "protocol": "anthropic-compatible",
+      "cost_model": {
+        "basis": "external-billable",
+        "verified_on": "2026-09-18",
+        "source": "rate_cards.anthropic-api-list-price-usd-2026-09-18"
       },
       "execution_location": "local-user-workspace"
     }

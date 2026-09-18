@@ -46,3 +46,27 @@ kept out of `git status` by an entry in `.git/info/exclude`. Repositories that
 forbid nested checkouts pass `--worktree-root ../lanes` (relative to the
 repository root) or set `SIDE_LANE_WORKTREE_ROOT`; other in-repository
 locations are refused.
+
+## Scratch files and the Devin policy hook
+
+Every lane worktree is prepared with a `.side-lane-scratch/` directory at its
+root for throwaway scripts, notes, and intermediate output. The directory is
+git-excluded (through the same shared `.git/info/exclude`, so `git status` and
+`git add -A` never see it) and is not removed per-run: review lanes are
+disposed with their whole worktree, and an execute lane's worktree — scratch
+included — stays put for the coordinator's review. Lane runs never write
+scratch files anywhere outside the lane worktree.
+
+Native Devin execute lanes run a CLI PreToolUse policy hook that blocks
+Devin's own `write`, `edit`, and `str_replace` file tools from writing outside
+the lane worktree, and pattern-checks `exec` commands against the canonical
+`Bash(...)` grants (a leading `git -C <lane-worktree> ...` is matched as the
+bare git command, so `git -C <worktree> log --oneline -5` passes
+`Bash(git log *)`; any other `-C` target must match a rule literally). As with
+any allowlisted-command check, an interpreter the hook lets `exec` run (a
+shell, an interpreter invoked directly, etc.) can still write anywhere the
+user's own account can reach — the hook does not sandbox what an allowed
+command does once it runs. A hook block lets the model continue; without it
+the write would reach Devin's `accept-edits` confirmation, which ends a
+non-interactive session outright. The lane worktree path travels to the
+hook in the per-run `devin-command-policy.json` rules file.

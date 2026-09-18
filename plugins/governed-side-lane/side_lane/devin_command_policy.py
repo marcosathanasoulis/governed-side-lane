@@ -5,8 +5,25 @@ from __future__ import annotations
 from fnmatch import fnmatchcase
 import json
 from pathlib import Path
+import shlex
 import sys
 from typing import Sequence
+
+
+EXEC_TOOL_NAME = "exec"
+# Devin's documented file-mutating tools: the permissions reference names the
+# "file edits via the `edit`/`write` tools", and str_replace is the
+# str_replace-style edit variant some CLI builds expose. All three take the
+# target path as their primary tool-input key.
+FILE_MUTATING_TOOL_NAMES = ("write", "edit", "str_replace")
+COVERED_TOOL_NAMES = (EXEC_TOOL_NAME, *FILE_MUTATING_TOOL_NAMES)
+WRITE_TARGET_KEYS = ("file_path", "path", "file")
+
+
+def policy_hook_matcher() -> str:
+    """Regex routing every covered tool to this policy in the hook config."""
+
+    return "^(" + "|".join(COVERED_TOOL_NAMES) + ")$"
 
 
 def bash_rule_pattern(rule: str) -> str | None:
@@ -125,12 +142,69 @@ def matching_rule(command: object, rules: Sequence[str], *, anywhere: bool = Fal
     return None
 
 
-def evaluate_event(payload: object, allowed: Sequence[str],
-                   denied: Sequence[str]) -> dict[str, str] | None:
-    """Evaluate Devin's documented PreToolUse event shape."""
+def _is_shell_expandable(token: str) -> bool:
+    """Report whether a raw token could expand differently once a shell runs it.
 
-    if not isinstance(payload, dict) or payload.get("tool_name") != "exec":
-        return {"decision": "block", "reason": "invalid exec hook event"}
+    ``shlex.split``/``Path`` treat ``$HOME``, ``` `pwd` ```, ``$(pwd)`` and a
+    leading ``~`` as literal characters, so a target built from one of these
+    resolves as an in-worktree-looking path here while the real shell (or a
+    provider that re-parses the string) expands it to something else, e.g.
+    the user's home directory. Any such token must be rejected before path
+    resolution rather than trusted.
+    """
+
+    if not token:
+        return False
+    if token[0] == "~":
+        return True
+    return "$" in token or "`" in token
+
+
+def _inside_lane_worktree(target: str, resolved_worktree: Path) -> bool:
+    """Resolve a tool target and report whether it lands inside the worktree.
+
+    Relative paths are anchored to the lane worktree (the CLI's working
+    directory). ``resolve()`` follows symlinks, so a link planted inside the
+    worktree that points elsewhere resolves to its destination and fails.
+    A token containing shell-expansion syntax (``$HOME``, ``` `pwd` ``,
+    ``$(pwd)``, a leading ``~``) is treated as outside the worktree: it must
+    fail closed here since a real shell would expand it after this check.
+    """
+
+    if _is_shell_expandable(target):
+        return False
+    candidate = Path(target).expanduser()
+    if not candidate.is_absolute():
+        candidate = resolved_worktree / candidate
+    resolved = candidate.resolve()
+    return resolved == resolved_worktree or resolved.is_relative_to(resolved_worktree)
+
+
+def _strip_lane_worktree_dash_c(command: str, worktree: str | None) -> str:
+    """Drop a leading ``git -C <lane-worktree>`` for canonical rule matching.
+
+    Providers naturally qualify git with the lane path
+    (``git -C /lane log --oneline -5``), which must match the canonical
+    ``Bash(git log *)`` grants. Only a ``-C`` target that resolves inside the
+    lane worktree is stripped; any other ``-C`` target keeps the prefix and is
+    evaluated as-is, so it passes only under a literally matching rule.
+    """
+
+    if not worktree:
+        return command
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return command
+    if len(tokens) < 4 or tokens[0] != "git" or tokens[1] != "-C":
+        return command
+    if not _inside_lane_worktree(tokens[2], Path(worktree).resolve()):
+        return command
+    return " ".join([tokens[0], *tokens[3:]])
+
+
+def _evaluate_exec(payload: dict, allowed: Sequence[str], denied: Sequence[str],
+                   worktree: str | None) -> dict[str, str] | None:
     tool_input = payload.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str):
@@ -138,12 +212,54 @@ def evaluate_event(payload: object, allowed: Sequence[str],
     unsafe_reason = unsafe_shell_syntax(command)
     if unsafe_reason is not None:
         return {"decision": "block", "reason": f"{unsafe_reason} is not permitted"}
-    matched = matching_rule(command, denied, anywhere=True)
+    granted_command = _strip_lane_worktree_dash_c(command, worktree)
+    matched = matching_rule(granted_command, denied, anywhere=True)
     if matched is not None:
         return {"decision": "block", "reason": f"command denied by canonical rule: {matched}"}
-    if matching_rule(command, allowed) is not None:
+    if matching_rule(granted_command, allowed) is not None:
         return None
     return {"decision": "block", "reason": "command is outside canonical capability grants"}
+
+
+def _evaluate_write(payload: dict, worktree: str | None) -> dict[str, str] | None:
+    tool_name = payload["tool_name"]
+    tool_input = payload.get("tool_input")
+    target: str | None = None
+    if isinstance(tool_input, dict):
+        for key in WRITE_TARGET_KEYS:
+            value = tool_input.get(key)
+            if isinstance(value, str) and value.strip():
+                target = value
+                break
+    if target is None:
+        return {"decision": "block",
+                "reason": f"{tool_name} target path missing from tool input"}
+    if not worktree:
+        return {"decision": "block",
+                "reason": f"{tool_name} requires the lane worktree in the policy rules"}
+    if not _inside_lane_worktree(target, Path(worktree).resolve()):
+        return {"decision": "block", "reason":
+                "writes outside the lane worktree are not permitted; "
+                f"use {worktree}/.side-lane-scratch/ for scratch files"}
+    return None
+
+
+def evaluate_event(payload: object, allowed: Sequence[str],
+                   denied: Sequence[str], *, worktree: str | None = None
+                   ) -> dict[str, str] | None:
+    """Evaluate Devin's documented PreToolUse event shape.
+
+    ``exec`` commands are matched against the canonical Bash rules; every
+    covered file-mutating tool is contained to ``worktree``. A hook block
+    returns the decision to the model, which can continue; anything the hook
+    does not cover stays blocked as an invalid event.
+    """
+
+    if not isinstance(payload, dict) or payload.get("tool_name") not in COVERED_TOOL_NAMES:
+        return {"decision": "block", "reason": "invalid hook event"}
+    if payload["tool_name"] == EXEC_TOOL_NAME:
+        return _evaluate_exec(payload, allowed, denied, worktree)
+    return _evaluate_write(payload, worktree)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -162,7 +278,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if (not isinstance(allowed, list) or not all(isinstance(rule, str) for rule in allowed)
             or not isinstance(denied, list) or not all(isinstance(rule, str) for rule in denied)):
         return 2
-    decision = evaluate_event(payload, allowed, denied)
+    worktree = rules.get("worktree")
+    if worktree is not None and (not isinstance(worktree, str) or not worktree.strip()):
+        return 2
+    decision = evaluate_event(payload, allowed, denied, worktree=worktree)
     if decision is not None:
         print(json.dumps(decision))
         return 2

@@ -20,13 +20,19 @@ from side_lane.redaction import redact_provider_secret
 MAX_PROMPT_CHARS = 100_000
 NATIVE_PROVIDER = "claude"
 NATIVE_GATEWAY = "native-claude"
-BILLABLE_PROVIDERS = frozenset({"glm", "openrouter", "deepseek", "kimi", "minimax"})
+BILLABLE_PROVIDERS = frozenset({"glm", "openrouter", "deepseek", "kimi", "minimax", "anthropic"})
+# Claude Code sends ANTHROPIC_API_KEY as `X-Api-Key` (first-party key auth)
+# and ANTHROPIC_AUTH_TOKEN as `Authorization: Bearer` (proxy/OAuth-style); a
+# first-party Anthropic key must use the former.
+# Source: code.claude.com/docs/en/env-vars.
+FIRST_PARTY_API_KEY_GATEWAY = "direct-anthropic"
 # Qualification harness membership only. Runtime endpoint acceptance is driven
 # by the configured per-model identity and qualification contract below.
 FIRST_WAVE_ENDPOINTS = {
     "deepseek": "https://api.deepseek.com/anthropic",
     "kimi": "https://api.kimi.com/coding/",
     "minimax": "https://api.minimax.io/anthropic",
+    "anthropic": "https://api.anthropic.com",
 }
 
 SCRUB_EXACT = frozenset(
@@ -246,7 +252,7 @@ def build_transport_environment(
     mode: str,
     secret: str | None = None,
 ) -> dict[str, str]:
-    runtime_model, _gateway, auth_method, billable = _route_metadata(
+    runtime_model, gateway, auth_method, billable = _route_metadata(
         provider, model, provider_config, model_config, mode
     )
     child = scrub_environment(inherited)
@@ -256,7 +262,12 @@ def build_transport_environment(
         return child
     if not billable or not isinstance(secret, str) or not secret:
         raise ClaudeAdapterError("explicit billable route credential is absent")
-    child["ANTHROPIC_AUTH_TOKEN"] = secret
+    if gateway == FIRST_PARTY_API_KEY_GATEWAY:
+        # First-party Anthropic key auth travels as X-Api-Key, not a bearer
+        # token; see the comment on FIRST_PARTY_API_KEY_GATEWAY above.
+        child["ANTHROPIC_API_KEY"] = secret
+    else:
+        child["ANTHROPIC_AUTH_TOKEN"] = secret
     child["ANTHROPIC_BASE_URL"] = _nonempty(provider_config.get("base_url"), "base_url").rstrip("/")
     for name in EXACT_MODEL_ENV_NAMES:
         child[name] = runtime_model

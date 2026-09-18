@@ -57,8 +57,13 @@ lane result. Every other inherited provider credential is still scrubbed, the ke
 redacted from captured output, review mode refuses the route (review forbids
 secret access), and `--approve-billable-route` is required for each run exactly
 as for other provider-key routes. Native `gateway=native-codex` OAuth routes are
-unchanged and never fall back to this route. The shipped catalog does not
-enable it; a downstream overlay adds the provider block.
+unchanged and never fall back to this route. The shipped `config/models.json`
+now includes the `openai-api-key` provider block (explicit-only, billable)
+directly, so no downstream overlay is needed to enable it. The sibling
+`anthropic` provider block is the first-party Anthropic API-key route: its key
+is exported as `ANTHROPIC_API_KEY` (`X-Api-Key`), it is execute-only with the
+same `--approve-billable-route` requirement, and it stays unlaunchable until
+each model's qualification is recorded.
 
 ## Why it is useful
 

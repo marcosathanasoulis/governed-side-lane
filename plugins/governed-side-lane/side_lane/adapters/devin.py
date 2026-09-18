@@ -263,7 +263,7 @@ def _merge_policy_hook(inherited: object, command: str | None) -> object:
     if not isinstance(existing, list):
         raise DevinAdapterError("Devin user config hooks.PreToolUse must be an array")
     hooks["PreToolUse"] = [*existing, {
-        "matcher": "^exec$",
+        "matcher": devin_command_policy.policy_hook_matcher(),
         "hooks": [{"type": "command", "command": command, "timeout": 5}],
     }]
     return hooks
@@ -271,7 +271,16 @@ def _merge_policy_hook(inherited: object, command: str | None) -> object:
 
 def _runtime_config(model: str, capabilities: Sequence[str],
                     user_config: Mapping[str, Any] | None = None,
-                    policy_hook_command: str | None = None) -> dict[str, Any]:
+                    policy_hook_command: str | None = None,
+                    worktree: Path | None = None) -> dict[str, Any]:
+    """Build Devin's runtime config from the canonical tool policy.
+
+    Devin matches `Exec(<prefix>)` grants as whole-word command prefixes, so a
+    command spelled `git -C <lane worktree> status` does not match
+    `Exec(git status)` and would prompt, ending a non-interactive run; the
+    `-C` spellings are therefore granted explicitly, while the PreToolUse hook
+    still normalises `-C` before matching deny rules.
+    """
     allow = ["Read(**)", "Write(**)"]
     policy = tool_policy()
     for capability in sorted(set(capabilities) & {"shell", "workspace-write", "git-push"}):
@@ -286,6 +295,27 @@ def _runtime_config(model: str, capabilities: Sequence[str],
         for rule in policy.allowed.get(capability, ()):
             if rule.startswith("mcp__") and rule not in allow:
                 allow.append(rule)
+    # Every `-C` grant follows every canonical grant, and only subcommand-
+    # naming rules qualify: `Exec(git)` never yields `Exec(git -C ...)` without
+    # a subcommand. Deny rules are never widened — the hook strips `-C` before
+    # matching them with `anywhere=True`, so denies already cover the spelling.
+    dash_c_grants: list[str] = []
+    if worktree is not None:
+        # Devin matches the grant against the command as spelled, so a path
+        # that needs shell quoting must appear quoted in the grant exactly as
+        # the model must type it (`git -C '/tmp/my lanes/lane' status`).
+        # shlex.quote leaves a plain path untouched.
+        quoted_worktree = shlex.quote(str(worktree))
+        for rule in allow:
+            if not (rule.startswith("Exec(git ") and rule.endswith(")")):
+                continue
+            rest = rule[len("Exec(git "):-1].strip()
+            if not rest:
+                continue
+            for grant in (f"Exec(git -C {quoted_worktree} {rest})", f"Exec(git -C . {rest})"):
+                if grant not in allow and grant not in dash_c_grants:
+                    dash_c_grants.append(grant)
+        allow.extend(dash_c_grants)
     inherited = user_config or {}
     config = {key: inherited[key] for key in SAFE_USER_CONFIG_KEYS if key in inherited}
     merged_hooks = _merge_policy_hook(inherited.get("hooks"), policy_hook_command)
@@ -370,14 +400,23 @@ def launch(
         for rule in tool_policy().denied.get(capability, ()) if rule.startswith("Bash(")
     ))
     policy_hook_command = None
-    if allowed_rules:
+    if mode == "execute":
+        # Install the hook whenever an execute lane has a worktree to contain,
+        # even with an empty Bash allowlist (e.g. no shell/workspace-write/
+        # git-push capability requested): file-tool writes still need
+        # containment, and `_evaluate_exec` fails closed on an empty
+        # `allowed` list rather than silently permitting commands.
         policy_path = run_dir / "devin-command-policy.json"
-        policy_path.write_text(json.dumps({"allowed": allowed_rules, "denied": denied_rules},
+        # The worktree anchors write containment and `git -C` normalisation in
+        # the hook; without it the hook fails closed on every file-mutating tool.
+        policy_path.write_text(json.dumps({"allowed": allowed_rules, "denied": denied_rules,
+                                           "worktree": str(worktree_path)},
                                           indent=2) + "\n", encoding="utf-8")
         policy_hook_command = shlex.join((sys.executable, str(Path(devin_command_policy.__file__)),
                                           str(policy_path)))
     config_path.write_text(json.dumps(_runtime_config(
-        model, capabilities, _load_user_config(user_config_path), policy_hook_command
+        model, capabilities, _load_user_config(user_config_path), policy_hook_command,
+        worktree=worktree_path
     ), indent=2) + "\n",
                            encoding="utf-8")
     command = build_command(executable=executable, repo=repo_path, worktree=worktree_path,

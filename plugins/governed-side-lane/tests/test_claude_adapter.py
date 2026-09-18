@@ -312,6 +312,76 @@ class ClaudeAdapterTests(unittest.TestCase):
 
 
 
+class FirstPartyAnthropicKeyRouteTests(unittest.TestCase):
+    provider = {"gateway": "direct-anthropic", "auth_method": "provider-key", "billable": True,
+                "base_url": "https://api.anthropic.com"}
+
+    def config(self, model: str, **overrides: object) -> dict:
+        values = {"runtime_model": model, "protocol": "anthropic-compatible",
+                  "identity_contract": {"requested_model": model, "resolved_model": model,
+                                        "settings_precedence": "verified"}}
+        values.update(overrides)
+        return values
+
+    def test_direct_anthropic_exports_api_key_without_bearer_token(self) -> None:
+        child = claude.build_transport_environment(
+            {"PATH": "/bin", "ANTHROPIC_API_KEY": "inherited", "ANTHROPIC_AUTH_TOKEN": "inherited"},
+            provider="anthropic", model="claude-opus-5", provider_config=self.provider,
+            model_config=self.config("claude-opus-5"), mode="execute", secret="selected")
+        self.assertEqual(child["ANTHROPIC_API_KEY"], "selected")
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", child)
+        self.assertEqual(child["ANTHROPIC_BASE_URL"], "https://api.anthropic.com")
+        for name in claude.EXACT_MODEL_ENV_NAMES:
+            self.assertEqual(child[name], "claude-opus-5")
+
+    def test_other_direct_gateways_keep_bearer_token_and_no_api_key(self) -> None:
+        glm = {"gateway": "direct-zai", "auth_method": "provider-key", "billable": True,
+               "base_url": "https://api.z.ai/api/anthropic"}
+        child = claude.build_transport_environment({}, provider="glm", model="glm-5.3",
+            provider_config=glm, model_config={"runtime_model": "glm-5.3", "protocol": "anthropic-compatible"},
+            mode="execute", secret="selected")
+        self.assertEqual(child["ANTHROPIC_AUTH_TOKEN"], "selected")
+        self.assertNotIn("ANTHROPIC_API_KEY", child)
+        kimi = {"gateway": "direct-kimi", "auth_method": "provider-key", "billable": True,
+                "base_url": "https://api.moonshot.cn/anthropic"}
+        child = claude.build_transport_environment({}, provider="kimi", model="kimi-k2.7-code",
+            provider_config=kimi, model_config=self.config("kimi-k2.7-code"),
+            mode="execute", secret="selected")
+        self.assertEqual(child["ANTHROPIC_AUTH_TOKEN"], "selected")
+        self.assertNotIn("ANTHROPIC_API_KEY", child)
+
+    def test_direct_anthropic_without_identity_contract_is_rejected(self) -> None:
+        with self.assertRaisesRegex(claude.ClaudeAdapterError, "identity contract"):
+            claude.build_transport_environment({}, provider="anthropic", model="claude-opus-5",
+                provider_config=self.provider,
+                model_config={"runtime_model": "claude-opus-5", "protocol": "anthropic-compatible"},
+                mode="execute", secret="selected")
+
+    def test_direct_anthropic_review_mode_is_rejected(self) -> None:
+        with self.assertRaisesRegex(claude.ClaudeAdapterError, "unqualified for review"):
+            claude.build_transport_environment({}, provider="anthropic", model="claude-opus-5",
+                provider_config=self.provider,
+                model_config=self.config("claude-opus-5", protocol="anthropic-compatible-readonly"),
+                mode="review", secret="selected")
+
+    def test_launch_redacts_the_secret_exported_as_api_key(self) -> None:
+        model = "claude-opus-5"
+        config = self.config(model, qualification={"verified": True, "verified_on": "2026-09-17",
+                                                   "source": "mocked transport report"})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = root / "repo", root / "lane"
+            for path in (repo, lane):
+                path.mkdir()
+                (path / ".git").write_text("gitdir: /tmp/example\n", encoding="utf-8")
+            result = claude.launch(executable="claude", repo=repo, worktree=lane,
+                provider="anthropic", model=model, provider_config=self.provider,
+                model_config=config, prompt="task", secret="selected",
+                runner=mock.Mock(return_value=subprocess.CompletedProcess(
+                    [], 7, "leak selected", "leak selected")))
+        self.assertNotIn("selected", result.stdout + result.stderr)
+
+
 class AllowedToolsTests(unittest.TestCase):
     native = {"gateway": "native-claude", "auth_method": "oauth", "billable": False}
 
