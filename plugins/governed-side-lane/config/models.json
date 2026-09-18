@@ -100,7 +100,12 @@
               },
               "claude-fable-5-1": {
                 "identity_contract": {"requested_model": "claude-fable-5-1", "resolved_model": "claude-fable-5-1", "settings_precedence": "verified"},
-                "qualification": {"verified": false, "kind": "transport-and-cloud-worker-adapter", "source": "developers.anthropic.com model list 2026-06", "pending": "retry qualify_claude with Claude Code >= 2.1.251 (2.1.247 returned 400 unsupported model on 2026-09-18)"},
+                "qualification": {
+                  "verified": true,
+                  "verified_on": "2026-09-18",
+                  "kind": "transport-and-local-adapter",
+                  "source": ".scratch/provider-trials/anthropic-qualification-2026-09-18.json"
+                },
                 "execution_location": "local-user-workspace",
                 "timeout_seconds": 2700
               },

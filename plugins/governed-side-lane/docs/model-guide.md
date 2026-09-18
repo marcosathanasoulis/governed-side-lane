@@ -119,12 +119,12 @@ bearer token) and the OpenAI `codex-api-key` gateway (`gpt-5.6-luna`,
 governed run. On the Anthropic route a developer-authorized
 `side_lane.qualification.qualify_claude` trial — secret drawn from the
 route's configured credential service and passed via the environment, never
-on argv — qualified `claude-opus-5`, `claude-sonnet-5`, and
-`claude-haiku-4-5-20251001` on 2026-09-18 (the `X-Api-Key` path confirmed
-end to end, mirroring how the deepseek and kimi routes were qualified on
-2026-09-11), so those three are launchable; `claude-fable-5-1` stays
-unverified until a retry with Claude Code >= 2.1.251 (2.1.247 returned 400
-unsupported model on 2026-09-18). The alias `claude-haiku-4-5` is rejected
+on argv — qualified all four models on 2026-09-18: `claude-opus-5`,
+`claude-sonnet-5`, `claude-haiku-4-5-20251001` and `claude-fable-5-1` (the
+`X-Api-Key` path confirmed end to end, mirroring how the deepseek and kimi
+routes were qualified on 2026-09-11). Fable needed Claude Code >= 2.1.251 on
+the trial host: 2.1.247 returned 400 unsupported model, 2.1.276 passed.
+The alias `claude-haiku-4-5` is rejected
 because the API resolves it to the dated id, breaking the
 requested/resolved identity contract; the exact dated id is the one to name.
 

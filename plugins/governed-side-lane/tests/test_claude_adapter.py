@@ -382,9 +382,9 @@ class FirstPartyAnthropicKeyRouteTests(unittest.TestCase):
                     [], 7, "leak selected", "leak selected")))
         self.assertNotIn("selected", result.stdout + result.stderr)
 
-    def test_shipped_qualification_gate_admits_verified_models_and_rejects_fable(self) -> None:
+    def test_shipped_qualification_gate_admits_verified_models_and_rejects_unverified(self) -> None:
         models = json.loads((Path(__file__).parents[1] / "config/models.json").read_text(encoding="utf-8"))
-        for model in ("claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"):
+        for model in ("claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001", "claude-fable-5-1"):
             with self.subTest(model=model):
                 provider_config, model_config = cli.select_route(
                     models, "claude", "execute", "anthropic", model)
@@ -408,14 +408,17 @@ class FirstPartyAnthropicKeyRouteTests(unittest.TestCase):
                 runner.assert_called_once()
                 self.assertEqual(result.returncode, 0)
                 self.assertEqual(result.resolved_model, model)
+        # The gate itself: the same shipped route with its qualification flipped
+        # back to unverified must be refused before any process starts.
         provider_config, model_config = cli.select_route(
             models, "claude", "execute", "anthropic", "claude-fable-5-1")
+        unverified = {**model_config, "qualification": {**model_config["qualification"], "verified": False}}
         runner = mock.Mock()
         with self.assertRaisesRegex(claude.ClaudeAdapterError,
                                     "external route lacks verified model transport qualification"):
             claude.launch(executable="claude", repo="/not-used", worktree="/not-used",
                 provider="anthropic", model="claude-fable-5-1", provider_config=provider_config,
-                model_config=model_config, prompt="task", secret="selected", runner=runner)
+                model_config=unverified, prompt="task", secret="selected", runner=runner)
         runner.assert_not_called()
 
 

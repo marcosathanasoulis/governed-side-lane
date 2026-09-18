@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.16 - 2026-09-18
+
+- `claude-fable-5-1` on the `anthropic` direct route is now `qualification.verified: true`:
+  the 2026-09-18 `qualify_claude` trial passed once the trial host ran Claude Code
+  2.1.276 (the earlier 2.1.247 attempt returned `400 ... 2.1.251 or newer is required`).
+  Exact model attested, X-Api-Key export confirmed. All four Anthropic API-key models
+  are now launchable.
+
 ## 0.4.15 - 2026-09-18
 
 - The `direct-anthropic` execute route now uses haiku's exact dated id
