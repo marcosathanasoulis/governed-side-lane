@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.30 - 2026-09-20
+
+- Fix the report Stop hook's bounded stdin read: the real Stop payload carries
+  a potentially large `last_assistant_message`, so the 8 KiB bound truncated
+  well-formed events mid-object and the repair round was silently skipped.
+  The bound is now 1 MiB, read in a loop until EOF or the bound, and input
+  beyond the bound is detected explicitly (limit + 1) and rejected with a
+  fixed diagnostic instead of parsing a truncated prefix.
+- Correct the documented stdin contract in the helper docstring and README:
+  the event payload also carries fields such as `session_id`,
+  `transcript_path`, `permission_mode`, and `last_assistant_message`; the hook
+  reads a bounded amount and ignores unknown fields.
+- Add regression coverage for ~20 KB realistic payloads, the exact-bound and
+  one-byte-over boundary, multibyte payloads measured in bytes not characters,
+  and no payload text ever reaching stdout or stderr.
+
 ## 0.4.29 - 2026-09-20
 
 - Gate strict per-run MCP integration on explicit host-native `strict_mcp_support`:

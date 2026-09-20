@@ -101,7 +101,11 @@ command hook — this package's own stdlib helper, invoked through the run's
 process-local `--settings` payload with a shell-quoted absolute path — reads
 the fixed report path from its own argument, never from hook stdin, and blocks
 one stop when the report is missing, empty, whitespace-only, a symlink, or not
-a regular file. The block hands the same model loop a reason to write the real
+a regular file. The hook's stdin event JSON carries `hook_event_name`, `cwd`,
+and `stop_hook_active` alongside fields such as `session_id`,
+`transcript_path`, `permission_mode`, and `last_assistant_message`, the last
+of which can be large; the hook reads a bounded amount and ignores unknown
+fields. The block hands the same model loop a reason to write the real
 report; `stop_hook_active` then lets the next stop through, bounding the
 feedback to one round. No saved settings file, user hook, permission, or
 inherited hook is written, replaced, or disabled. After the worker exits, the

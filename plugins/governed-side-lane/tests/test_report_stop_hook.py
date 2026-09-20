@@ -41,6 +41,40 @@ class ReportStopHookTests(unittest.TestCase):
             "stop_hook_active": stop_hook_active,
         })
 
+    def _realistic_stop_payload(
+        self,
+        message_size: int = 0,
+        stop_hook_active: bool = False,
+        cwd: str = "/tmp",
+        *,
+        fill: str = "x",
+        marker: str = "",
+    ) -> str:
+        """A Stop event shaped like the real payload, with a sized message.
+
+        Claude Code sends more than the three fields the hook reads; the
+        ``last_assistant_message`` in particular can be large, which is why
+        the stdin read is bounded.
+        """
+        return json.dumps(
+            {
+                "hook_event_name": "Stop",
+                "session_id": "9f8e7d6c-5b4a-3210-fedc-ba9876543210",
+                "transcript_path": "/tmp/transcript.jsonl",
+                "cwd": cwd,
+                "permission_mode": "acceptEdits",
+                "stop_hook_active": stop_hook_active,
+                "last_assistant_message": marker + fill * message_size,
+            },
+            ensure_ascii=False,
+        )
+
+    def _realistic_stop_payload_of_size(self, size: int, *, marker: str = "") -> str:
+        """A realistic Stop payload serialized to exactly ``size`` UTF-8 bytes."""
+        base = len(self._realistic_stop_payload(marker=marker).encode("utf-8"))
+        # ASCII fill contributes exactly one serialized byte per character.
+        return self._realistic_stop_payload(message_size=size - base, marker=marker)
+
     def _decision(self, stdout: bytes) -> dict:
         text = stdout.decode("utf-8").strip()
         self.assertTrue(text, "expected one decision object on stdout")
@@ -186,9 +220,93 @@ class ReportStopHookTests(unittest.TestCase):
     def test_oversized_stdin_is_bounded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / REPORT_NAME
-            result = self._run({"report_path": str(path)}, "x" * 1_000_000)
+            # Well past the bound: a very large non-JSON input must not hang
+            # and must produce no decision.
+            result = self._run({"report_path": str(path)}, "x" * 2_000_000)
         self.assertEqual(result.returncode, 0)
         self._no_decision(result)
+
+    # --- the real payload is large; the bound is in bytes ---------------------
+
+    def test_large_realistic_payload_blocks_when_report_missing(self) -> None:
+        marker = "SENTINEL-9c3f1"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / REPORT_NAME
+            payload = self._realistic_stop_payload(message_size=20_000, marker=marker)
+            self.assertGreater(len(payload.encode("utf-8")), 8_192)
+            result = self._run({"report_path": str(path)}, payload)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self._decision(result.stdout).get("decision"), "block")
+        self.assertNotIn(marker.encode("utf-8"), result.stdout + result.stderr)
+
+    def test_large_realistic_payload_allows_stop_with_valid_report(self) -> None:
+        marker = "SENTINEL-9c3f1"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / REPORT_NAME
+            path.write_text("Findings:\n- observed A\n", encoding="utf-8")
+            payload = self._realistic_stop_payload(message_size=20_000, marker=marker)
+            result = self._run({"report_path": str(path)}, payload)
+        self.assertEqual(result.returncode, 0)
+        self._no_decision(result)
+        self.assertEqual(result.stderr, b"")
+
+    def test_large_payload_stop_hook_active_still_allows_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / REPORT_NAME
+            payload = self._realistic_stop_payload(message_size=20_000, stop_hook_active=True)
+            result = self._run({"report_path": str(path)}, payload)
+        self.assertEqual(result.returncode, 0)
+        self._no_decision(result)
+
+    def test_stdin_at_exact_bound_still_decides(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / REPORT_NAME
+            payload = self._realistic_stop_payload_of_size(report_stop_hook.MAX_STDIN_BYTES)
+            self.assertEqual(len(payload.encode("utf-8")), report_stop_hook.MAX_STDIN_BYTES)
+            result = self._run({"report_path": str(path)}, payload)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self._decision(result.stdout).get("decision"), "block")
+
+    def test_stdin_one_byte_over_bound_is_rejected(self) -> None:
+        marker = "SENTINEL-9c3f1"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / REPORT_NAME
+            payload = self._realistic_stop_payload_of_size(
+                report_stop_hook.MAX_STDIN_BYTES + 1, marker=marker)
+            self.assertEqual(
+                len(payload.encode("utf-8")), report_stop_hook.MAX_STDIN_BYTES + 1)
+            result = self._run({"report_path": str(path)}, payload)
+        self.assertEqual(result.returncode, 0)
+        self._no_decision(result)
+        self.assertIn(b"stdin exceeds the size bound", result.stderr)
+        self.assertNotIn(marker.encode("utf-8"), result.stdout + result.stderr)
+
+    def test_multibyte_payload_under_byte_bound_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / REPORT_NAME
+            # "é" is one character but two UTF-8 bytes: the serialized payload
+            # stays comfortably under the bound and must decide normally.
+            payload = self._realistic_stop_payload(message_size=10_000, fill="é")
+            self.assertLess(len(payload.encode("utf-8")), report_stop_hook.MAX_STDIN_BYTES)
+            result = self._run({"report_path": str(path)}, payload)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self._decision(result.stdout).get("decision"), "block")
+
+    def test_multibyte_payload_over_byte_bound_is_rejected(self) -> None:
+        marker = "SENTINEL-9c3f1"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / REPORT_NAME
+            # 600_000 characters is under the bound counted in characters but
+            # over it counted in bytes; the bound must be measured in bytes.
+            payload = self._realistic_stop_payload(
+                message_size=600_000, fill="é", marker=marker)
+            self.assertGreater(
+                len(payload.encode("utf-8")), report_stop_hook.MAX_STDIN_BYTES)
+            result = self._run({"report_path": str(path)}, payload)
+        self.assertEqual(result.returncode, 0)
+        self._no_decision(result)
+        self.assertIn(b"stdin exceeds the size bound", result.stderr)
+        self.assertNotIn(marker.encode("utf-8"), result.stdout + result.stderr)
 
     def test_missing_or_malformed_settings_fails_open(self) -> None:
         helper = Path(report_stop_hook.__file__).resolve()

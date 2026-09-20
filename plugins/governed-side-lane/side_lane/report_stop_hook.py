@@ -1,10 +1,13 @@
 """Deterministic, stdlib-only Claude Code Stop hook for report validation.
 
 The hook is invoked by Claude Code's `hooks.Stop` per-launch settings. It
-receives one JSON object on stdin with `hook_event_name`, `cwd`, and
-`stop_hook_active`, and the validated report path through its own
-`--settings` JSON argument. It is read-only and never writes the worktree
-or disables inherited hooks or permissions.
+receives one JSON object on stdin carrying `hook_event_name`, `cwd`, and
+`stop_hook_active` alongside fields such as `session_id`, `transcript_path`,
+`permission_mode`, and `last_assistant_message` — the last of which can be
+large, so stdin is read under a fixed byte bound and unknown fields are
+ignored. The validated report path arrives through its own `--settings`
+JSON argument. It is read-only and never writes the worktree or disables
+inherited hooks or permissions.
 """
 
 from __future__ import annotations
@@ -15,7 +18,9 @@ import stat
 import sys
 from pathlib import Path
 
-MAX_STDIN_BYTES = 8192
+# Bounded stdin window: the Stop payload's last_assistant_message can be
+# large, so the bound must fit a real event while still capping the read.
+MAX_STDIN_BYTES = 1024 * 1024
 # Bounded content window: the helper never reads more than this from a report,
 # so an arbitrarily large file costs a fixed read, and a whitespace-only file
 # of any size is still rejected.
@@ -121,12 +126,31 @@ def _block_decision() -> str:
     })
 
 
-def _read_stdin(stdin: object) -> bytes:
-    """Read a bounded, non-blocking amount from stdin."""
+def _read_stdin(stdin: object) -> bytes | str | None:
+    """Read a bounded amount from stdin.
+
+    Loops until EOF or ``MAX_STDIN_BYTES + 1`` bytes have arrived: one
+    ``read(n)`` on a pipe may return fewer than ``n`` bytes without reaching
+    EOF. Returns ``None`` when more than ``MAX_STDIN_BYTES`` bytes are
+    present, so the caller rejects the input outright instead of parsing a
+    silently truncated prefix.
+    """
+    chunks = []
+    remaining = MAX_STDIN_BYTES + 1
     try:
-        return stdin.read(MAX_STDIN_BYTES)
+        while remaining > 0:
+            chunk = stdin.read(remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
     except OSError:
         return b""
+    if remaining == 0:
+        return None
+    if chunks and isinstance(chunks[0], str):
+        return "".join(chunks)
+    return b"".join(chunks)
 
 
 def decide(argv: list[str], stdin: object, stdout: object, stderr: object) -> int:
@@ -145,6 +169,9 @@ def decide(argv: list[str], stdin: object, stdout: object, stderr: object) -> in
         return 0
 
     raw = _read_stdin(stdin)
+    if raw is None:
+        _diagnostic("report stop hook: stdin exceeds the size bound")
+        return 0
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
