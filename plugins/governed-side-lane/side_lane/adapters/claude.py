@@ -41,6 +41,10 @@ BILLABLE_PROVIDERS = frozenset({"glm", "openrouter", "deepseek", "kimi", "minima
 ROUTED_PROVIDERS = frozenset({"omniroute"})
 ROUTED_GATEWAYS = {"omniroute": "omniroute-router"}
 ROUTING_POLICY_CONTRACT_KEY = "routing_policy_contract"
+# The installed Superpowers plugin adds a coordinator-intake SessionStart
+# hook. Routed workers already receive the pinned lane skills and role prompt,
+# so only this exact plugin is disabled in the disposable routed settings.
+ROUTED_COORDINATOR_PLUGIN = "superpowers@claude-plugins-official"
 # Claude Code sends ANTHROPIC_API_KEY as `X-Api-Key` (first-party key auth)
 # and ANTHROPIC_AUTH_TOKEN as `Authorization: Bearer` (proxy/OAuth-style); a
 # first-party Anthropic key must use the former.
@@ -189,6 +193,21 @@ needs authentication, stop and report that exact state — do not substitute
 another tool, widen the grant, or claim a read happened. The capability is
 not task authority: read only the channel or thread the coordinator's task
 names.
+"""
+EXECUTE_ROLE_INSTRUCTION = """\
+
+
+# Delegated execute role
+
+This is an already-approved delegated execute task. Begin the assigned scope
+immediately: do not invoke coordinator planning or routing approval gates, ask
+whether to proceed, or stop at a design for the same approved scope. First read
+the assigned repository rules and verify the real worktree and source paths,
+then carry out the requested implementation or report. Useful research and
+design analysis remain allowed when they serve the task. Honor explicit
+review-only, report-only, read-only, and no-commit instructions, and stop and
+report genuine authority, credential, or scope blockers rather than requesting
+approval.
 """
 
 
@@ -435,6 +454,31 @@ def _merge_read_pagination_hook(settings: object, command: str) -> dict[str, Any
     return merged
 
 
+def _disable_routed_coordinator_plugin(settings: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy settings while disabling only the known routed-worker plugin.
+
+    The source user settings remain byte-for-byte untouched. An absent plugin
+    map stays absent, and an existing false entry stays false; malformed maps
+    fail closed instead of silently changing the worker's hook set.
+    """
+
+    merged = dict(settings)
+    if "enabledPlugins" not in merged:
+        return merged
+    enabled_plugins = merged["enabledPlugins"]
+    if not isinstance(enabled_plugins, Mapping):
+        raise ClaudeAdapterError("Claude settings enabledPlugins must be a JSON object")
+    copied_plugins = dict(enabled_plugins)
+    for plugin, enabled in copied_plugins.items():
+        if not isinstance(plugin, str) or type(enabled) is not bool:
+            raise ClaudeAdapterError(
+                "Claude settings enabledPlugins entries must map plugin names to booleans")
+    if ROUTED_COORDINATOR_PLUGIN in copied_plugins:
+        copied_plugins[ROUTED_COORDINATOR_PLUGIN] = False
+    merged["enabledPlugins"] = copied_plugins
+    return merged
+
+
 def _prepare_routed_claude_home(
     source_home: Path, repo_path: Path, worktree_path: Path
 ) -> Path:
@@ -485,9 +529,10 @@ def _prepare_routed_claude_home(
                     source_settings.read_text(encoding="utf-8"))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise ClaudeAdapterError("Claude settings are invalid JSON") from exc
+        merged_settings = _merge_read_pagination_hook(inherited_settings, hook_command)
         _write_private_json(
             runtime_home / "settings.json",
-            _merge_read_pagination_hook(inherited_settings, hook_command),
+            _disable_routed_coordinator_plugin(merged_settings),
         )
         source_local = source_claude_dir / "settings.local.json"
         if source_local.is_file():
@@ -947,6 +992,10 @@ def build_command(
     note = scope_note(read_roots)
     if note:
         system_prompt += f"\n\n{note}"
+    if mode == "execute":
+        # Keep this last so host-native skill text or scope notes cannot turn an
+        # already authorized execute lane back into a planning/approval dialogue.
+        system_prompt += EXECUTE_ROLE_INSTRUCTION
     command.extend(("--append-system-prompt", system_prompt))
     return command
 

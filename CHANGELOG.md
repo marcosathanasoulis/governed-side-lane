@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.28 - 2026-09-20
+
+- Keep already-approved delegated execution instructions last after read-root
+  guidance so workers execute their assignment without restarting coordination.
+- Isolate routed workers from the known coordinator Superpowers plugin in
+  ephemeral settings, preserving other plugins, hooks, MCP, and authentication.
+  Native execution and review behavior remain unchanged.
+
 ## 0.4.27 - 2026-09-20
 
 - Add optional metadata-only `--measurement-file` for execute runs. The runner

@@ -75,6 +75,34 @@ class ClaudeAdapterTests(unittest.TestCase):
         self.assertIn("user,project,local", execute)
         self.assertIn("Injected canonical side-lane governance", execute[-1])
 
+    def test_execute_prompt_closes_planning_gate_without_overriding_blockers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            read_root = root / "shared-instructions"
+            read_root.mkdir()
+            execute = claude.build_command(
+                executable="claude", repo=repo, worktree=lane,
+                provider="claude", model="claude-sonnet-5", provider_config=self.native,
+                model_config={"runtime_model": "claude-sonnet-5", "protocol": "native-claude"},
+                prompt="implement the approved change",
+                read_roots=(read_root,),
+            )
+            review = claude.build_command(
+                executable="claude", repo=repo, worktree=lane,
+                provider="claude", model="claude-sonnet-5", provider_config=self.native,
+                model_config={"runtime_model": "claude-sonnet-5", "protocol": "native-claude-readonly"},
+                prompt="review the change", mode="review",
+            )
+
+        execute_prompt = execute[execute.index("--append-system-prompt") + 1]
+        review_prompt = review[review.index("--append-system-prompt") + 1]
+        self.assertIn("already-approved delegated execute task", execute_prompt)
+        self.assertIn("do not invoke coordinator planning or routing approval gates", execute_prompt)
+        self.assertIn("genuine authority, credential, or scope blockers", execute_prompt)
+        self.assertTrue(execute_prompt.endswith("approval.\n"))
+        self.assertNotIn("already-approved delegated execute task", review_prompt)
+
     def test_routed_execute_sets_supported_context_budget_controls(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -107,7 +135,13 @@ class ClaudeAdapterTests(unittest.TestCase):
             config_path.write_bytes(original)
             settings_dir = home / ".claude"
             settings_dir.mkdir()
-            settings = b'{"permissions":{"allow":["Bash(git status)"]}}\n'
+            settings = (
+                b'{"permissions":{"allow":["Bash(git status)"]},'
+                b'"enabledPlugins":{"superpowers@claude-plugins-official":true,'
+                b'"other@marketplace":true,"disabled@marketplace":false},'
+                b'"hooks":{"PostToolUse":[{"matcher":"Bash",'
+                b'"hooks":[{"type":"command","command":"keep-hook"}]}]}}\n'
+            )
             (settings_dir / "settings.json").write_bytes(settings)
             (settings_dir / "CLAUDE.md").write_text("global context", encoding="utf-8")
             (settings_dir / "skills").mkdir()
@@ -163,6 +197,15 @@ class ClaudeAdapterTests(unittest.TestCase):
             self.assertEqual(observed["config"]["projects"][str(lane.resolve())]["hasTrustDialogAccepted"], True)
             self.assertEqual(observed["settings"]["permissions"],
                              {"allow": ["Bash(git status)"]})
+            self.assertEqual(observed["settings"]["enabledPlugins"], {
+                "superpowers@claude-plugins-official": False,
+                "other@marketplace": True,
+                "disabled@marketplace": False,
+            })
+            self.assertEqual(observed["settings"]["hooks"]["PostToolUse"], [{
+                "matcher": "Bash",
+                "hooks": [{"type": "command", "command": "keep-hook"}],
+            }])
             entries = observed["settings"]["hooks"]["PreToolUse"]
             self.assertEqual(len(entries), 1)
             self.assertEqual(entries[0]["matcher"], "Read")
@@ -275,6 +318,15 @@ class ClaudeAdapterTests(unittest.TestCase):
                 ("settings_not_json",
                  '{"hooks": ',
                  "Claude settings are invalid JSON"),
+                ("enabled_plugins_not_a_mapping",
+                 '{"enabledPlugins":[]}',
+                 "Claude settings enabledPlugins must be a JSON object"),
+                ("enabled_plugins_null",
+                 '{"enabledPlugins":null}',
+                 "Claude settings enabledPlugins must be a JSON object"),
+                ("enabled_plugin_not_boolean",
+                 '{"enabledPlugins":{"superpowers@claude-plugins-official":"yes"}}',
+                 "Claude settings enabledPlugins entries must map plugin names to booleans"),
         ):
             with self.subTest(label), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -325,6 +377,7 @@ class ClaudeAdapterTests(unittest.TestCase):
                 secret="router-secret", runner=runner,
             )
             entry = observed["settings"]["hooks"]["PreToolUse"][0]["hooks"][0]
+            self.assertNotIn("enabledPlugins", observed["settings"])
             self.assertEqual(entry["type"], "command")
             self.assertEqual(entry["timeout"], 5)
             # An unresolved or relative module path would make the
