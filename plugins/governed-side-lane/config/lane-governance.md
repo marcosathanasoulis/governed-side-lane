@@ -25,6 +25,11 @@ loading.
   with no result.
 - Personal host memory, user-global instruction files, and hooks are not shared
   lane memory and must not be assumed to exist.
+- You are a delegated worker on an already-approved, bounded task. Never ask
+  "Prompt it?", invoke a coordinator planning or routing skill, or request
+  planning approval for the approved scope; start the approved task
+  immediately. Authority missing for something outside that scope is a
+  stop-and-report, not a new gate.
 
 ## Preapproved backup reassignment
 
@@ -75,6 +80,70 @@ backup is allowed, but no alternate GLM model is.
 - A workflow or messaging write is allowed only when the approved task names
   that exact update and recipient or object. Make only that update through the
   selected worker host's connector and report exactly what changed.
+- With the `slack-read` capability, only the Slack MCP server registered
+  exactly as `slack` may be called, and only through its read-only
+  `slack_read_thread` and `slack_read_channel` tools. Never send, edit,
+  search, upload, or change membership through Slack. The capability is not
+  task authority: act only on the channel or thread the coordinator names in
+  the task. Registration is presence evidence only — Slack authentication
+  and a live read remain unproven until the worker observes the exact granted
+  tool names; if the server exposes different tool names or needs
+  authentication, stop and report that state instead of widening the grant.
+  This same-user harness is not an argument-level sandbox.
+- With the `aws-read` capability, only the per-run MCP server registered
+  exactly as `aws` — delivered through the coordinator's validated
+  `--mcp-config` run file, whose bearer credential is referenced by env name,
+  never a value — may be called, and only through the exact tool allowlist
+  below. The server is a read-only remote bridge by design: anything mutating
+  is unavailable on it. Registration is presence evidence only — bridge
+  authentication and a live read remain unproven until the worker observes
+  the exact granted tool names; if the tools are absent, named differently,
+  or the server reports an authentication failure, stop and report that exact
+  state instead of substituting another tool or claiming a read happened.
+- With the `asana-read` capability, only the MCP server registered exactly
+  as `cm-services` may be called, and only through its read-only Asana
+  tools `asana_get_task`, `asana_get_project`, and
+  `asana_list_project_tasks` (exact tool IDs `mcp__cm-services__<name>`).
+  With the `drive-read` capability, that same server may be called only
+  through its read-only Drive tools `drive_file_info`, `drive_sheet_tabs`,
+  `drive_sheet_get`, and `drive_doc_get`. `cm-services` is a fixed local
+  stdio server the coordinator provisions into the worker host's
+  user-global MCP config under the worker's own account before the run;
+  the account contract is that the coordinator provisions the same account
+  (Asana or Drive respectively) and its internal immutable grants BEFORE
+  the server lists tools — credentials alone never authorize a call, and
+  the capability is not task authority: act only on the objects the
+  coordinator's task names. The two capabilities share one server but
+  grant disjoint tool sets: granting one never grants the other, no
+  server-wide wildcard exists, and existing API writes are unaffected —
+  these capabilities are read-only and any future write capability is a
+  separate grant. Registration is presence evidence only — service
+  authentication and a live read remain unproven until the worker observes
+  the exact granted tool names; if the tools are absent, named
+  differently, or the server reports an authentication failure, stop and
+  report that exact state instead of substituting another tool or widening
+  the grant.
+  With the `gcloud-read` capability, that same server may be called only
+  through its read-only GCP operations `gcp_logs`, `gcp_run_services`,
+  `gcp_run_jobs`, `gcp_scheduler_jobs`, `gcp_functions`, `gcp_billing_mtd`,
+  `gcp_billing_daily`, and `gcp_menu`. With the `database-read` capability,
+  it may be called only through `postgres_select`; this is the distinct
+  read-only Postgres account and proxy. With the `algolia-read` capability,
+  only the MCP server registered exactly as `cm-services` may be called, and
+  only through its read-only Algolia tool `algolia_get_settings` (exact tool
+  ID `mcp__cm-services__algolia_get_settings`). With the `contentful-read`
+  capability, that same server may be called only through its read-only
+  Contentful tools `contentful_get_entry` and `contentful_search_entries`
+  (exact tool IDs `mcp__cm-services__contentful_get_entry` and
+  `mcp__cm-services__contentful_search_entries`), mapped to the
+  `contentful-new-app` account. With the `contentful-master-read` capability,
+  that same server may be called only through its read-only Contentful master
+  tools `contentful_master_get_entry` and `contentful_master_search_entries`
+  (exact tool IDs `mcp__cm-services__contentful_master_get_entry` and
+  `mcp__cm-services__contentful_master_search_entries`), mapped to the
+  `contentful-master` account. These capabilities use the same fixed
+  `cm-services` registration and are admitted by registration/readiness
+  evidence, not by requiring local `gcloud` or `psql` executables.
 - Code-graph connectors are read-only. With the `gitnexus` capability, call
   `list_repos` first and report the indexed path, branch, and commit against
   the lane worktree HEAD; treat a mismatch as stale or partial coverage. Never
@@ -103,6 +172,26 @@ The controls are the injected rules above, the audited lane branch, and the
 coordinator's review of the resulting diff before anything is merged or
 pushed onward. Do not describe the allowlist as preventing those actions.
 
+MCP capability grants are exact per-tool IDs, never a server-wide wildcard.
+A capability whose server arrives per run (`aws-read`) names its exact server
+registration in the Execute-mode rules above, delivered through the
+coordinator's validated `--mcp-config` run file; a host-registered capability
+(`slack-read`, the graph and browser connectors) names its registration in the
+host's user or project MCP config instead, and the `asana-read`/`drive-read`
+capabilities name the fixed user-global `cm-services` registration the
+coordinator provisions into the worker host's controlled home.
+
+Per-run `--mcp-config` delivery rules live in
+`side_lane/mcp_run_config.py` (the single source): remote streamable-HTTP
+only, credentials referenced by env name only, plaintext HTTP only for the
+exact loopback literals, and the Codex host accepts only an exact
+`Authorization: Bearer ${ENV}` reference (any other scheme fails closed
+rather than being re-labelled). A declared server name that any host scope
+already registers aborts the run before any model starts — same-name merge
+precedence is not established, so an existing registration and its auth are
+never silently overwritten or shadowed — and only server NAMES are read
+from host registration files, never values.
+
 ### always
 
 - `Read`
@@ -121,6 +210,7 @@ pushed onward. Do not describe the allowlist as preventing those actions.
 - `Bash(yarn *)`
 - `Bash(uv *)`
 - `Bash(uvx *)`
+- `Bash(python *)`
 - `Bash(python3 *)`
 - `Bash(python3.11 *)`
 - `Bash(python3.12 *)`
@@ -137,6 +227,11 @@ pushed onward. Do not describe the allowlist as preventing those actions.
 - `Bash(git restore *)`
 - `Bash(git stash *)`
 - `Bash(git worktree list *)`
+- `Bash(git rev-parse HEAD)`
+- `Bash(git branch --show-current)`
+- `Bash(git branch -r)`
+- `Bash(git merge-base *)`
+- `Bash(git fetch origin *)`
 - `Bash(gh pr view *)`
 - `Bash(gh pr list *)`
 - `Bash(gh pr diff *)`
@@ -153,6 +248,7 @@ pushed onward. Do not describe the allowlist as preventing those actions.
 - `Bash(head *)`
 - `Bash(tail *)`
 - `Bash(grep *)`
+- `Bash(sort *)`
 - `Bash(find *)`
 - `Bash(sed *)`
 - `Bash(wc *)`
@@ -161,9 +257,16 @@ pushed onward. Do not describe the allowlist as preventing those actions.
 - `Bash(pwd)`
 - `Bash(which *)`
 - `Bash(env)`
-### playwright
+- `Bash(terraform fmt *)`
+- `Bash(terraform validate *)`
+- `Bash(terraform version)`
+
+### playwright, gitnexus, codegraph, slack-read, aws-read, asana-read, drive-read
 
 - `WaitForMcpServers`
+
+### playwright
+
 - `mcp__playwright__browser_navigate`
 - `mcp__playwright__browser_snapshot`
 - `mcp__playwright__browser_find`
@@ -215,6 +318,68 @@ pushed onward. Do not describe the allowlist as preventing those actions.
 - `mcp__gitnexus__shape_check`
 - `mcp__gitnexus__tool_map`
 - `mcp__gitnexus__trace`
+
+### slack-read
+
+- `mcp__slack__slack_read_thread`
+- `mcp__slack__slack_read_channel`
+
+### aws-read
+
+- `mcp__aws__aws___run_script`
+- `mcp__aws__aws___get_tasks`
+- `mcp__aws__aws___search_documentation`
+- `mcp__aws__aws___read_documentation`
+- `mcp__aws__aws___retrieve_skill`
+- `mcp__aws__aws___list_regions`
+- `mcp__aws__aws___get_regional_availability`
+
+### asana-read
+
+- `mcp__cm-services__asana_get_task`
+- `mcp__cm-services__asana_get_project`
+- `mcp__cm-services__asana_list_project_tasks`
+
+### drive-read
+
+- `mcp__cm-services__drive_file_info`
+- `mcp__cm-services__drive_sheet_tabs`
+- `mcp__cm-services__drive_sheet_get`
+- `mcp__cm-services__drive_doc_get`
+
+### gcloud-read
+
+- `WaitForMcpServers`
+- `mcp__cm-services__gcp_logs`
+- `mcp__cm-services__gcp_run_services`
+- `mcp__cm-services__gcp_run_jobs`
+- `mcp__cm-services__gcp_scheduler_jobs`
+- `mcp__cm-services__gcp_functions`
+- `mcp__cm-services__gcp_billing_mtd`
+- `mcp__cm-services__gcp_billing_daily`
+- `mcp__cm-services__gcp_menu`
+
+### database-read
+
+- `WaitForMcpServers`
+- `mcp__cm-services__postgres_select`
+
+### algolia-read
+
+- `WaitForMcpServers`
+- `mcp__cm-services__algolia_get_settings`
+
+### contentful-read
+
+- `WaitForMcpServers`
+- `mcp__cm-services__contentful_get_entry`
+- `mcp__cm-services__contentful_search_entries`
+
+### contentful-master-read
+
+- `WaitForMcpServers`
+- `mcp__cm-services__contentful_master_get_entry`
+- `mcp__cm-services__contentful_master_search_entries`
 
 ### codegraph
 

@@ -1,5 +1,163 @@
 # Changelog
 
+## 0.4.23 - 2026-09-19
+
+- Add the `asana-read` and `drive-read` execute capabilities for the fixed
+  local `cm-services` MCP server the coordinator provisions into the worker
+  host's user-global config (controlled HOME) under the worker's own account:
+  - Canonical governance grants exact per-tool IDs only —
+    `mcp__cm-services__asana_get_task`, `asana_get_project`,
+    `asana_list_project_tasks` under `asana-read` and
+    `mcp__cm-services__drive_file_info`, `drive_sheet_tabs`,
+    `drive_sheet_get`, `drive_doc_get` under `drive-read` — plus the shared
+    `WaitForMcpServers`. The two capabilities share one server but grant
+    disjoint tool sets: one grant never unlocks the other, and there is no
+    server-wide wildcard.
+  - The Claude adapter maps both capabilities to the server name
+    `cm-services`, treats it as a user-scope registration (no
+    `enabledMcpjsonServers` approval — that setting approves project
+    `.mcp.json` entries only), runs the pre-launch `mcp get` readiness probe
+    once per run even when both capabilities are granted, and emits a single
+    `cm-services` startup instruction telling the worker to wait for the
+    server and treat registration as presence evidence only.
+  - The Devin adapter admits both capabilities and translates their
+    canonical rules into exact `mcp__cm-services__<tool>` permission
+    entries; `check-capabilities` reports `cm-services` registration as
+    presence evidence only (exact name required, near-miss is
+    `name-mismatch`), with same-account provisioning, service
+    authentication, and a live read explicitly untested.
+  - Per-run `--mcp-config` delivery stays remote streamable-HTTP only:
+    `cm-services` is a user-global registration, so no per-run config may
+    declare it, and the `aws-read` narrowing is unchanged.
+
+## 0.4.22 - 2026-09-19
+
+- Review repairs to the per-run MCP delivery and lane governance:
+  - The Claude adapter now validates per-run credential env references against
+    the scrubbed child environment it actually builds (inside
+    `_launch_worker`), matching the Codex and Devin adapters. Previously it
+    checked the pre-scrub coordinator environment, so a referenced name the
+    scrub list removes would have passed validation and failed only at the
+    bridge after the model started.
+  - The Devin adapter rejects a tracked `.devin/mcp_config.local.json` before
+    merging, then excludes the untracked generated file through the
+    repository's worktree-safe `.git/info/exclude` mechanism BEFORE the file is
+    written. Thus a worker's mid-run `git add -A` cannot stage the generated
+    file (URL plus `${ENV}` reference, never a value); untracked preexisting
+    config still follows the additive merge/restore path.
+  - Lane governance Common rules now state explicitly that a worker is a
+    delegated worker on an already-approved, bounded task and must never ask
+    "Prompt it?", invoke a coordinator planning or routing skill, or request
+    planning approval for the approved scope — it starts the approved task
+    immediately and reports missing authority instead of adding a new gate.
+  - New regression coverage in `tests/test_mcp_run_config.py`,
+    `tests/test_devin_adapter.py`, and `tests/test_worktrees.py`.
+
+## 0.4.21 - 2026-09-19
+
+- Review repairs to the per-run `--mcp-config` delivery (0.4.20):
+  - Loopback for plaintext-HTTP run configs is now EXACT literal matching
+    (`127.0.0.1`, `localhost`, `::1`); a `localhost.<anything>` DNS name is a
+    public host, not loopback, and is rejected.
+  - The Codex delivery preserves the auth scheme exactly: only
+    `Authorization: Bearer ${ENV}` maps to `bearer_token_env_var`. A `Basic`
+    or scheme-less Authorization reference fails closed instead of being
+    silently re-labelled Bearer; `McpRunServer.bearer_env()` reports a Bearer
+    reference only.
+  - The Devin local-scope merge no longer crashes on a valid `{}` file and
+    preserves top-level metadata and existing servers while merging.
+  - Name-conflict fail-closed before launch on every host: a declared server
+    name that any host scope already registers (Claude user/project,
+    including a per-project entry for the lane worktree; Codex
+    `config.toml`; Devin user/project/local) aborts the run before any model
+    starts. Same-name merge precedence is not established for Claude's
+    `--mcp-config` or Codex's `-c mcp_servers.<name>.*` overrides, so an
+    existing registration and its auth are never silently overwritten or
+    shadowed; an unreadable registration file also fails closed. Only
+    server NAMES are read from those files, never values.
+  - Regression coverage added to the public package tests
+    (`tests/test_mcp_run_config.py`), which previously had no MCP run-config
+    tests.
+
+## 0.4.20 - 2026-09-19
+
+- Add execute-only `--mcp-config <path>`: per-run MCP server registration
+  delivered into the host session from a coordinator-supplied, fully
+  validated file (`side_lane.mcp_run_config`). Registration is remote
+  streamable-HTTP only, credentials are referenced by env name (never a
+  value — literal header credentials, stdio entries, and dirty URLs are
+  rejected), and every declared server must map from a granted capability
+  (`aws-read` registers the server named `aws`); no server-wide wildcard is
+  ever produced. The new `aws-read` capability grants exactly the seven
+  read-only tools of the AWS remote bridge allowlist.
+- Per-host delivery is additive and ephemeral: Claude loads an ephemeral
+  `--mcp-config` file written outside the lane worktree (no
+  `--strict-mcp-config`, so existing registrations survive); Codex receives
+  additive `-c mcp_servers.<name>.*` overrides (bearer by
+  `bearer_token_env_var`); Devin's git-ignored local-scope
+  `.devin/mcp_config.local.json` is merge-written into the lane worktree and
+  restored afterwards. Referenced env names must resolve in the worker child
+  environment or the run fails closed before launch. Review mode remains
+  strict no-MCP and rejects the flag. Host support was established per CLI:
+  Claude's `${ENV}` header expansion is live-verified against a local mock
+  server; Codex's override shape is CLI-accepted; Devin accepts the file
+  shape but its `${ENV}` header expansion is unverified — a Devin delivery
+  can fail visibly at the bridge and must be reported, never labeled
+  success. The audit records server names and the config path only.
+
+## 0.4.19 - 2026-09-19
+
+- Add an explicit routed-provider contract for router-selected upstream pools
+  (OmniRoute-style), distinct from the exact-model `identity_contract`.
+  Routed providers (`omniroute`, gateway `omniroute-router`) declare a
+  `routing_policy_contract` — requested selector, an explicit non-empty
+  `allowed_upstream_models` set, verified settings precedence. Exact routes
+  reject a routing policy contract and routed routes reject an
+  `identity_contract`; existing exact-route validation is unchanged. A routed
+  run's streamed attestation must be a non-empty set of actual upstream
+  models inside the declared pool (a selector-alias echo is ignored as
+  non-evidence); multiple in-pool models are legitimate worker-conversation
+  fallback, while missing, unknown, or out-of-pool attestation fails the run
+  closed as exit 65. Receipts record the attested upstream model set
+  (`attested_models`) and never promote a bare model id — which can collide
+  across upstream providers — to an upstream provider-identity claim. The
+  public package ships only a disabled illustrative example profile;
+  deployment-specific hostnames, credential services, and exact upstream ids
+  are private configuration. The qualification harness accepts routed
+  trials and reports attestation against the declared pool. Mocked
+  translation-boundary stream fixtures cover tool-call round trips; no
+  upstream runtime qualification is claimed.
+- Execute lanes on every host now receive a pinned worker skill bundle. A
+  stdlib-only `skill_bundle` module validates a hash-pinned manifest
+  (`skill-bundle/`, vendored Superpowers 6.4.1 under MIT with per-vendor
+  provenance) and materializes the five discipline skills into the lane
+  worktree's git-ignored scratch directory, appending a compact catalog with
+  absolute runtime paths to the worker's task context — at the shared launch
+  layer, so codex, claude, and devin lanes behave identically without touching
+  user homes, CODEX_HOME, or MCP configuration. Review lanes are unchanged.
+  Delivery is fail-closed (manifest, hash, reference, and symlink problems
+  abort the run before a worker starts) and is recorded as an additive
+  `skill_catalog` audit field. Catalog delivery is not a claim of host-native
+  skill discovery or live tool connectivity.
+
+## 0.4.18 - 2026-09-19
+
+- Add execute-only `--read-root` grants for external read-only directories.
+  Devin's file-tool default now reads only the lane worktree rather than `**`;
+  assignments reading other checkouts need explicit roots. Claude and Codex
+  retain their native host filesystem authority.
+- Add `slack-read` qualification and scoped Slack read-tool grants. Connector
+  registration is presence evidence, not proof of authentication or live access.
+- Enable granted project MCP servers for Claude workers and wait for their
+  startup before calling tools; review-mode MCP isolation stays unchanged.
+- Parse Devin compound shell commands against the configured permission rules
+  so permitted command sequences work while denied operations remain denied.
+
+- Update the Side Lane skill discovery trigger to assess optional model lanes at
+  the start of an implementation task, not only after an explicit delegation
+  request. Installation and route qualification remain optional; a missing
+  eligible route is a recorded exception, never silent coordinator execution.
+
 ## 0.4.17 - 2026-09-18
 
 - Permit a coordinator-visible reassignment to the one exact, preapproved

@@ -11,7 +11,7 @@ import re
 import signal
 import subprocess
 import threading
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 
 class WorktreeError(Exception):
@@ -87,6 +87,8 @@ SCRATCH_EXCLUDE_PATTERN = (
 LEGACY_SCRATCH_EXCLUDE_PATTERN = (
     f"{SCRATCH_DIR_NAME}/"  # unanchored; also hid nested dirs
 )
+DEVIN_LOCAL_MCP_EXCLUDE_PATTERN = "/.devin/mcp_config.local.json"
+DEVIN_LOCAL_MCP_RELATIVE_PATH = ".devin/mcp_config.local.json"
 
 
 def ensure_lane_exclusion(repo: Path, *, runner: Runner = subprocess.run) -> Path:
@@ -196,6 +198,72 @@ def ensure_scratch_exclusion(repo: Path, *, runner: Runner = subprocess.run) -> 
             f"cannot exclude scratch directory in {exclude}: {exc}"
         ) from exc
     return exclude
+
+
+def ensure_devin_local_mcp_exclusion(repo: Path, *, runner: Runner = subprocess.run) -> Path:
+    """Exclude the Devin per-run local MCP file from ``git status``/``git add -A``.
+
+    The Devin adapter materializes ``.devin/mcp_config.local.json`` inside the
+    lane worktree for the run's lifetime (restored or removed on exit). Without
+    this entry a worker's mid-run ``git add -A`` would commit the generated
+    file — URL plus ``${ENV}`` credential reference, never a value. The entry
+    is root-anchored and shared with linked worktrees through the common
+    ``.git/info/exclude``. Excludes never apply to tracked files, so the
+    adapter rejects a tracked local config before merge; an existing untracked
+    file's content is preserved by the merge/restore path. The entry only hides
+    the untracked file from status and add-globbing.
+    """
+
+    git_dir = Path(_git(repo, ["rev-parse", "--git-common-dir"], runner))
+    if not git_dir.is_absolute():
+        git_dir = repo / git_dir
+    exclude = git_dir / "info" / "exclude"
+    try:
+        existing = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+        if any(line.rstrip(" \t") == DEVIN_LOCAL_MCP_EXCLUDE_PATTERN
+               for line in existing.splitlines()):
+            return exclude
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        prefix = "" if not existing or existing.endswith("\n") else "\n"
+        with exclude.open("a", encoding="utf-8") as handle:
+            handle.write(f"{prefix}{DEVIN_LOCAL_MCP_EXCLUDE_PATTERN}\n")
+    except OSError as exc:
+        raise WorktreeError(
+            f"cannot exclude the Devin local MCP config in {exclude}: {exc}"
+        ) from exc
+    return exclude
+
+
+def ensure_devin_local_mcp_untracked(repo: Path, *, runner: Runner = subprocess.run) -> None:
+    """Fail closed before merging a generated MCP file into a tracked path.
+
+    ``.git/info/exclude`` protects untracked files only. A tracked local MCP
+    file would be modified by the additive merge and could be staged by a
+    worker before the post-run restore, so it cannot be used as the temporary
+    delivery target.
+    """
+
+    try:
+        result = runner(
+            ["git", "-C", str(repo), "ls-files", "--error-unmatch", "--",
+             DEVIN_LOCAL_MCP_RELATIVE_PATH],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise WorktreeError(f"could not inspect tracked Devin MCP config: {exc}") from exc
+    if result.returncode == 0 and result.stdout.strip():
+        raise WorktreeError(
+            f"cannot deliver per-run Devin MCP config because "
+            f"{DEVIN_LOCAL_MCP_RELATIVE_PATH} is tracked"
+        )
+    if result.returncode != 1:
+        raise WorktreeError(
+            (result.stderr or result.stdout).strip()
+            or "could not determine whether the Devin MCP config is tracked"
+        )
 
 
 def prepare_scratch_directory(
@@ -467,6 +535,43 @@ def lane_delivery(run: WorktreeRun, runner: Runner = subprocess.run) -> LaneDeli
     return LaneDelivery(committed=head != run.starting_commit, uncommitted=changed)
 
 
+def snapshot_source(repo: Path, runner: Runner = subprocess.run) -> frozenset[str]:
+    """The coordinator checkout's changed paths, taken just before dispatch.
+
+    The snapshot is deliberately narrow: git's own porcelain path list, not a
+    content hash of the tree. Same-user execute lanes are not an OS sandbox,
+    so a worker CAN write outside its worktree — observed 2026-09-19, when a
+    worker wrote its report to the coordinator source path, corrected course,
+    and the run still reported a clean accepted delivery because nothing ever
+    looked at the source checkout. Comparing this baseline against the
+    checkout after the run is what turns that write into a named, failed
+    delivery instead of a silent one.
+    """
+
+    return frozenset(_changed_paths(repo, runner))
+
+
+def source_mutations(
+    repo: Path,
+    baseline: "frozenset[str]",
+    runner: Runner = subprocess.run,
+) -> tuple[str, ...]:
+    """Paths that appeared in the coordinator checkout's status during the run.
+
+    Only the delta over ``baseline`` is returned: paths the checkout already
+    carried when the worker was dispatched are preexisting and must not be
+    blamed on the lane. Lane-owned artifacts never appear here — the lane
+    worktrees and scratch directories are git-excluded, and the run audit
+    lives inside ``.git`` — so anything in the delta is a real source-tree
+    change. When a person or another process edits the same checkout
+    concurrently, the delta still reports the change honestly; attribution is
+    not claimed either way.
+    """
+
+    after = _changed_paths(repo, runner)
+    return tuple(sorted(set(after) - set(baseline)))
+
+
 # Publication talks to a remote, so it is the one git call here that can block
 # on the network or on a credential/SSH prompt. Bound it and refuse to prompt:
 # an interactive prompt in an unattended lane is an indefinite hang.
@@ -731,7 +836,38 @@ def write_audit(
     resolved_model: str | None = None,
     usage: dict | None = None,
     provider_artifact: str | None = None,
+    read_roots: Sequence[str] = (),
+    skill_catalog: "Sequence[Mapping[str, object]]" = (),
+    run_mcp_servers: "Sequence[Mapping[str, object]]" = (),
+    source_changes: Sequence[str] = (),
 ) -> Path:
+    """Persist one lane's run record outside its disposable worktree.
+
+    ``read_roots`` records the canonical directories the coordinator granted
+    the worker read-only access to, in addition to the lane worktree. It is
+    additive: the field is always present as a list (empty when nothing was
+    granted), so a reader can tell "no read root was requested" from "this
+    record predates read roots".
+
+    ``skill_catalog`` records the pinned skills materialized into the lane
+    worktree for this run (execute mode only), each with name, version,
+    content hash, license, origin, and the absolute path the worker was told
+    to read. It records *delivery*, not host-native skill discovery and not
+    any live tool call. Additive in the same way, so the schema version stays
+    2.
+
+    ``run_mcp_servers`` records the per-run MCP registrations delivered from
+    the coordinator's validated ``--mcp-config`` file (execute mode only):
+    server NAMES and the source config path — never URLs, env names'
+    values, or header contents, which stay out of every audit record. It
+    records delivery, not authentication and not any live tool call.
+
+    ``source_changes`` records the coordinator-checkout paths that changed
+    between dispatch and completion (execute mode only), as detected by the
+    before/after status comparison. It records the change, not who made it —
+    an out-of-lane worker write and a concurrent human edit are
+    indistinguishable here. Additive like the rest, schema stays 2.
+    """
     result = subprocess.run(
         ["git", "-C", str(run.repository), "rev-parse", "--git-dir"],
         stdout=subprocess.PIPE,
@@ -762,6 +898,10 @@ def write_audit(
                 "provider_artifact": provider_artifact,
                 "repository": str(run.repository),
                 "worktree": str(run.worktree),
+                "read_roots": list(read_roots),
+                "skill_catalog": [dict(item) for item in skill_catalog],
+                "run_mcp_servers": [dict(item) for item in run_mcp_servers],
+                "source_changes": list(source_changes),
                 "branch": run.branch,
                 "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
                 "exit_status": exit_status,

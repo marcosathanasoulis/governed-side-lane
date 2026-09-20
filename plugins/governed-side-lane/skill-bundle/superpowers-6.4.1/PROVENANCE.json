@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "name": "superpowers",
+  "version": "6.4.1",
+  "license": "MIT",
+  "upstream": "https://github.com/obra/superpowers",
+  "vendored_from": "openai-curated-remote plugin cache, superpowers 6.4.1 (coordinator-qualified read root)",
+  "vendored_on": "2026-09-19",
+  "excluded": [
+    "assets/ (binary icons; not skill instructions)",
+    ".codex-plugin/ (host plugin manifest)",
+    "CODE_OF_CONDUCT.md (not required for license retention)"
+  ],
+  "tree_sha256_over": ["LICENSE", "README.md", "skills/"],
+  "tree_sha256": "52b9614422c0ac53190e83386e4d4bc4d2f4b4281da76d4c8243447d5b04d7bd"
+}

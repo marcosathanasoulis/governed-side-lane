@@ -35,8 +35,15 @@ execute runs always use dedicated worktrees; the coordinator repo's
 Execute-mode Claude-host lanes get a capability-derived `--allowedTools`
 allowlist (file tools always; dev-shell commands with `shell`/
 `workspace-write`; `git push` only with `git-push`) and can see the host's
-configured MCP servers, including Playwright when present; review mode never
-gets an allowlist and always hides MCP servers. See the public repository
+configured MCP servers, including Playwright when present. A capability grant
+also approves exactly its matching project `.mcp.json` server for that one
+process — `playwright`, `gitnexus`, `codegraph`, and `slack` (for
+`slack-read`) — never an unrequested server and never all project servers;
+inherited user- and server-scope MCP grants are unaffected. Workers are
+instructed to wait (`WaitForMcpServers`) for a granted server that is still
+loading before declaring the capability missing; only Playwright additionally
+requires the pre-launch readiness probe. Review mode never gets an allowlist
+and always hides MCP servers. See the public repository
 README for install, usage, security, and contribution details.
 
 Licensed under Apache-2.0.

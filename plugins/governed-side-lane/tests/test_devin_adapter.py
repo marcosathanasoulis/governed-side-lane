@@ -1,12 +1,15 @@
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import tempfile
 import unittest
 from unittest import mock
 
+from side_lane import devin_command_policy
 from side_lane.adapters import devin
+from side_lane.mcp_run_config import McpRunServer
 
 
 class DevinAdapterTests(unittest.TestCase):
@@ -95,9 +98,12 @@ class DevinAdapterTests(unittest.TestCase):
 
     def test_runtime_config_disables_subagents_and_preserves_command_prefixes(self) -> None:
         config = devin._runtime_config("swe-2-medium", ("shell", "playwright"))
+        self.assertIn("Exec(cd)", config["permissions"]["allow"])
         self.assertFalse(config["subagents_enabled"])
         self.assertEqual(config["agent"]["model"], "swe-2-medium")
         self.assertIn("Exec(python3)", config["permissions"]["allow"])
+        for interpreter in ("python", "python3", "python3.11"):
+            self.assertIn(f"Exec(.venv/bin/{interpreter})", config["permissions"]["allow"])
         self.assertIn("Exec(git status)", config["permissions"]["allow"])
         self.assertIn("Exec(git commit)", config["permissions"]["allow"])
         self.assertNotIn("Exec(git)", config["permissions"]["allow"])
@@ -107,6 +113,71 @@ class DevinAdapterTests(unittest.TestCase):
         self.assertIn("mcp__playwright__browser_click", config["permissions"]["allow"])
         self.assertIn("mcp__playwright__browser_find", config["permissions"]["allow"])
         self.assertNotIn("mcp__playwright__*", config["permissions"]["allow"])
+
+    def test_runtime_config_grants_pythondontwritebytecode_pregrant_for_shell_interpreters(self) -> None:
+        config = devin._runtime_config("swe-2-medium", ("shell", "playwright"))
+        allow = config["permissions"]["allow"]
+        for interpreter in ("python", "python3", "python3.11", "python3.12"):
+            self.assertIn(f"Exec(PYTHONDONTWRITEBYTECODE=1 {interpreter})", allow)
+        for interpreter in ("python", "python3", "python3.11"):
+            self.assertIn(f"Exec(PYTHONDONTWRITEBYTECODE=1 .venv/bin/{interpreter})", allow)
+        # The pregrant is derived only from the shell capability.
+        no_shell = devin._runtime_config("swe-2-medium", ("playwright",))
+        self.assertFalse(any(rule.startswith("Exec(PYTHONDONTWRITEBYTECODE=1")
+                             for rule in no_shell["permissions"]["allow"]))
+        # No other command category receives the pregrant.
+        self.assertFalse(any(rule == "Exec(PYTHONDONTWRITEBYTECODE=1 cd)"
+                             for rule in allow))
+        for prefix in ("git", "echo", "uv"):
+            self.assertFalse(any(rule.startswith(f"Exec(PYTHONDONTWRITEBYTECODE=1 {prefix}")
+                                 for rule in allow))
+
+    def test_runtime_config_grants_exact_slack_read_tools_only(self) -> None:
+        config = devin._runtime_config("swe-2-medium", ("slack-read",))
+        allow = config["permissions"]["allow"]
+        slack = sorted(
+            rule for rule in allow if rule.startswith("mcp__slack__")
+        )
+        self.assertEqual(
+            slack,
+            ["mcp__slack__slack_read_channel", "mcp__slack__slack_read_thread"],
+        )
+        self.assertNotIn("mcp__slack__*", allow)
+
+    def test_runtime_config_grants_exact_cm_services_tools_per_capability(self) -> None:
+        asana = devin._runtime_config("swe-2-medium", ("asana-read",))["permissions"]["allow"]
+        self.assertEqual(
+            {rule for rule in asana if rule.startswith("mcp__cm-services__")},
+            {"mcp__cm-services__asana_get_task", "mcp__cm-services__asana_get_project",
+             "mcp__cm-services__asana_list_project_tasks"},
+        )
+        drive = devin._runtime_config("swe-2-medium", ("drive-read",))["permissions"]["allow"]
+        self.assertEqual(
+            {rule for rule in drive if rule.startswith("mcp__cm-services__")},
+            {"mcp__cm-services__drive_file_info", "mcp__cm-services__drive_sheet_tabs",
+             "mcp__cm-services__drive_sheet_get", "mcp__cm-services__drive_doc_get"},
+        )
+        algolia = devin._runtime_config("swe-2-medium", ("algolia-read",))["permissions"]["allow"]
+        self.assertEqual(
+            {rule for rule in algolia if rule.startswith("mcp__cm-services__")},
+            {"mcp__cm-services__algolia_get_settings"},
+        )
+        # Disjoint on the shared server: an asana grant never unlocks drive
+        # tools, and no capability-free or unrelated lane touches the server.
+        self.assertFalse(any("drive_" in rule for rule in asana
+                             if rule.startswith("mcp__")))
+        self.assertFalse(any("asana_" in rule for rule in drive
+                             if rule.startswith("mcp__")))
+        self.assertFalse(any("algolia_" in rule for rule in asana
+                             if rule.startswith("mcp__")))
+        self.assertFalse(any("algolia_" in rule for rule in drive
+                             if rule.startswith("mcp__")))
+        plain = devin._runtime_config("swe-2-medium", ("shell",))["permissions"]["allow"]
+        self.assertFalse(any(rule.startswith("mcp__cm-services__") for rule in plain))
+        both = devin._runtime_config("swe-2-medium", ("asana-read", "drive-read"))["permissions"]["allow"]
+        self.assertNotIn("mcp__cm-services__*", both)
+        self.assertEqual(
+            len([rule for rule in both if rule.startswith("mcp__cm-services__")]), 7)
 
     def test_runtime_config_preserves_git_push_denies_and_inherited_hooks(self) -> None:
         inherited_hook = {"matcher": "^edit$", "hooks": [{"type": "command", "command": "check"}]}
@@ -151,6 +222,60 @@ class DevinAdapterTests(unittest.TestCase):
         plain = devin._runtime_config("swe-2-medium", ("shell",), worktree=Path("/lane"))
         self.assertIn("Exec(git -C /lane status)", plain["permissions"]["allow"])
 
+    def test_runtime_config_dash_c_grants_the_quoted_spelling_of_a_plain_path(self) -> None:
+        # Reproduced 2026-09-19: a lane whose worktree path has no spaces was
+        # granted only the unquoted spelling, and `git -C "<lane>" ...` then
+        # matched no grant and was prompted, which ends a non-interactive run.
+        config = devin._runtime_config("swe-2-medium", ("shell",), worktree=Path("/lane"))
+        allow = config["permissions"]["allow"]
+        self.assertIn("Exec(git -C /lane status)", allow)
+        self.assertIn('Exec(git -C "/lane" status)', allow)
+        self.assertIn('Exec(git -C "/lane" commit)', allow)
+        self.assertNotIn('Exec(git -C "/lane")', allow)
+
+    def test_path_spellings_are_equivalent_to_the_literal_path(self) -> None:
+        for literal in ("/lane", "/tmp/my lanes/lane", "/tmp/a'b", '/tmp/a"b', "/tmp/a$b",
+                        "/tmp/a`b", "/tmp/a\\b"):
+            path = Path(literal)
+            spellings = devin._path_spellings(path)
+            with self.subTest(literal=literal):
+                self.assertTrue(spellings)
+                self.assertEqual(spellings[0], shlex.quote(literal))
+                for spelling in spellings:
+                    # Each granted spelling must denote exactly this path and
+                    # carry no composition, substitution or expansion syntax:
+                    # that is what keeps the extra grants from widening.
+                    self.assertEqual(shlex.split(spelling), [literal])
+                    self.assertNotIn(";", spelling)
+                    self.assertNotIn("|", spelling)
+                    self.assertNotIn("\n", spelling)
+                self.assertEqual(len(set(spellings)), len(spellings))
+
+    def test_path_spellings_withhold_a_spelling_a_shell_would_expand(self) -> None:
+        # A literal `$` is inert inside single quotes but would expand inside
+        # double quotes, so only the single-quoted spelling may be granted.
+        self.assertEqual(devin._path_spellings(Path("/tmp/a$b")), ("'/tmp/a$b'",))
+        self.assertEqual(devin._path_spellings(Path('/tmp/a`b')), ("'/tmp/a`b'",))
+        self.assertEqual(devin._path_spellings(Path('/tmp/a"b')), ("'/tmp/a\"b'",))
+        self.assertEqual(devin._path_spellings(Path("/tmp/a\\b")), ("'/tmp/a\\b'",))
+
+    def test_runtime_config_dash_c_grants_stay_bounded_to_git_subcommands(self) -> None:
+        config = devin._runtime_config("swe-2-medium", ("shell", "git-push"),
+                                       worktree=Path("/tmp/my lanes/lane"))
+        allow = config["permissions"]["allow"]
+        dash_c = [rule for rule in allow if rule.startswith("Exec(git -C ")]
+        self.assertTrue(dash_c)
+        for rule in dash_c:
+            tokens = shlex.split(rule[len("Exec("):-1])
+            self.assertEqual(tokens[:2], ["git", "-C"])
+            # The target is always the lane worktree or the CLI's own working
+            # directory; the spelling varies, the directory never does.
+            self.assertIn(tokens[2], {"/tmp/my lanes/lane", "."})
+            # Every grant names a git subcommand, so a bare `git -C <path>` is
+            # never emitted, and no grant is widened to a wildcard.
+            self.assertGreater(len(tokens), 3)
+            self.assertNotIn("*", rule)
+
     def test_runtime_config_without_worktree_has_no_dash_c_grants(self) -> None:
         config = devin._runtime_config("swe-2-medium", ("shell",))
         self.assertFalse(any("-C" in rule for rule in config["permissions"]["allow"]))
@@ -187,6 +312,16 @@ class DevinAdapterTests(unittest.TestCase):
         self.assertTrue(all(isinstance(rule, str) for rule in rules["allowed"]))
         self.assertIn(f"Exec(git -C {lane.resolve()} status)",
                       captured["config"]["permissions"]["allow"])
+        # The quoted spelling of the same lane must be granted too: it is the
+        # spelling a worker actually typed when the run was rejected. The hook
+        # still normalises either spelling to the canonical rule, so the deny
+        # side of the policy is unaffected by the extra grants.
+        self.assertIn(f'Exec(git -C "{lane.resolve()}" status)',
+                      captured["config"]["permissions"]["allow"])
+        self.assertIsNone(devin_command_policy.evaluate_event(
+            {"tool_name": "exec", "tool_input": {
+                "command": f'git -C "{lane.resolve()}" status'}},
+            rules["allowed"], rules["denied"], worktree=rules["worktree"]))
 
     def test_launch_installs_write_containment_hook_with_no_command_capabilities(self) -> None:
         # A capability-free execute lane (no shell/workspace-write/git-push)
@@ -295,6 +430,43 @@ class DevinAdapterTests(unittest.TestCase):
                     user_config_path=root / "missing.json")
                 self.assertEqual(result.returncode, 65)
                 self.assertIn(error, result.stderr)
+
+    def test_launch_git_excludes_the_generated_local_mcp_file(self) -> None:
+        # The generated `.devin/mcp_config.local.json` lives inside the lane
+        # worktree for the whole run; without an exclude entry a mid-run
+        # `git add -A` would stage it. The entry must land before the file is
+        # written (restore only runs after the worker exits).
+        provider, route = self.config()
+        process = mock.Mock(pid=41, returncode=0)
+        servers = {"aws": McpRunServer(
+            name="aws", url="https://bridge.example.invalid/mcp",
+            headers=(("Authorization", "Bearer", "CLAUDE_TAG_AWS_MCP_TOKEN"),),
+        )}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lane = self.repo(root, "lane")
+            def popen(command, **_kwargs):
+                Path(command[command.index("--export") + 1]).write_text(
+                    json.dumps({"steps": [{"model_name": "swe-2-medium"}]}))
+                process.communicate.return_value = ("done", "")
+                return process
+            result = devin.launch(executable="devin",
+                repo=self.repo(root, "repo"), worktree=lane, provider="devin",
+                model="swe-2-medium", provider_config=provider, model_config=route,
+                prompt="task",
+                env={"PATH": "/bin", "HOME": str(root),
+                     "CLAUDE_TAG_AWS_MCP_TOKEN": "placeholder"},
+                popen=popen, user_config_path=root / "missing.json",
+                run_mcp_servers=servers)
+            self.assertEqual(result.returncode, 0)
+            exclude = lane / ".git" / "info" / "exclude"
+            self.assertIn("/.devin/mcp_config.local.json",
+                          exclude.read_text(encoding="utf-8").splitlines())
+            self.assertFalse((lane / ".devin" / "mcp_config.local.json").exists())
+            ignored = subprocess.run(
+                ["git", "-C", str(lane), "check-ignore", "-q",
+                 ".devin/mcp_config.local.json"], capture_output=True)
+            self.assertEqual(ignored.returncode, 0)
 
     @mock.patch("side_lane.adapters.devin.os.killpg")
     def test_timeout_terminates_the_process_group(self, killpg: mock.Mock) -> None:

@@ -26,6 +26,11 @@ class LaneResult:
     disallowed_tools: tuple[str, ...] = ()
     requested_model: str | None = None
     resolved_model: str | None = None
+    # Upstream model ids exactly as the response stream attested them. On
+    # routed (router-selected pool) providers this set is the actual model
+    # evidence; a bare id can collide across upstream providers, so it is
+    # never promoted to an upstream provider-identity claim.
+    attested_models: tuple[str, ...] = ()
     reasoning_effort: str | None = None
     usage: dict[str, Any] | None = None
     provider_artifact: str | None = None
@@ -42,6 +47,7 @@ class LaneResult:
             "model": self.model,
             "requested_model": self.requested_model or self.model,
             "resolved_model": self.resolved_model,
+            "attested_models": list(self.attested_models),
             "reasoning_effort": self.reasoning_effort,
             "usage": self.usage,
             "provider_artifact": self.provider_artifact,

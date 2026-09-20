@@ -55,29 +55,49 @@ def qualify_claude(*, executable: str, repo: Path, worktree: Path,
                    provider: str, model: str, endpoint: str, secret: str,
                    transport_probe: Mapping[str, Any], prompt: str,
                    approved: bool = False, timeout: int = 180,
+                   routing_policy_contract: Mapping[str, Any] | None = None,
                    runner=bounded_process) -> dict[str, Any]:
     if not approved:
         raise ValueError("explicit paid local trial authority required")
-    if provider not in claude.FIRST_WAVE_ENDPOINTS:
+    routed = provider in claude.ROUTED_PROVIDERS
+    if provider not in claude.FIRST_WAVE_ENDPOINTS and not routed:
         raise ValueError("provider not supported by qualification harness")
     if not 1 <= timeout <= 300:
         raise ValueError("qualification timeout must be 1..300 seconds")
-    if any(transport_probe.get(k) != v for k, v in {
-        "provider": provider, "requested_model": model, "resolved_model": model,
+    expected_probe = {
+        "provider": provider, "requested_model": model,
         "endpoint": endpoint, "http_status": 200, "ready": True,
-    }.items()):
+    }
+    if not routed:
+        # An exact route must prove the selector resolves to itself; a routed
+        # provider must not — the router legitimately resolves elsewhere.
+        expected_probe["resolved_model"] = model
+    if any(transport_probe.get(k) != v for k, v in expected_probe.items()):
         raise ValueError("exact successful transport probe required")
     paths = [Path.home()/'.claude/settings.json', Path.home()/'.claude/settings.local.json',
              Path('/Library/Application Support/ClaudeCode/managed-settings.json')]
     for parent in (repo, worktree):
         paths.extend([parent/'.claude/settings.json', parent/'.claude/settings.local.json'])
     check_auth_overrides(paths)
-    pc = {"gateway": "direct-"+provider, "auth_method": "provider-key",
-          "billable": True, "base_url": endpoint}
-    mc = {"runtime_model": model, "protocol": "anthropic-compatible",
-          "identity_contract": {"requested_model": model, "resolved_model": model,
-                                "settings_precedence": "verified"},
-          "max_budget_usd": 1}
+    allowed_upstream: frozenset[str] = frozenset()
+    if routed:
+        if not isinstance(routing_policy_contract, Mapping):
+            raise ValueError("routed provider qualification requires the routing policy contract")
+        allowed_upstream = claude.validate_routing_policy_contract(
+            provider, model, {claude.ROUTING_POLICY_CONTRACT_KEY: dict(routing_policy_contract)}
+        )
+        pc = {"gateway": claude.ROUTED_GATEWAYS[provider], "auth_method": "provider-key",
+              "billable": True, "base_url": endpoint}
+        mc = {"runtime_model": model, "protocol": "anthropic-compatible",
+              claude.ROUTING_POLICY_CONTRACT_KEY: dict(routing_policy_contract),
+              "max_budget_usd": 1}
+    else:
+        pc = {"gateway": "direct-"+provider, "auth_method": "provider-key",
+              "billable": True, "base_url": endpoint}
+        mc = {"runtime_model": model, "protocol": "anthropic-compatible",
+              "identity_contract": {"requested_model": model, "resolved_model": model,
+                                    "settings_precedence": "verified"},
+              "max_budget_usd": 1}
     command = claude.build_command(executable=executable, repo=repo, worktree=worktree,
         provider=provider, model=model, provider_config=pc, model_config=mc,
         prompt=prompt, capabilities=("shell",))
@@ -101,6 +121,20 @@ def qualify_claude(*, executable: str, repo: Path, worktree: Path,
         result = json.loads(stdout)
     except json.JSONDecodeError:
         result = {"parse_error": True, "text": stdout[:2000]}
-    return {"qualification_only": True, "activated": False, "provider": provider,
-            "requested_model": model, "endpoint": endpoint, "exit_status": completed.returncode,
-            "worktree": str(worktree), "result": result, "stderr": stderr[:2000]}
+    report: dict[str, Any] = {"qualification_only": True, "activated": False, "provider": provider,
+                              "requested_model": model, "endpoint": endpoint,
+                              "exit_status": completed.returncode,
+                              "worktree": str(worktree), "result": result, "stderr": stderr[:2000]}
+    if routed:
+        # Observed model ids only — a bare id can collide across upstream
+        # providers, so this is model evidence, never provider identity.
+        # An empty set or any id outside the declared pool means the route
+        # must not be marked qualified; the human caller judges, this helper
+        # never activates anything.
+        attested = claude._stream_metadata(stdout)[2]
+        report["attested_models"] = sorted(attested)
+        report["attestation_within_declared_pool"] = (
+            bool(attested) and attested <= allowed_upstream
+        )
+        report["declared_upstream_models"] = sorted(allowed_upstream)
+    return report

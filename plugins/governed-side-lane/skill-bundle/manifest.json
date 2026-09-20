@@ -1,0 +1,244 @@
+{
+  "schema_version": 1,
+  "notes": "Pinned worker skill bundle. Entries tagged 'discipline' are delivered to every execute lane; every non-delegation entry is additionally selectable by exact name via the repeatable --skill flag (for example --skill qa-on-demand), which is additive to the discipline defaults and closed under references: a selected skill that references a manifest sibling pulls that sibling in, and a reference to anything outside the manifest fails delivery. 'package' sources ship inside this plugin and are hash-pinned here; 'repo' sources (the private QA skills qa-on-demand and site-uat-sweep) point at the dev-tools checkout's canonical skill trees, are never published in this public package, and resolve only when the runner executes from a dev-tools checkout \u2014 their delivered records pin that checkout's HEAD commit. Delegation-tagged entries are never selectable and never delivered: worker lanes run without subworkers. Coordinator-side skills (prompt-it, side-lane) are deliberately absent: workers must not re-enter coordinator gates or route dispatch.",
+  "entries": [
+    {
+      "name": "brainstorming",
+      "tags": [
+        "workflow"
+      ],
+      "source": {
+        "kind": "package",
+        "path": "superpowers-6.4.1/skills/brainstorming"
+      },
+      "version": "6.4.1",
+      "sha256": "335149021b748baf3d5b6ebc6b71b02d58a5844d764f65d8bd08327004920353",
+      "license": "MIT",
+      "origin": "obra/superpowers release 6.4.1, vendored from the openai-curated-remote plugin cache 2026-09-19"
+    },
+    {
+      "name": "diagnosing-superpowers",
+      "tags": [
+        "meta"
+      ],
+      "source": {
+        "kind": "package",
+        "path": "superpowers-6.4.1/skills/diagnosing-superpowers"
+      },
+      "version": "6.4.1",
+      "sha256": "c3bcc497dbcaa42ba39b762ad9ce1772622735891ad77325ca84085548af79be",
+      "license": "MIT",
+      "origin": "obra/superpowers release 6.4.1, vendored from the openai-curated-remote plugin cache 2026-09-19"
+    },
+    {
+      "name": "dispatching-parallel-agents",
+      "tags": [
+        "delegation"
+      ],
+      "source": {
+        "kind": "package",
+        "path": "superpowers-6.4.1/skills/dispatching-parallel-agents"
+      },
+      "version": "6.4.1",
+      "sha256": "d54b4e3f167a1d9e1bda16b1a50dd10f9f47fdfa94f3db0a12c37211c4aceaab",
+      "license": "MIT",
+      "origin": "obra/superpowers release 6.4.1, vendored from the openai-curated-remote plugin cache 2026-09-19"
+    },
+    {
+      "name": "executing-plans",
+      "tags": [
+        "workflow"
+      ],
+      "source": {
+        "kind": "package",
+        "path": "superpowers-6.4.1/skills/executing-plans"
+      },
+      "version": "6.4.1",
+      "sha256": "05045c9a1bf027b9f8b0553b52f74029d0d24cd619a57a51eaacb3ac84b3bf27",
+      "license": "MIT",
+      "origin": "obra/superpowers release 6.4.1, vendored from the openai-curated-remote plugin cache 2026-09-19"
+    },
+    {
+      "name": "finishing-a-development-branch",
+      "tags": [
+        "workflow"
+      ],
+      "source": {
+        "kind": "package",
+        "path": "superpowers-6.4.1/skills/finishing-a-development-branch"
+      },
+      "version": "6.4.1",
+      "sha256": "da3c922aada9070974d330d96cf0bb309d7420625b5884c26354363d707c7c47",
+      "license": "MIT",
+      "origin": "obra/superpowers release 6.4.1, vendored from the openai-curated-remote plugin cache 2026-09-19"
+    },
+    {
+      "name": "qa-on-demand",
+      "tags": [
+        "domain"
+      ],
+      "source": {
+        "kind": "repo",
+        "path": "skills/claude/qa-on-demand"
+      },
+      "version": null,
+      "sha256": null,
+      "license": "internal (dev-tools)",
+      "origin": "dev-tools canonical skill tree; version is the checkout commit"
+    },
+    {
+      "name": "receiving-code-review",
+      "tags": [
+        "discipline"
+      ],
+      "source": {
+        "kind": "package",
+        "path": "superpowers-6.4.1/skills/receiving-code-review"
+      },
+      "version": "6.4.1",
+      "sha256": "063c3e55697c9fd168e060096a442c9c7803883fdca00208c2d22893be934762",
+      "license": "MIT",
+      "origin": "obra/superpowers release 6.4.1, vendored from the openai-curated-remote plugin cache 2026-09-19"
+    },
+    {
+      "name": "requesting-code-review",
+      "tags": [
+        "discipline"
+      ],
+      "source": {
+        "kind": "package",
+        "path": "superpowers-6.4.1/skills/requesting-code-review"
+      },
+      "version": "6.4.1",
+      "sha256": "78246ccceb7d6782d7962deab4033dbda8da551b7955b214b589135e1599207b",
+      "license": "MIT",
+      "origin": "obra/superpowers release 6.4.1, vendored from the openai-curated-remote plugin cache 2026-09-19"
+    },
+    {
+      "name": "site-uat-sweep",
+      "tags": [
+        "domain"
+      ],
+      "source": {
+        "kind": "repo",
+        "path": "skills/claude/site-uat-sweep"
+      },
+      "version": null,
+      "sha256": null,
+      "license": "internal (dev-tools)",
+      "origin": "dev-tools canonical skill tree; version is the checkout commit"
+    },
+    {
+      "name": "subagent-driven-development",
+      "tags": [
+        "delegation"
+      ],
+      "source": {
+        "kind": "package",
+        "path": "superpowers-6.4.1/skills/subagent-driven-development"
+      },
+      "version": "6.4.1",
+      "sha256": "a78b0424dc96d5976f2cc99ad48bf98182d2c07d494db4e6bcb5ebb200ce5234",
+      "license": "MIT",
+      "origin": "obra/superpowers release 6.4.1, vendored from the openai-curated-remote plugin cache 2026-09-19"
+    },
+    {
+      "name": "systematic-debugging",
+      "tags": [
+        "discipline"
+      ],
+      "source": {
+        "kind": "package",
+        "path": "superpowers-6.4.1/skills/systematic-debugging"
+      },
+      "version": "6.4.1",
+      "sha256": "7c36acba09855dfe4fe2baab5bacc2a14d71713c2a29acc942e6cfed544e853f",
+      "license": "MIT",
+      "origin": "obra/superpowers release 6.4.1, vendored from the openai-curated-remote plugin cache 2026-09-19"
+    },
+    {
+      "name": "test-driven-development",
+      "tags": [
+        "discipline"
+      ],
+      "source": {
+        "kind": "package",
+        "path": "superpowers-6.4.1/skills/test-driven-development"
+      },
+      "version": "6.4.1",
+      "sha256": "03c8f8ee77fae2166a9b522ce74fed871d352b58d6553a55006979f5c4f67638",
+      "license": "MIT",
+      "origin": "obra/superpowers release 6.4.1, vendored from the openai-curated-remote plugin cache 2026-09-19"
+    },
+    {
+      "name": "using-git-worktrees",
+      "tags": [
+        "workflow"
+      ],
+      "source": {
+        "kind": "package",
+        "path": "superpowers-6.4.1/skills/using-git-worktrees"
+      },
+      "version": "6.4.1",
+      "sha256": "713eaebd6de832266cba17a036e860570607e10d80599b8518942af8b6c0d002",
+      "license": "MIT",
+      "origin": "obra/superpowers release 6.4.1, vendored from the openai-curated-remote plugin cache 2026-09-19"
+    },
+    {
+      "name": "using-superpowers",
+      "tags": [
+        "meta"
+      ],
+      "source": {
+        "kind": "package",
+        "path": "superpowers-6.4.1/skills/using-superpowers"
+      },
+      "version": "6.4.1",
+      "sha256": "fd0f6874bfc238636be99d3b6430ae35284062bb37a4b9a89c122e1f8ce462b6",
+      "license": "MIT",
+      "origin": "obra/superpowers release 6.4.1, vendored from the openai-curated-remote plugin cache 2026-09-19"
+    },
+    {
+      "name": "verification-before-completion",
+      "tags": [
+        "discipline"
+      ],
+      "source": {
+        "kind": "package",
+        "path": "superpowers-6.4.1/skills/verification-before-completion"
+      },
+      "version": "6.4.1",
+      "sha256": "0282eb1c8793bd1c63eddca72033d2d46a128d4f0d4406b5df416d9dcf43335f",
+      "license": "MIT",
+      "origin": "obra/superpowers release 6.4.1, vendored from the openai-curated-remote plugin cache 2026-09-19"
+    },
+    {
+      "name": "writing-plans",
+      "tags": [
+        "workflow"
+      ],
+      "source": {
+        "kind": "package",
+        "path": "superpowers-6.4.1/skills/writing-plans"
+      },
+      "version": "6.4.1",
+      "sha256": "b268ad5369699372ddc490bb513bd454b9cfdf0867a46ec3d159bdfe3f213115",
+      "license": "MIT",
+      "origin": "obra/superpowers release 6.4.1, vendored from the openai-curated-remote plugin cache 2026-09-19"
+    },
+    {
+      "name": "writing-skills",
+      "tags": [
+        "meta"
+      ],
+      "source": {
+        "kind": "package",
+        "path": "superpowers-6.4.1/skills/writing-skills"
+      },
+      "version": "6.4.1",
+      "sha256": "63e7528bfdc07b33ca91736d8fb8e9e243d871f364fe770be2e490145cc037cc",
+      "license": "MIT",
+      "origin": "obra/superpowers release 6.4.1, vendored from the openai-curated-remote plugin cache 2026-09-19"
+    }
+  ]
+}

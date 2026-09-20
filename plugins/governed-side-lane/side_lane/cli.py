@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -9,7 +10,7 @@ import shutil
 import sys
 from typing import Any, Mapping, Sequence
 
-from side_lane import evaluation, routing
+from side_lane import evaluation, routing, selector_policy
 from side_lane.auth import AuthError, auth_status, require_native_oauth
 from side_lane.credentials import CredentialError, credential_present, read_credential
 from side_lane.connector_metadata import json_mcp_name_scopes, toml_mcp_names
@@ -20,6 +21,17 @@ from side_lane.hosts import (
     require_host_executable,
     resolve_host_executable,
 )
+from side_lane.mcp_run_config import (
+    CAPABILITY_MCP_SERVERS as RUN_MCP_CAPABILITY_SERVERS,
+    McpRunConfigError,
+    audit_names,
+    load_run_mcp_config,
+    registration_paths,
+    require_env_references,
+    validate_against_capabilities,
+)
+from side_lane.read_roots import ReadRootError, parse_read_roots
+from side_lane.skill_bundle import SkillBundleError, catalog_note, deliver_skills
 from side_lane.adapters.claude import ClaudeAdapterError
 from side_lane.adapters.codex import CodexAdapterError
 from side_lane.adapters.devin import DevinAdapterError
@@ -30,6 +42,8 @@ from side_lane.worktrees import (
     git_status,
     lane_delivery,
     publish_lane_branch,
+    snapshot_source,
+    source_mutations,
     verify_lane,
     write_audit,
 )
@@ -272,6 +286,21 @@ def make_parser() -> argparse.ArgumentParser:
     recommend = sub.add_parser("recommend", allow_abbrev=False)
     recommend.add_argument("--repo", required=True)
     recommend.add_argument("--profile", required=True)
+    recommend.add_argument(
+        "--routed-policy-snapshot",
+        metavar="PATH",
+        default=None,
+        help="repeatable operator-supplied routed-pool server policy snapshot "
+        "(a JSON object per file). A snapshot is reviewed "
+        "receipt data recorded by an authenticated control-plane collector — "
+        "it binds selector, canonical member identities, upstream attested "
+        "set, policy revision/fingerprint, nonsecret caps, the fail-closed "
+        "context-fit marker, an aware UTC observation timestamp (fresh for "
+        "900 seconds), and evidence provenance. It is a consistency/freshness "
+        "check only, never proof the live server enforces the policy; the "
+        "task profile cannot self-assert verification",
+        action="append",
+    )
     evaluate = sub.add_parser("evaluate", allow_abbrev=False)
     evaluate.add_argument("--input", required=True)
     run = sub.add_parser("run", allow_abbrev=False)
@@ -286,6 +315,46 @@ def make_parser() -> argparse.ArgumentParser:
         help="directory for lane worktrees; default <repo>/.side-lanes/worktrees, or $SIDE_LANE_WORKTREE_ROOT; relative paths are anchored to the repo",
     )
     run.add_argument("--capability", action="append", default=[])
+    run.add_argument(
+        "--skill",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="repeatable. Deliver one more pinned bundle skill by exact name "
+        "(for example --skill qa-on-demand), in addition to the discipline "
+        "defaults every execute lane receives. Skills that reference "
+        "siblings pull them in automatically. Private repo-sourced skills "
+        "(the QA skills) resolve only when the runner executes from a "
+        "dev-tools checkout; elsewhere the run fails before any worker "
+        "starts, naming the flag to drop. Execute mode only",
+    )
+    run.add_argument(
+        "--read-root",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="repeatable. Grant the worker read-only access to one more existing "
+        "directory outside its worktree (for example the shared instruction "
+        "sources a repository's AGENTS.md/CLAUDE.md point at). The path must be "
+        "absolute; glob syntax and the filesystem root are rejected. Execute "
+        "mode only. The canonical path is named in the worker's instructions "
+        "and recorded in the run audit. A read root never becomes writable: "
+        "writes stay confined to the lane worktree",
+    )
+    run.add_argument(
+        "--mcp-config",
+        metavar="PATH",
+        default=None,
+        help="deliver one coordinator-supplied per-run MCP server registration "
+        "file (a JSON object with exactly key mcpServers, remote streamable-HTTP "
+        "entries only, credentials referenced by env name, never as values). "
+        "Every declared server name must map from a granted --capability "
+        "(aws-read registers the server named aws), and each referenced env "
+        "name must be present in the launching environment. Execute mode only; "
+        "delivery is additive and never replaces existing MCP registrations. "
+        "Server names and the config path are recorded in the run audit; URLs "
+        "and credential values are not",
+    )
     run.add_argument("--approve-billable-route", action="store_true")
     run.add_argument(
         "--allow-no-commit",
@@ -331,7 +400,8 @@ def load_recommendation_profile(path_argument: str) -> dict[str, Any]:
     if not isinstance(profile, dict):
         raise SideLaneError("recommendation profile must be a JSON object")
     forbidden = re.compile(
-        r"(?:api[_-]?key|credential|secret|quota|billing|usage)", re.I
+        r"(?:api[_-]?key|credential|secret|quota|billing|usage"
+        r"|verified|snapshot|routed[_-]?policy)", re.I
     )
     pending: list[object] = [profile]
     while pending:
@@ -346,6 +416,31 @@ def load_recommendation_profile(path_argument: str) -> dict[str, Any]:
         elif isinstance(value, list):
             pending.extend(value)
     return profile
+
+
+def load_routed_policy_snapshot(path_argument: str) -> dict[str, Any]:
+    """Load one operator-reviewed routed-pool policy snapshot file.
+
+    The file is receipt data (selector, member set, revision, fingerprint,
+    caps, observation timestamp, evidence provenance) — hashing an arbitrary
+    file is not a signature, so this function verifies syntax only and never
+    attests live server state.
+    """
+
+    path = Path(path_argument).expanduser()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SideLaneError(f"cannot read routed policy snapshot: {exc}") from exc
+    if len(raw) > MAX_PROFILE_CHARS:
+        raise SideLaneError("routed policy snapshot is too large")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SideLaneError(f"routed policy snapshot is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise SideLaneError("routed policy snapshot must be a JSON object")
+    return payload
 
 
 def _ready_routes(config: Mapping[str, Any]) -> frozenset[tuple[str, str, str, str]]:
@@ -429,11 +524,60 @@ def _recommend(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
             },
         }
     )
+    snapshot_args = getattr(args, "routed_policy_snapshot", None)
+    if isinstance(snapshot_args, str):
+        snapshot_args = [snapshot_args]
+    if not isinstance(snapshot_args, (list, tuple)):
+        snapshot_args = []
+    policy_snapshots = [
+        load_routed_policy_snapshot(snapshot_path)
+        for snapshot_path in snapshot_args
+    ]
+    catalog = routing.load_catalog()
+    collection_evidence: list[dict[str, Any]] = []
+    if not policy_snapshots:
+        # Automatic mode: a routed provider block that sets
+        # ``automatic_selector_policy`` opts into fresh authenticated
+        # collection instead of an operator-supplied file. Collection
+        # failure is fail-closed — no snapshot is passed, so the pool
+        # route stays ineligible; nothing falls back to stale file data
+        # or to a legacy/direct scorer path. Non-routed providers are
+        # never touched.
+        for route in catalog.get("routes", []):
+            pool_spec = route.get("routed_pool")
+            if not isinstance(pool_spec, Mapping):
+                continue
+            provider_config = config["providers"].get(route["provider"])
+            if (
+                not isinstance(provider_config, Mapping)
+                or provider_config.get(
+                    selector_policy.AUTOMATIC_COLLECTION_FLAG
+                ) is not True
+            ):
+                continue
+            selector = pool_spec.get("selector")
+            try:
+                collected = selector_policy.collect_selector_policy(
+                    route, provider_config, now_utc=datetime.now(timezone.utc)
+                )
+            except selector_policy.SelectorPolicyError as exc:
+                collection_evidence.append(
+                    {
+                        "selector": selector,
+                        "source": "automatic-selector-policy-collector",
+                        "error": exc.reason,
+                    }
+                )
+            else:
+                policy_snapshots.append(collected["snapshot"])
+                collection_evidence.append(collected["evidence"])
     result = routing.recommend(
-        routing.load_catalog(),
+        catalog,
         normalized,
         runtime_allowlist=routing.allowlist_from_models(config),
         credential_present_routes=_ready_routes(config),
+        routed_contracts=routing.routed_contracts_from_models(config),
+        routed_policy_snapshots=policy_snapshots,
     )
     result.update(
         {
@@ -442,6 +586,12 @@ def _recommend(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
             "required_capabilities": sorted(required_capabilities),
         }
     )
+    if collection_evidence:
+        result["routed_policy_collection"] = collection_evidence
+        if any("error" in item for item in collection_evidence):
+            result["reason_codes"] = result["reason_codes"] + [
+                "routed-policy-collection-failed"
+            ]
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
@@ -560,20 +710,30 @@ def _capability_report(
         "gitnexus": _graph_connector_evidence(
             "gitnexus", mcp_names, host, out_of_scope
         ),
+        "slack-read": _slack_read_evidence(mcp_names, host, out_of_scope),
+        "asana-read": _cm_services_evidence("asana-read", mcp_names, host, out_of_scope),
+        "drive-read": _cm_services_evidence("drive-read", mcp_names, host, out_of_scope),
+        "gcloud-read": _service_read_evidence(
+            "gcloud-read", host, mcp_names, out_of_scope, "gcloud"
+        ),
+        "database-read": _service_read_evidence(
+            "database-read", host, mcp_names, out_of_scope, "psql"
+        ),
+        "algolia-read": _cm_services_evidence(
+            "algolia-read", mcp_names, host, out_of_scope
+        ),
+        "contentful-read": _cm_services_evidence(
+            "contentful-read", mcp_names, host, out_of_scope
+        ),
+        "contentful-master-read": _cm_services_evidence(
+            "contentful-master-read", mcp_names, host, out_of_scope
+        ),
         "codegraph": _graph_connector_evidence(
             "codegraph", mcp_names, host, out_of_scope
         ),
-        "gcloud-read": {
-            "state": "present" if shutil.which("gcloud") else "unavailable",
-            "basis": "gcloud executable; account/project access not tested",
-        },
         "secret-use": {
             "state": "unknown",
             "basis": "credential values and access are never tested during preflight",
-        },
-        "database-read": {
-            "state": "present" if shutil.which("psql") else "unavailable",
-            "basis": "psql executable; database access not tested",
         },
         "workflow-write": {
             "state": "present"
@@ -598,6 +758,13 @@ def _capability_report(
         "route": "not-requested",
         "mcp_connectors": sorted(mcp_names),
         "mcp_connectors_out_of_scope": sorted(out_of_scope),
+        # Registration evidence, not capability evidence: it says which files
+        # were consulted and what each contributed. An empty ``mcp_connectors``
+        # caused by three ``missing`` files is an unregistered host; the same
+        # empty list beside a ``no-servers`` file means this scanner did not
+        # find the container it looks for and the registration is unproven
+        # either way. Neither reading of the file is a qualified capability.
+        "mcp_registration_sources": _mcp_registration_sources(host, repo),
     }
     if bool(provider) != bool(model):
         raise SideLaneError("provider and model must be supplied together")
@@ -629,11 +796,103 @@ def _capability_report(
     return report
 
 
+def _slack_read_evidence(
+    mcp_names: set[str],
+    host: str,
+    out_of_scope: set[str] = frozenset(),
+) -> dict[str, str]:
+    """Registration evidence for the execute-only Slack read capability.
+
+    The capability grants exactly ``mcp__slack__slack_read_thread`` and
+    ``mcp__slack__slack_read_channel``, whose IDs embed the server name
+    ``slack`` exactly, so the registration check demands the exact name on
+    every host, Codex included: unlike the graph capabilities, a Codex
+    near-miss registration (``slack-mcp``) is ``name-mismatch`` and fails the
+    launch gate, because the grants still embed ``slack`` exactly. A
+    ``present`` registration is registration evidence only — Slack
+    authentication and a live read stay unproven until the worker observes
+    the exact granted tool names, and that separation is stated in every
+    basis this function returns.
+    """
+
+    evidence = _graph_connector_evidence(
+        "slack", mcp_names, host, out_of_scope, require_exact=True
+    )
+    if evidence["state"] == "present":
+        return {
+            "state": "present",
+            "basis": evidence["basis"]
+            + "; Slack authentication and a live read are not tested; grants are the exact "
+            "read-only tools slack_read_thread and slack_read_channel",
+        }
+    return evidence
+
+
+def _cm_services_evidence(
+    capability: str,
+    mcp_names: set[str],
+    host: str,
+    out_of_scope: set[str] = frozenset(),
+) -> dict[str, str]:
+    """Registration evidence for a ``cm-services`` read capability.
+
+    ``asana-read`` and ``drive-read`` both grant exact
+    ``mcp__cm-services__<tool>`` IDs, so the tool IDs embed the server name
+    ``cm-services`` exactly on every host — like ``slack-read`` the check
+    demands the exact name (a near-miss is ``name-mismatch``). The server is
+    a fixed local stdio registration the coordinator provisions into the
+    worker host's user-global config under the same account the capability
+    reads; a ``present`` registration is presence evidence only — same-account
+    provisioning, service authentication, and a live read stay unproven until
+    the worker observes the exact granted tool names.
+    """
+
+    evidence = _graph_connector_evidence(
+        "cm-services", mcp_names, host, out_of_scope, require_exact=True
+    )
+    if evidence["state"] == "present":
+        return {
+            "state": "present",
+            "basis": evidence["basis"]
+            + "; same-account provisioning, service authentication, and a live "
+            f"read are not tested; the {capability} grant is the exact "
+            "read-only mcp__cm-services__ tools listed in canonical governance",
+        }
+    return evidence
+
+
+def _service_read_evidence(
+    capability: str,
+    host: str,
+    mcp_names: set[str],
+    out_of_scope: set[str],
+    executable: str,
+) -> dict[str, str]:
+    """Prefer the cloud ``cm-services`` bridge, retaining Codex CLI paths.
+
+    Claude and Devin receive exact MCP grants for these service capabilities;
+    their local executable presence never proves a usable tool path. Codex
+    lanes historically use the native ``gcloud``/``psql`` path, so retain
+    that presence-only admission when no fixed bridge is registered there.
+    """
+
+    evidence = _cm_services_evidence(capability, mcp_names, host, out_of_scope)
+    if evidence["state"] == "present" or host != "codex":
+        return evidence
+    if shutil.which(executable):
+        return {
+            "state": "present",
+            "basis": f"native {executable} executable; account/project access not tested",
+        }
+    return evidence
+
+
 def _graph_connector_evidence(
     capability: str,
     mcp_names: set[str],
     host: str,
     out_of_scope: set[str] = frozenset(),
+    require_exact: bool = False,
 ) -> dict[str, str]:
     """Presence evidence for a code-graph connector.
 
@@ -644,16 +903,22 @@ def _graph_connector_evidence(
     a substring check and then receive no usable grant, so it is reported as
     ``name-mismatch`` and fails the launch gate like any non-present state.
     Codex lanes inherit their configured MCP servers directly with no such
-    allowlist, so connector-name presence remains the evidence there.
+    allowlist, so connector-name presence remains the evidence there — unless
+    ``require_exact`` is set, which a capability whose grants embed the server
+    name even on Codex (``slack-read``) uses to demand the exact registration
+    on every host.
     """
 
-    if host == "codex":
+    if host == "codex" and not require_exact:
         if any(capability in name.lower() for name in mcp_names):
             return {
                 "state": "present",
                 "basis": "connector-name metadata only; Codex lanes inherit configured MCP servers directly",
             }
-        return {"state": "unknown", "basis": "connector-name metadata only"}
+        return {
+            "state": "unknown",
+            "basis": "connector-name metadata only; see mcp_registration_sources for which registration files were consulted and what each contributed",
+        }
     if capability in mcp_names:
         return {
             "state": "present",
@@ -670,13 +935,74 @@ def _graph_connector_evidence(
             "state": "name-mismatch",
             "basis": f"connector(s) {', '.join(repr(name) for name in similar)} found but grants target mcp__{capability}__*; register the server as {capability!r}",
         }
-    return {"state": "unknown", "basis": "connector-name metadata only"}
+    return {
+        "state": "unknown",
+        "basis": "connector-name metadata only; see mcp_registration_sources for which registration files were consulted and what each contributed",
+    }
 
 
 def _discover_mcp_names(host: str, repo: Path | None = None) -> set[str]:
     """Connector names a lane launched for ``repo`` on ``host`` can actually see."""
 
     return _discover_mcp_inventory(host, repo)[0]
+
+
+def _mcp_registration_paths(
+    host: str, repo: Path | None = None
+) -> list[tuple[str, Path]]:
+    """Return ``(scope, path)`` for every MCP registration file ``host`` reads.
+
+    Thin delegation to
+    :func:`side_lane.mcp_run_config.registration_paths` — the single source,
+    also used by the per-run ``--mcp-config`` name-conflict check — with the
+    default environment resolution (this process's own view).
+    """
+
+    return registration_paths(host, repo)
+
+
+def _mcp_registration_sources(
+    host: str, repo: Path | None = None
+) -> list[dict[str, str]]:
+    """Report each consulted registration file and what it actually contributed.
+
+    An absent registration file and a present file that yields no connector
+    name both leave ``mcp_connectors`` empty, and they need different repairs:
+    the first is an unregistered host, while the second means the file's shape
+    was not recognised or its definitions are scoped elsewhere. Naming each file
+    with its disposition keeps an empty inventory from being read as either one
+    on no evidence — in particular a present file reported ``no-servers`` is the
+    signal that this scanner did not find the container it looks for, not proof
+    that the host has nothing registered.
+    """
+
+    sources: list[dict[str, str]] = []
+    for scope, path in _mcp_registration_paths(host, repo):
+        source = {"scope": scope, "path": str(path)}
+        if not path.is_file():
+            sources.append({**source, "state": "missing"})
+            continue
+        try:
+            if path.suffix == ".toml":
+                # Flat TOML tables carry no scope of their own.
+                in_scope, declared = toml_mcp_names(path), set()
+            else:
+                scopes = json_mcp_name_scopes(path)
+                declared = set(scopes)
+                in_scope = {name for name, keys in scopes.items() if () in keys}
+        except OSError:
+            sources.append({**source, "state": "unreadable"})
+            continue
+        except ValueError:
+            sources.append({**source, "state": "unparsed"})
+            continue
+        if in_scope:
+            sources.append({**source, "state": "registered"})
+        elif declared:
+            sources.append({**source, "state": "out-of-scope-only"})
+        else:
+            sources.append({**source, "state": "no-servers"})
+    return sources
 
 
 def _discover_mcp_inventory(
@@ -691,42 +1017,13 @@ def _discover_mcp_inventory(
     fresh worktree, so no such entry applies to it. Those names are reported
     separately as out of scope instead of being unioned into the inventory.
     Codex reads flat TOML tables and has no per-project layer in its user config.
+    Devin reads its own three registration files, which ``devin mcp add --help``
+    documents as user, project and local scope.
     """
 
     names: set[str] = set()
     out_of_scope: set[str] = set()
-    codex_home = Path(
-        os.environ.get("CODEX_HOME", "").strip() or Path.home() / ".codex"
-    )
-    if host == "codex":
-        paths = [codex_home / "config.toml"]
-        if repo is not None:
-            paths.append(repo / ".codex" / "config.toml")
-    elif host == "claude":
-        paths = [
-            Path.home() / ".claude.json",
-            Path.home() / ".claude" / "settings.json",
-        ]
-        if repo is not None:
-            paths.append(repo / ".mcp.json")
-    elif host == "devin":
-        # Devin CLI >=3000.3 uses dedicated native MCP files, not Claude's.
-        base = (
-            Path(os.environ["APPDATA"])
-            if os.name == "nt" and os.environ.get("APPDATA")
-            else Path.home() / ".config"
-        )
-        paths = [base / "devin" / "mcp_config.json"]
-        if repo is not None:
-            paths.extend(
-                [
-                    repo / ".devin" / "mcp_config.json",
-                    repo / ".devin" / "mcp_config.local.json",
-                ]
-            )
-    else:
-        return names, out_of_scope
-    for path in paths:
+    for _scope, path in _mcp_registration_paths(host, repo):
         if not path.is_file():
             continue
         try:
@@ -758,20 +1055,53 @@ LANE_DELIVERY_UNVERIFIED = 4
 #: non-zero exit (the work never claimed to be finished).
 LANE_VERIFY_FAILED = 5
 
+#: The coordinator checkout changed during an execute run. Same-user
+#: execution is not an OS sandbox, so a worker CAN write outside its lane —
+#: observed 2026-09-19, when a worker's report landed in the coordinator
+#: source path while the run reported a clean accepted delivery. The lane's
+#: own work is left untouched; the run fails so nobody mistakes a mutated
+#: source checkout for an accepted lane.
+LANE_SOURCE_MUTATED = 6
+
 
 def _launch(
-    args: argparse.Namespace, config: Mapping[str, Any], repo: Path, prompt: str
+    args: argparse.Namespace, config: Mapping[str, Any], repo: Path, prompt: str,
+    *, read_roots: Sequence[Path] = (),
+    run_mcp_servers: "Mapping[str, Any] | None" = None,
 ) -> int:
     provider_config, model_config = select_route(
         config, args.host, args.mode, args.provider, args.model
     )
     if args.capability and args.mode != "execute":
         raise SideLaneError("--capability is supported only in execute mode")
+    if run_mcp_servers and args.mode != "execute":
+        # Review mode is strict no-MCP by canonical governance; no per-run
+        # registration may widen it, and the adapters refuse it too.
+        raise SideLaneError("--mcp-config is supported only in execute mode")
+    if run_mcp_servers:
+        # The narrowing control: every declared server must map from a
+        # capability the coordinator also passed with --capability, so the
+        # run config can never grant tools beyond the requested capabilities.
+        validate_against_capabilities(run_mcp_servers, set(args.capability))
+        # Fail closed before anything is created when a referenced env name is
+        # absent from the launching environment (the adapters re-check against
+        # the scrubbed child environment they actually build).
+        require_env_references(run_mcp_servers, os.environ)
+    if read_roots and args.mode != "execute":
+        # A review lane's argv is the strict read-only form, and the only
+        # directory control the hosts expose for extra directories is a
+        # workspace/write grant. Refuse rather than launch a lane whose stated
+        # scope the worker cannot be given.
+        raise SideLaneError("--read-root is supported only in execute mode")
     if getattr(args, "verify", None) and args.mode != "execute":
         # A review lane disposes its worktree before any verification could
         # run, so accepting the flag there would be a silent no-op the
         # operator believes happened. Fail closed instead.
         raise SideLaneError("--verify is supported only in execute mode")
+    if getattr(args, "skill", None) and args.mode != "execute":
+        # Skills materialize inside the execute lane's worktree; a review
+        # lane has nowhere to put them and would silently drop the request.
+        raise SideLaneError("--skill is supported only in execute mode")
     unknown = sorted(set(args.capability) - set(config["capabilities"]))
     if unknown:
         raise SideLaneError(f"unknown capabilities: {', '.join(unknown)}")
@@ -783,6 +1113,25 @@ def _launch(
         evidence = _capability_report(
             config, args.host, args.mode, args.provider, args.model, repo
         )["capability_evidence"]
+        if run_mcp_servers:
+            # A per-run registration IS this run's delivery of the capability:
+            # the host-inventory scan cannot see a file that has not been
+            # written for the host yet, so the delivered server names supply
+            # the presence evidence instead — registration evidence only, on
+            # the same terms as every other "present" basis: bridge
+            # authentication and a live tool call stay unproven.
+            delivered = set(run_mcp_servers)
+            for name in args.capability:
+                server = RUN_MCP_CAPABILITY_SERVERS.get(name)
+                if server is not None and server in delivered:
+                    evidence[name] = {
+                        "state": "present",
+                        "basis": (
+                            f"per-run --mcp-config registration of the server named "
+                            f"{server!r}; bridge authentication and any live tool "
+                            "call not tested"
+                        ),
+                    }
         missing = [
             name
             for name in args.capability
@@ -807,12 +1156,41 @@ def _launch(
     lane = create_worktree(
         repo, args.lane_name, worktree_root=getattr(args, "worktree_root", None)
     )
+    # Execute lanes only, at this shared preparation layer rather than in any
+    # adapter: every host receives the same catalog in its task context and
+    # the same materialized files inside its worktree, so local and cloud
+    # workers read identical pinned skill instructions without touching user
+    # settings, CODEX_HOME, or MCP configuration. Review lanes are unchanged.
+    # Delivery is fail-closed: a bundle that cannot validate aborts the run
+    # before a worker starts (the pin is only meaningful if drift is fatal),
+    # and the abort disposes the lane worktree it had begun preparing. Named
+    # skills (--skill) are additive to the discipline defaults and closed
+    # under references; a private skill unavailable outside a dev-tools
+    # checkout fails here, naming the flag to drop.
+    skill_catalog: list[dict[str, object]] = []
     secret: str | None = None
     try:
+        if args.mode == "execute":
+            # `--skill` is declared by the `run` subparser, like `--verify`
+            # and `--no-publish` below, so read it the same tolerant way.
+            named_skills = tuple(getattr(args, "skill", None) or ())
+            records = deliver_skills(lane.worktree, skills=named_skills)
+            skill_catalog = [record.as_dict() for record in records]
+            note = catalog_note(records)
+            if note:
+                prompt = prompt + "\n\n" + note
         if provider_config["auth_method"] == "oauth":
             require_native_oauth(args.host, executable=executable)
         else:
             secret = read_credential(provider_config["credential_service"])
+        # Snapshot the coordinator checkout immediately before the worker
+        # starts: whatever the source tree already carried is baseline, and
+        # only the delta after the run is reported. Execute lanes only — a
+        # review lane never gets write authority, and its whole worktree is
+        # disposable, so the extra git call buys nothing there.
+        source_baseline = (
+            snapshot_source(repo) if args.mode == "execute" else frozenset()
+        )
         if args.host == "codex":
             from side_lane.adapters.codex import run_codex
 
@@ -829,6 +1207,8 @@ def _launch(
                 capabilities=capabilities,
                 support_dir=host_support_dir(args.host, executable),
                 secret=secret,
+                read_roots=read_roots,
+                run_mcp_servers=run_mcp_servers,
             )
         elif args.host == "claude":
             from side_lane.adapters.claude import launch
@@ -845,6 +1225,8 @@ def _launch(
                 mode=args.mode,
                 capabilities=capabilities,
                 secret=secret,
+                read_roots=read_roots,
+                run_mcp_servers=run_mcp_servers,
             )
         else:
             from side_lane.adapters.devin import launch
@@ -860,6 +1242,8 @@ def _launch(
                 prompt=prompt,
                 mode=args.mode,
                 capabilities=capabilities,
+                read_roots=read_roots,
+                run_mcp_servers=run_mcp_servers,
             )
     except Exception:
         dispose_clean_worktree(lane)
@@ -870,6 +1254,26 @@ def _launch(
         print(result.stderr, file=sys.stderr)
     summary = result.as_dict()
     status = git_status(lane)
+    # Compare the coordinator checkout against its pre-dispatch baseline
+    # BEFORE writing the audit so the audit itself records what changed. A
+    # failed comparison is not silently clean: the run reports the check as
+    # unverified and refuses to claim a clean delivery below.
+    source_changes: tuple[str, ...] | None = ()
+    source_check_error: str | None = None
+    if args.mode == "execute":
+        try:
+            source_changes = source_mutations(repo, source_baseline)
+        except WorktreeError as exc:
+            source_changes = None
+            source_check_error = str(exc)
+    # Preserve the provider's outcome separately from this runner's check.
+    # Machine readers must see the same source-check failure as the exit code.
+    source_exit_status = result.returncode or (
+        LANE_DELIVERY_UNVERIFIED if source_check_error is not None
+        else LANE_SOURCE_MUTATED if source_changes else 0
+    )
+    summary["provider_exit_status"] = result.returncode
+    summary["exit_status"] = source_exit_status
     audit = write_audit(
         lane,
         host=result.host,
@@ -880,7 +1284,7 @@ def _launch(
         billable=result.billable,
         model=result.model,
         prompt=prompt,
-        exit_status=result.returncode,
+        exit_status=source_exit_status,
         status=status,
         stdout=result.stdout,
         stderr=result.stderr,
@@ -888,6 +1292,17 @@ def _launch(
         resolved_model=result.resolved_model,
         usage=result.usage,
         provider_artifact=result.provider_artifact,
+        read_roots=[str(root) for root in read_roots],
+        skill_catalog=skill_catalog,
+        run_mcp_servers=(
+            [
+                {"server": name, "config": str(Path(args.mcp_config).expanduser())}
+                for name in audit_names(run_mcp_servers)
+            ]
+            if run_mcp_servers
+            else []
+        ),
+        source_changes=list(source_changes or ()),
     )
     summary.update(
         {
@@ -896,8 +1311,16 @@ def _launch(
             "git_status": status,
             "audit": str(audit),
             "result_artifact": str(audit),
+            "skill_catalog": skill_catalog,
+            "run_mcp_servers": list(audit_names(run_mcp_servers)) if run_mcp_servers else [],
+            # None means the comparison itself failed — never report that as
+            # a clean checkout, same contract as delivered/verified above.
+            "source_mutated": None if source_changes is None else bool(source_changes),
+            "source_changes": list(source_changes or ()),
         }
     )
+    if source_check_error is not None:
+        summary["source_check_unverified"] = source_check_error
     if args.mode == "review":
         dispose_clean_worktree(lane)
         summary["worktree_disposed"] = True
@@ -985,6 +1408,35 @@ def _launch(
         return result.returncode
     if verify is not None and not verify.passed:
         return LANE_VERIFY_FAILED
+    if source_check_error is not None:
+        # Fail closed like an unverifiable lane tree: "we could not look at
+        # the coordinator checkout" must not read as a clean run.
+        print(
+            "side-lane: could not verify the coordinator checkout stayed "
+            f"unchanged, so the run is not claimed clean: {source_check_error}",
+            file=sys.stderr,
+        )
+        return LANE_DELIVERY_UNVERIFIED
+    if source_changes:
+        # Report the changed paths, not invented blame: a worker writing
+        # outside its lane and a concurrent human edit are indistinguishable
+        # here, and either way the run is not a clean accepted delivery. The
+        # lane's own work — commits, worktree, audit — is left untouched.
+        listed = "\n  ".join(source_changes[:20])
+        more = (
+            ""
+            if len(source_changes) <= 20
+            else f"\n  ... and {len(source_changes) - 20} more"
+        )
+        print(
+            "side-lane: the coordinator checkout changed during the run "
+            "(detected changes; attribution unknown):\n"
+            f"  {listed}{more}\n"
+            "Nothing was removed. Inspect the paths above before accepting "
+            "the lane's delivery.",
+            file=sys.stderr,
+        )
+        return LANE_SOURCE_MUTATED
     if delivery.delivered:
         return 0
     # --allow-no-commit covers a lane whose intended outcome is no commit. It
@@ -1072,8 +1524,19 @@ def run(argv: Sequence[str] | None = None) -> int:
     if args.command == "evaluate":
         return _evaluate(args.input)
     repo = validate_governance(args.repo)
+    # Validated before any worktree, credential or host executable is touched,
+    # so an unsafe or unusable read root fails the run before it can leave a
+    # lane behind. `--read-root` is declared by the `run` subparser, so it is
+    # always present here.
+    read_roots = parse_read_roots(args.read_root)
+    # Same fail-closed ordering for the per-run MCP registration file: its
+    # structure, capability narrowing and env references are all checked here
+    # (side_lane.mcp_run_config) before anything is created or started.
+    run_mcp_servers = load_run_mcp_config(args.mcp_config) if args.mcp_config else None
     return _launch(
-        args, config, repo, load_prompt(args.prompt, args.prompt_file, args.mode)
+        args, config, repo, load_prompt(args.prompt, args.prompt_file, args.mode),
+        read_roots=read_roots,
+        run_mcp_servers=run_mcp_servers,
     )
 
 
@@ -1085,6 +1548,9 @@ def main() -> None:
         AuthError,
         CredentialError,
         GovernanceError,
+        ReadRootError,
+        SkillBundleError,
+        McpRunConfigError,
         WorktreeError,
         ClaudeAdapterError,
         CodexAdapterError,

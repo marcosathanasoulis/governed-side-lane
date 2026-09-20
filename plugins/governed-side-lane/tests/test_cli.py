@@ -305,7 +305,7 @@ class SideLaneTests(unittest.TestCase):
             },
         }
         repo = self.repo()
-        worktree = repo.parent / "devin-worktree"
+        worktree = repo / "devin-worktree"
         lane = mock.Mock(worktree=worktree, branch="side-lane/devin-1")
         result = LaneResult(
             ("devin",),
@@ -328,7 +328,7 @@ class SideLaneTests(unittest.TestCase):
             provider="devin",
             model=model,
             capability=[],
-            lane_name="devin-1",
+            lane_name="devin-1", skill=[],
             approve_billable_route=False,
             worktree_root=None,
             verify=None,
@@ -399,7 +399,7 @@ class SideLaneTests(unittest.TestCase):
             provider="glm",
             model="glm-5.3",
             capability=[],
-            lane_name="review",
+            lane_name="review", skill=[],
             approve_billable_route=False,
             worktree_root=None,
         )
@@ -432,7 +432,7 @@ class SideLaneTests(unittest.TestCase):
             provider="devin",
             model="grok-4-6-low",
             capability=[],
-            lane_name="metered",
+            lane_name="metered", skill=[],
             approve_billable_route=False,
             worktree_root=None,
         )
@@ -454,7 +454,7 @@ class SideLaneTests(unittest.TestCase):
     ) -> None:
         config = self.devin_billing_config()
         repo = self.repo()
-        worktree = repo.parent / "metered-devin-worktree"
+        worktree = repo / "metered-devin-worktree"
         lane = mock.Mock(worktree=worktree, branch="side-lane/metered")
         result = LaneResult(
             ("devin",),
@@ -477,7 +477,7 @@ class SideLaneTests(unittest.TestCase):
             provider="devin",
             model="grok-4-6-low",
             capability=[],
-            lane_name="metered",
+            lane_name="metered", skill=[],
             approve_billable_route=True,
             worktree_root=None,
             verify=None,
@@ -562,7 +562,7 @@ class SideLaneTests(unittest.TestCase):
             provider="openai",
             model="gpt-5.6-terra",
             capability=["gitnexus"],
-            lane_name="worker",
+            lane_name="worker", skill=[],
             approve_billable_route=False,
             worktree_root=None,
         )
@@ -591,7 +591,7 @@ class SideLaneTests(unittest.TestCase):
             provider="openai",
             model="gpt-5.6-terra",
             capability=[],
-            lane_name="review",
+            lane_name="review", skill=[],
             approve_billable_route=False,
             worktree_root=None,
             verify=None,
@@ -641,7 +641,7 @@ class SideLaneTests(unittest.TestCase):
             provider="claude",
             model="claude-sonnet-5",
             capability=[],
-            lane_name="review",
+            lane_name="review", skill=[],
             approve_billable_route=False,
             worktree_root=None,
             verify=None,
@@ -703,7 +703,7 @@ class SideLaneTests(unittest.TestCase):
             provider="claude",
             model="claude-sonnet-5",
             capability=[],
-            lane_name="review",
+            lane_name="review", skill=[],
             approve_billable_route=False,
             worktree_root=None,
             verify=None,
@@ -746,7 +746,10 @@ class SideLaneTests(unittest.TestCase):
         test_worktrees.py covers the real invocations.
         """
         repo = self.repo()
-        worktree = repo.parent / "execute-worktree"
+        # Inside repo's tempdir (not a fixed sibling of it): execute lanes now
+        # materialize the skill bundle into this path for real, so a shared
+        # path would leak deliveries across tests — and into the OS temp root.
+        worktree = repo / "execute-worktree"
         lane = mock.Mock(worktree=worktree, branch="side-lane/task-1")
         result = LaneResult(
             ("claude",),
@@ -767,7 +770,7 @@ class SideLaneTests(unittest.TestCase):
             provider="claude",
             model="claude-sonnet-5",
             capability=[],
-            lane_name="task",
+            lane_name="task", skill=[],
             approve_billable_route=False,
             worktree_root=None,
             allow_no_commit=False,
@@ -938,7 +941,7 @@ class SideLaneTests(unittest.TestCase):
             provider="claude",
             model="claude-sonnet-5",
             capability=[],
-            lane_name="review",
+            lane_name="review", skill=[],
             approve_billable_route=False,
             worktree_root=None,
             verify="make test",
@@ -1274,6 +1277,256 @@ class ConnectorDiscoveryTests(unittest.TestCase):
             report["capability_evidence"]["gitnexus"]["state"], "name-mismatch"
         )
 
+    def test_slack_read_evidence_separates_registration_from_authentication(self) -> None:
+        # Registration presence is metadata evidence; it never claims Slack
+        # authentication or a live read. Exact-name mismatch fails closed the
+        # way the graph capability checks do.
+        for names, expected_state in (
+            ({"slack"}, "present"),
+            (set(), "unknown"),
+            ({"slack-readonly", "zoom"}, "name-mismatch"),
+        ):
+            with self.subTest(names=sorted(names), expected_state=expected_state):
+                with (
+                    mock.patch(
+                        "side_lane.cli._host_executable", return_value="/opt/claude"
+                    ),
+                    mock.patch(
+                        "side_lane.cli._discover_mcp_inventory",
+                        return_value=(names, set()),
+                    ),
+                ):
+                    report = cli._capability_report(
+                        {"providers": {}, "capabilities": ["slack-read"]},
+                        "claude",
+                        "execute",
+                        None,
+                        None,
+                    )
+                evidence = report["capability_evidence"]["slack-read"]
+                self.assertEqual(evidence["state"], expected_state)
+                if expected_state == "present":
+                    self.assertIn(
+                        "authentication and a live read are not tested",
+                        evidence["basis"],
+                    )
+                if expected_state == "name-mismatch":
+                    self.assertIn("register the server as 'slack'", evidence["basis"])
+                # Registration of any kind is not a verified capability.
+                self.assertFalse(report["capabilities"]["slack-read"])
+
+    def test_slack_read_requires_exact_registration_on_codex(self) -> None:
+        # The slack-read grants embed the server name 'slack' exactly on every
+        # host, so a Codex near-miss registration is name-mismatch and fails
+        # the launch gate; an exact registration is present without auth proof.
+        for names, expected_state in (
+            ({"slack-mcp"}, "name-mismatch"),
+            ({"slack"}, "present"),
+        ):
+            with self.subTest(names=sorted(names), expected_state=expected_state):
+                with (
+                    mock.patch(
+                        "side_lane.cli._host_executable", return_value="/opt/codex"
+                    ),
+                    mock.patch(
+                        "side_lane.cli._discover_mcp_inventory",
+                        return_value=(names, set()),
+                    ),
+                ):
+                    report = cli._capability_report(
+                        {"providers": {}, "capabilities": ["slack-read"]},
+                        "codex",
+                        "execute",
+                        None,
+                        None,
+                    )
+                evidence = report["capability_evidence"]["slack-read"]
+                self.assertEqual(evidence["state"], expected_state)
+                if expected_state == "name-mismatch":
+                    self.assertIn("register the server as 'slack'", evidence["basis"])
+                else:
+                    self.assertIn(
+                        "authentication and a live read are not tested",
+                        evidence["basis"],
+                    )
+                self.assertNotRegex(
+                    evidence["basis"],
+                    r"authenticat(ed|ion) (read|succeeded|is verified)",
+                )
+                self.assertFalse(report["capabilities"]["slack-read"])
+
+    def test_cm_services_capabilities_require_the_exact_fixed_server(self) -> None:
+        # asana-read/drive-read/algolia-read grants embed the server name 'cm-services'
+        # exactly, so registration evidence demands the exact name on every
+        # host; presence is registration metadata only — same-account
+        # provisioning, authentication, and a live read stay untested.
+        for names, expected_state in (
+            ({"cm-services"}, "present"),
+            (set(), "unknown"),
+            ({"cm-services-legacy"}, "name-mismatch"),
+        ):
+            for host in ("claude", "devin"):
+                with self.subTest(names=sorted(names), host=host,
+                                  expected_state=expected_state):
+                    with (
+                        mock.patch(
+                            "side_lane.cli._host_executable", return_value=f"/opt/{host}"
+                        ),
+                        mock.patch(
+                            "side_lane.cli._discover_mcp_inventory",
+                            return_value=(names, set()),
+                        ),
+                    ):
+                        report = cli._capability_report(
+                            {"providers": {},
+                             "capabilities": ["asana-read", "drive-read", "gcloud-read", "database-read", "algolia-read"]},
+                            host,
+                            "execute",
+                            None,
+                            None,
+                        )
+                    for capability in ("asana-read", "drive-read", "gcloud-read", "database-read", "algolia-read"):
+                        evidence = report["capability_evidence"][capability]
+                        self.assertEqual(evidence["state"], expected_state)
+                        if expected_state == "present":
+                            self.assertIn("same-account provisioning", evidence["basis"])
+                            self.assertIn("not tested", evidence["basis"])
+                        if expected_state == "name-mismatch":
+                            self.assertIn(
+                                "register the server as 'cm-services'", evidence["basis"]
+                            )
+                        # Registration of any kind is not a verified capability.
+                        self.assertFalse(report["capabilities"][capability])
+
+    def test_graph_connector_codex_substring_behavior_preserved(self) -> None:
+        # The slack exact-name tightening must not change the graph
+        # capabilities' Codex behavior: connector-name presence remains the
+        # evidence there, so a near-miss is still present, not name-mismatch.
+        with (
+            mock.patch("side_lane.cli._host_executable", return_value="/opt/codex"),
+            mock.patch(
+                "side_lane.cli._discover_mcp_inventory",
+                return_value=({"gitnexus-local"}, set()),
+            ),
+        ):
+            report = cli._capability_report(
+                {"providers": {}, "capabilities": ["gitnexus"]},
+                "codex",
+                "execute",
+                None,
+                None,
+            )
+        evidence = report["capability_evidence"]["gitnexus"]
+        self.assertEqual(evidence["state"], "present")
+        self.assertIn("metadata only", evidence["basis"])
+
+    def test_codex_retains_native_service_cli_presence_without_bridge(self) -> None:
+        with (
+            mock.patch("side_lane.cli._host_executable", return_value="/opt/codex"),
+            mock.patch("side_lane.cli._discover_mcp_inventory", return_value=(set(), set())),
+            mock.patch("side_lane.cli.shutil.which", side_effect=lambda name: "/bin/" + name),
+        ):
+            report = cli._capability_report(
+                {"providers": {}, "capabilities": ["gcloud-read", "database-read"]},
+                "codex", "execute", None, None,
+            )
+        self.assertEqual(report["capability_evidence"]["gcloud-read"]["state"], "present")
+        self.assertIn("native gcloud executable", report["capability_evidence"]["gcloud-read"]["basis"])
+        self.assertEqual(report["capability_evidence"]["database-read"]["state"], "present")
+        self.assertIn("native psql executable", report["capability_evidence"]["database-read"]["basis"])
+
+    def test_devin_registration_sources_distinguish_absent_from_unrecognised(
+        self,
+    ) -> None:
+        # An empty `mcp_connectors` has two different causes, and only the file
+        # dispositions can tell them apart: nothing registered, or a file this
+        # scanner did not recognise. Reporting one as the other is how a
+        # registration gap and a parser gap get conflated.
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "home"
+            repo = Path(directory) / "repo"
+            (home / ".config" / "devin").mkdir(parents=True)
+            (repo / ".devin").mkdir(parents=True)
+            (home / ".config" / "devin" / "mcp_config.json").write_text(
+                '{"mcpServers":{"gitnexus":{"command":"native"}}}', encoding="utf-8"
+            )
+            # Present, parses, but declares no container this scanner reads.
+            (repo / ".devin" / "mcp_config.json").write_text(
+                '{"servers":{"codegraph":{"command":"other-shape"}}}', encoding="utf-8"
+            )
+            with mock.patch("side_lane.cli.Path.home", return_value=home):
+                sources = cli._mcp_registration_sources("devin", repo)
+        self.assertEqual(
+            sources,
+            [
+                {
+                    "scope": "user",
+                    "path": str(home / ".config" / "devin" / "mcp_config.json"),
+                    "state": "registered",
+                },
+                {
+                    "scope": "project",
+                    "path": str(repo / ".devin" / "mcp_config.json"),
+                    "state": "no-servers",
+                },
+                {
+                    "scope": "local",
+                    "path": str(repo / ".devin" / "mcp_config.local.json"),
+                    "state": "missing",
+                },
+            ],
+        )
+
+    def test_registration_sources_report_unparsed_and_out_of_scope_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "home"
+            repo = Path(directory) / "repo"
+            (home / ".config" / "devin").mkdir(parents=True)
+            (repo / ".devin").mkdir(parents=True)
+            (home / ".config" / "devin" / "mcp_config.json").write_text(
+                '{"mcpServers": {', encoding="utf-8"
+            )
+            (repo / ".devin" / "mcp_config.json").write_text(
+                json.dumps({"projects": {"/elsewhere": {"mcpServers": {"zoom": {}}}}}),
+                encoding="utf-8",
+            )
+            with mock.patch("side_lane.cli.Path.home", return_value=home):
+                sources = cli._mcp_registration_sources("devin", repo)
+        self.assertEqual([source["state"] for source in sources],
+                         ["unparsed", "out-of-scope-only", "missing"])
+        # Only paths ever leave the registration files, never their values.
+        self.assertNotIn("/elsewhere", json.dumps(sources))
+
+    def test_capability_report_carries_registration_sources_and_never_verifies(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "home"
+            repo = Path(directory) / "repo"
+            home.mkdir()
+            repo.mkdir()
+            config = {"providers": {}, "capabilities": ["gitnexus", "codegraph"]}
+            with (
+                mock.patch("side_lane.cli.Path.home", return_value=home),
+                mock.patch("side_lane.cli._host_executable", return_value="/opt/devin"),
+                mock.patch(
+                    "side_lane.cli._discover_mcp_inventory",
+                    return_value=({"gitnexus"}, set()),
+                ),
+            ):
+                report = cli._capability_report(config, "devin", "execute", None, None, repo)
+        self.assertIn("mcp_registration_sources", report)
+        # A registered connector is presence evidence, never a verified
+        # capability: no live call and no fresh graph has been demonstrated.
+        self.assertEqual(
+            report["capability_evidence"]["gitnexus"]["state"], "present"
+        )
+        self.assertFalse(report["capabilities"]["gitnexus"])
+        self.assertFalse(report["capabilities"]["codegraph"])
+        self.assertIn(
+            "mcp_registration_sources", report["capability_evidence"]["codegraph"]["basis"]
+        )
+
 
 class ExecuteLanePermissionTests(SideLaneTests):
     def test_playwright_capability_is_reported_from_connector_names_only(self) -> None:
@@ -1369,7 +1622,9 @@ class ExecuteLanePermissionTests(SideLaneTests):
         self,
     ) -> None:
         repo = self.repo()
-        worktree = repo.parent / "execute-worktree"
+        # Same reasoning as _delivered_lane: a per-test worktree, because
+        # execute lanes materialize the skill bundle here for real.
+        worktree = repo / "execute-worktree"
         lane = mock.Mock(worktree=worktree, branch="side-lane/task-1")
         result = LaneResult(
             ("claude", "--allowedTools", "Bash(pnpm *)"),
@@ -1392,7 +1647,7 @@ class ExecuteLanePermissionTests(SideLaneTests):
             provider="claude",
             model="claude-sonnet-5",
             capability=["shell", "shell"],
-            lane_name="task",
+            lane_name="task", skill=[],
             approve_billable_route=False,
             worktree_root=None,
             verify=None,
@@ -1432,7 +1687,7 @@ class ExecuteLanePermissionTests(SideLaneTests):
 
     def test_codex_launch_passes_host_support_dir(self) -> None:
         repo = self.repo()
-        worktree = repo.parent / "codex-worktree"
+        worktree = repo / "codex-worktree"
         lane = mock.Mock(worktree=worktree, branch="side-lane/task-2")
         result = LaneResult(
             ("codex",),
@@ -1453,7 +1708,7 @@ class ExecuteLanePermissionTests(SideLaneTests):
             provider="openai",
             model="gpt-5.6-sol",
             capability=[],
-            lane_name="task",
+            lane_name="task", skill=[],
             approve_billable_route=False,
             worktree_root=None,
             verify=None,
@@ -1493,7 +1748,7 @@ class LaunchCapabilityGateTests(SideLaneTests):
             provider="claude",
             model="claude-sonnet-5",
             capability=capability,
-            lane_name="task",
+            lane_name="task", skill=[],
             approve_billable_route=False,
             worktree_root=None,
         )
@@ -1507,6 +1762,7 @@ class LaunchCapabilityGateTests(SideLaneTests):
                 "secret-use": {"state": "unknown"},
                 "gitnexus": {"state": "unavailable"},
                 "codegraph": {"state": "name-mismatch"},
+                "slack-read": {"state": "name-mismatch"},
             },
             "capabilities": {"shell": True},
         }
@@ -1545,6 +1801,100 @@ class LaunchCapabilityGateTests(SideLaneTests):
                     self.repo(),
                     "Implement",
                 )
+            # `load_config()` may follow an ambient SIDE_LANE_MODELS_PATH that
+            # lags the package config, so ensure the capability is known here
+            # regardless; the gate under test is the evidence state, not the
+            # allowlist lookup.
+            config = dict(cli.load_config())
+            config["capabilities"] = sorted(
+                set(config["capabilities"]) | {"slack-read"}
+            )
+            with self.assertRaisesRegex(cli.SideLaneError, "unavailable: slack-read"):
+                cli._launch(
+                    self._args(["slack-read"]),
+                    config,
+                    self.repo(),
+                    "Implement",
+                )
+
+    def test_cm_services_cloud_capabilities_reach_the_real_launch_gate(self) -> None:
+        """The cloud bridge must satisfy the launch gate without local CLIs."""
+        config = cli.load_config()
+        repo = self.repo()
+        lane = mock.Mock(worktree=repo / "lane", branch="side-lane/cm-services")
+        result = LaneResult(
+            ("claude",), 0, lane.worktree, "claude", "claude", "native-claude",
+            "claude-sonnet-5", "oauth", False, "", "",
+            requested_model="claude-sonnet-5", resolved_model="claude-sonnet-5",
+        )
+        args = mock.Mock(
+            host="claude", mode="execute", provider="claude", model="claude-sonnet-5",
+            capability=["gcloud-read", "database-read"], lane_name="cm-services",
+            skill=[], approve_billable_route=False, worktree_root=None, verify=None,
+            read_root=[], mcp_config=None,
+        )
+        with tempfile.TemporaryDirectory() as home:
+            home_path = Path(home)
+            (home_path / ".claude.json").write_text(
+                json.dumps({"mcpServers": {"cm-services": {"command": "cm-services"}}}),
+                encoding="utf-8",
+            )
+            # Neither executable exists in this synthetic cloud image; the
+            # actual capability report must use the fixed MCP registration.
+            with (
+                mock.patch.dict(os.environ, {"HOME": home}, clear=False),
+                mock.patch("side_lane.cli.shutil.which", side_effect=lambda name: None if name in {"gcloud", "psql"} else "/bin/tool"),
+                mock.patch("side_lane.cli._require_host_executable", return_value="/opt/claude"),
+                mock.patch("side_lane.cli.create_worktree", return_value=lane),
+                mock.patch("side_lane.cli.lane_delivery", return_value=LaneDelivery(committed=True, uncommitted=())),
+                mock.patch("side_lane.cli.require_native_oauth"),
+                mock.patch("side_lane.adapters.claude.launch", return_value=result),
+                mock.patch("side_lane.cli.git_status", return_value="## lane"),
+                mock.patch("side_lane.cli.write_audit", return_value=repo / ".git/audit.json"),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(cli._launch(args, config, repo, "Use the service bridge"), 0)
+
+    def test_algolia_read_launch_gate_with_cm_services_evidence(self) -> None:
+        """algolia-read is admitted only when cm-services is registered exactly;
+        an unregistered bridge fails the launch gate before a worktree is made.
+        """
+        config = cli.load_config()
+        repo = self.repo()
+        with tempfile.TemporaryDirectory() as home:
+            home_path = Path(home)
+            (home_path / ".claude.json").write_text(
+                json.dumps({"mcpServers": {"cm-services": {"command": "cm-services"}}}),
+                encoding="utf-8",
+            )
+            args = mock.Mock(
+                host="claude", mode="execute", provider="claude", model="claude-sonnet-5",
+                capability=["algolia-read"], lane_name="algolia", skill=[],
+                approve_billable_route=False, worktree_root=None, verify=None,
+                read_root=[], mcp_config=None,
+            )
+            with (
+                mock.patch.dict(os.environ, {"HOME": home}, clear=False),
+                mock.patch("side_lane.cli.shutil.which", side_effect=lambda name: None if name in {"gcloud", "psql"} else "/bin/tool"),
+                mock.patch("side_lane.cli._require_host_executable", side_effect=cli.SideLaneError("stop here")),
+                mock.patch("side_lane.cli.create_worktree") as create,
+            ):
+                with self.assertRaisesRegex(cli.SideLaneError, "stop here"):
+                    cli._launch(args, config, repo, "Use algolia")
+                create.assert_not_called()
+                # Remove the exact server: the gate must reject algolia-read.
+                (home_path / ".claude.json").write_text(
+                    json.dumps({"mcpServers": {}}), encoding="utf-8"
+                )
+                args = mock.Mock(
+                    host="claude", mode="execute", provider="claude", model="claude-sonnet-5",
+                    capability=["algolia-read"], lane_name="algolia", skill=[],
+                    approve_billable_route=False, worktree_root=None, verify=None,
+                    read_root=[], mcp_config=None,
+                )
+                with self.assertRaisesRegex(cli.SideLaneError, "unavailable: algolia-read"):
+                    cli._launch(args, config, repo, "Use algolia")
+                create.assert_not_called()
 
 
 if __name__ == "__main__":
@@ -1571,7 +1921,7 @@ class HostExecutableCliTests(unittest.TestCase):
             provider="openai",
             model="gpt-5.6-terra",
             capability=[],
-            lane_name="worker",
+            lane_name="worker", skill=[],
             approve_billable_route=False,
             worktree_root=None,
         )

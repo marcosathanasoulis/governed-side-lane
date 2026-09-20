@@ -4,7 +4,7 @@ import tempfile
 import unittest
 import subprocess
 
-from side_lane import cli
+from side_lane import cli, devin_command_policy
 from side_lane.governance import GovernanceError, lane_system_prompt, validate_repository
 from side_lane.adapters import claude, codex
 
@@ -184,8 +184,119 @@ class ToolPolicyTests(unittest.TestCase):
         self.assertIn("mcp__codegraph__find_callers", policy.allowed["codegraph"])
         for rules in list(policy.allowed.values()) + [policy.always]:
             for rule in rules:
-                self.assertNotRegex(rule, r"gcloud|deploy|merge|iam|secret|force")
+                self.assertNotRegex(rule, r"gcloud|deploy|iam|secret|force|Bash\(git merge(?: |\))")
         self.assertEqual(claude.allowed_tools("execute", ("shell",)), policy.always + policy.allowed["shell"])
+
+    def test_terraform_benign_commands_render_and_siblings_stay_rejected(self) -> None:
+        from side_lane.governance import tool_policy
+
+        policy = tool_policy()
+        allowed = policy.allowed["shell"]
+        for rule in ("Bash(terraform fmt *)", "Bash(terraform validate *)", "Bash(terraform version)"):
+            self.assertIn(rule, allowed)
+            self.assertIn(rule, claude.allowed_tools("execute", ("shell",)))
+        self.assertEqual(devin_command_policy.devin_exec_rule("Bash(terraform fmt *)"), "Exec(terraform fmt)")
+        self.assertEqual(devin_command_policy.devin_exec_rule("Bash(terraform validate *)"), "Exec(terraform validate)")
+        self.assertEqual(devin_command_policy.devin_exec_rule("Bash(terraform version)"), "Exec(terraform version)")
+        for rule in ("Bash(terraform *)", "Bash(terraform init *)", "Bash(terraform plan *)",
+                     "Bash(terraform apply *)", "Bash(terraform destroy *)", "Bash(terraform import *)",
+                     "Bash(terraform state *)", "Bash(terraform deploy *)"):
+            self.assertNotIn(rule, allowed)
+
+    def test_slack_read_grants_exactly_the_two_read_only_slack_tools(self) -> None:
+        from side_lane.governance import tool_policy
+        policy = tool_policy()
+        self.assertEqual(
+            policy.allowed["slack-read"],
+            ("WaitForMcpServers", "mcp__slack__slack_read_thread", "mcp__slack__slack_read_channel"),
+        )
+        # No other rule may touch the Slack server: no wildcard, no sending,
+        # editing, search, files, or membership tool, in any capability.
+        for rules in list(policy.allowed.values()) + list(policy.denied.values()) + [policy.always]:
+            for rule in rules:
+                if rule.startswith("mcp__slack__"):
+                    self.assertIn(rule, policy.allowed["slack-read"])
+        self.assertNotIn("slack-read", policy.denied)
+
+    def test_cm_services_capabilities_grant_disjoint_exact_tool_sets(self) -> None:
+        from side_lane.governance import tool_policy
+        policy = tool_policy()
+        self.assertEqual(
+            policy.allowed["asana-read"],
+            (
+                "WaitForMcpServers",
+                "mcp__cm-services__asana_get_task",
+                "mcp__cm-services__asana_get_project",
+                "mcp__cm-services__asana_list_project_tasks",
+            ),
+        )
+        self.assertEqual(
+            policy.allowed["drive-read"],
+            (
+                "WaitForMcpServers",
+                "mcp__cm-services__drive_file_info",
+                "mcp__cm-services__drive_sheet_tabs",
+                "mcp__cm-services__drive_sheet_get",
+                "mcp__cm-services__drive_doc_get",
+            ),
+        )
+        # Disjoint grants on the shared server: no capability rule anywhere
+        # touches cm-services outside these two sets — no wildcard and no
+        # write tool.
+        exact = (
+            set(policy.allowed["asana-read"])
+            | set(policy.allowed["drive-read"])
+            | set(policy.allowed["gcloud-read"])
+            | set(policy.allowed["database-read"])
+            | set(policy.allowed["algolia-read"])
+            | set(policy.allowed["contentful-read"])
+            | set(policy.allowed["contentful-master-read"])
+        )
+        for rules in list(policy.allowed.values()) + list(policy.denied.values()) + [policy.always]:
+            for rule in rules:
+                if rule.startswith("mcp__cm-services__"):
+                    self.assertIn(rule, exact)
+        self.assertFalse(any(rule.endswith("*") for rule in exact - {"WaitForMcpServers"}))
+        self.assertNotIn("asana-read", policy.denied)
+        self.assertNotIn("drive-read", policy.denied)
+        self.assertEqual(
+            policy.allowed["gcloud-read"],
+            (
+                "WaitForMcpServers",
+                "mcp__cm-services__gcp_logs",
+                "mcp__cm-services__gcp_run_services",
+                "mcp__cm-services__gcp_run_jobs",
+                "mcp__cm-services__gcp_scheduler_jobs",
+                "mcp__cm-services__gcp_functions",
+                "mcp__cm-services__gcp_billing_mtd",
+                "mcp__cm-services__gcp_billing_daily",
+                "mcp__cm-services__gcp_menu",
+            ),
+        )
+        self.assertEqual(
+            policy.allowed["database-read"],
+            ("WaitForMcpServers", "mcp__cm-services__postgres_select"),
+        )
+        self.assertEqual(
+            policy.allowed["algolia-read"],
+            ("WaitForMcpServers", "mcp__cm-services__algolia_get_settings"),
+        )
+        self.assertEqual(
+            policy.allowed["contentful-read"],
+            (
+                "WaitForMcpServers",
+                "mcp__cm-services__contentful_get_entry",
+                "mcp__cm-services__contentful_search_entries",
+            ),
+        )
+        self.assertEqual(
+            policy.allowed["contentful-master-read"],
+            (
+                "WaitForMcpServers",
+                "mcp__cm-services__contentful_master_get_entry",
+                "mcp__cm-services__contentful_master_search_entries",
+            ),
+        )
 
     def test_malformed_allowlist_fails_closed(self) -> None:
         from side_lane.governance import tool_policy

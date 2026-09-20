@@ -103,6 +103,62 @@
         "source": {"type": "string", "minLength": 1}
       }
     },
+    "composite_receipt": {
+      "type": "object",
+      "required": ["verified", "verified_on", "source", "receipt_ref"],
+      "properties": {
+        "verified": {"const": true},
+        "verified_on": {"type": "string", "format": "date"},
+        "source": {"type": "string", "minLength": 1},
+        "receipt_ref": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "composite_evidence": {
+      "type": "object",
+      "required": ["mode", "auto_selection", "controlled_qualification"],
+      "properties": {
+        "mode": {"const": "controlled-member-plus-auto"},
+        "auto_selection": {
+          "type": "object",
+          "required": ["selector", "gateway", "host", "protocol", "policy_revision", "policy_fingerprint", "attested_member", "receipt"],
+          "properties": {
+            "selector": {"type": "string", "minLength": 1},
+            "gateway": {"const": "omniroute-router"},
+            "host": {"const": "claude"},
+            "protocol": {"const": "anthropic-compatible"},
+            "policy_revision": {"type": "string", "minLength": 1},
+            "policy_fingerprint": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+            "attested_member": {"type": "string", "minLength": 1},
+            "receipt": {"$ref": "#/$defs/composite_receipt"}
+          },
+          "additionalProperties": false
+        },
+        "controlled_qualification": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["attested_member", "provider", "model_vendor", "model", "gateway", "host", "protocol", "selector", "policy_revision", "policy_fingerprint", "receipt"],
+            "properties": {
+              "attested_member": {"type": "string", "minLength": 1},
+              "provider": {"type": "string", "minLength": 1},
+              "model_vendor": {"type": "string", "minLength": 1},
+              "model": {"type": "string", "minLength": 1},
+              "gateway": {"const": "omniroute-router"},
+              "host": {"const": "claude"},
+              "protocol": {"const": "anthropic-compatible"},
+              "selector": {"type": "string", "minLength": 1},
+              "policy_revision": {"type": "string", "minLength": 1},
+              "policy_fingerprint": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+              "receipt": {"$ref": "#/$defs/composite_receipt"}
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "route": {
       "type": "object",
       "required": ["id", "provider", "gateway", "auth_method", "billable", "model_vendor", "model", "host", "mode", "state", "execution_allowlisted", "protocol"],
@@ -113,7 +169,7 @@
         "auth_method": {"enum": ["oauth", "provider-key"]},
         "billable": {"type": "boolean"},
         "explicit_only": {"type": "boolean"},
-        "model_vendor": {"enum": ["claude", "openai", "glm", "deepseek", "kimi", "minimax", "cognition", "google", "xai"]},
+        "model_vendor": {"enum": ["claude", "openai", "glm", "deepseek", "kimi", "minimax", "cognition", "google", "xai", "routed-pool"]},
         "model": {"type": "string", "minLength": 1},
         "host": {"enum": ["codex", "claude", "devin"]},
         "mode": {"enum": ["review", "execute"]},
@@ -221,14 +277,116 @@
               }
             }
           ]
+        },
+        "routed_pool": {
+          "description": "Opaque-selector pool route (OmniRoute-style). Every member carries fresh reviewed router-path evaluation identity; runtime admission also requires the configured routing policy contract to match the member set exactly, plus a fresh operator-supplied server policy snapshot binding selector, canonical members, revision, fingerprint, caps, fail-closed context policy, and provenance. An optional `composite_evidence` block declares controlled-member-plus-auto admission with separate native AUTO execution and per-member controlled mapping receipts.",
+          "type": "object",
+          "required": ["selector", "host", "protocol", "policy_revision", "evidence_provenance", "context_fit_fail_closed", "members"],
+          "properties": {
+            "selector": {"type": "string", "minLength": 1},
+            "host": {"enum": ["codex", "claude", "devin"]},
+            "protocol": {"type": "string", "minLength": 1},
+            "policy_revision": {"type": "string", "minLength": 1},
+            "expected_caps": {"type": "object"},
+            "evidence_provenance": {"type": "string", "minLength": 1},
+            "context_fit_fail_closed": {"const": true},
+            "composite_evidence": {"$ref": "#/$defs/composite_evidence"},
+            "members": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "required": ["provider", "model_vendor", "model", "attested_model", "evaluation", "capabilities"],
+                "properties": {
+                  "provider": {"type": "string", "minLength": 1},
+                  "model_vendor": {"type": "string", "minLength": 1},
+                  "model": {"type": "string", "minLength": 1},
+                  "attested_model": {"type": "string", "minLength": 1},
+                  "approx_context_tokens": {"type": "integer", "minimum": 1},
+                  "max_output_tokens": {"type": "integer", "minimum": 1},
+                  "capabilities": {
+                    "type": "object",
+                    "required": ["supported", "connectors", "privacy_classes"],
+                    "properties": {
+                      "supported": {"type": "array", "items": {"type": "string"}},
+                      "connectors": {"type": "array", "items": {"type": "string"}},
+                      "privacy_classes": {"type": "array", "items": {"type": "string"}}
+                    },
+                    "additionalProperties": false
+                  },
+                  "evaluation": {
+                    "allOf": [
+                      {"$ref": "#/$defs/evidence"},
+                      {
+                        "type": "object",
+                        "required": ["identity", "task_scores", "acceptance_rate"],
+                        "properties": {
+                          "identity": {
+                            "type": "object",
+                            "required": ["gateway", "selector", "provider", "model", "host", "protocol", "policy_revision"],
+                            "properties": {
+                              "gateway": {"type": "string", "minLength": 1},
+                              "selector": {"type": "string", "minLength": 1},
+                              "provider": {"type": "string", "minLength": 1},
+                              "model": {"type": "string", "minLength": 1},
+                              "host": {"type": "string", "minLength": 1},
+                              "protocol": {"type": "string", "minLength": 1},
+                              "policy_revision": {"type": "string", "minLength": 1}
+                            },
+                            "additionalProperties": false
+                          },
+                          "task_scores": {
+                            "type": "object",
+                            "additionalProperties": {"type": "integer", "minimum": 0, "maximum": 100}
+                          },
+                          "acceptance_rate": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "additionalProperties": false
         }
       },
       "allOf": [
         {
           "if": {"properties": {"state": {"const": "executable"}}},
           "then": {
-            "required": ["allowlist_ref", "connector_retention", "connector_evidence", "cost_model", "local_evaluation", "privacy_classes", "capabilities", "behavioral_capabilities"]
+            "required": ["allowlist_ref", "connector_retention", "connector_evidence", "cost_model", "privacy_classes", "capabilities", "behavioral_capabilities"]
           }
+        },
+        {
+          "if": {
+            "properties": {"state": {"const": "executable"}},
+            "not": {"required": ["routed_pool"]}
+          },
+          "then": {"required": ["local_evaluation"]}
+        },
+        {
+          "if": {"required": ["routed_pool"]},
+          "then": {
+            "properties": {
+              "state": {"const": "executable"},
+              "provider": {"const": "omniroute"},
+              "gateway": {"const": "omniroute-router"},
+              "model_vendor": {"const": "routed-pool"},
+              "host": {"const": "claude"},
+              "mode": {"const": "execute"},
+              "protocol": {"const": "anthropic-compatible"},
+              "resolved_model": {"const": null}
+            },
+            "not": {"required": ["local_evaluation"]}
+          }
+        },
+        {
+          "if": {"anyOf": [
+            {"properties": {"model_vendor": {"const": "routed-pool"}}},
+            {"properties": {"provider": {"const": "omniroute"}, "state": {"const": "executable"}}}
+          ]},
+          "then": {"required": ["routed_pool"]}
         }
       ],
       "description": "Executable routing entries require a reviewed cost basis, worker-host connector evidence, local task evidence, and cross-checking against the separate runtime allowlist."

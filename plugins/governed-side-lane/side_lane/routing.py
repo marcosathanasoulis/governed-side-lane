@@ -7,12 +7,14 @@ credential nor activates, dispatches, or substitutes a model.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 import json
 import math
 import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+from side_lane import routed_pool as _pool
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -138,6 +140,10 @@ def validate_catalog(catalog: Mapping[str, Any]) -> None:
             if route.get("execution_allowlisted") is not True:
                 raise RoutingError(f"route {route_id} is executable but not allowlisted")
             _validate_executable_route(route, route_id)
+        elif "routed_pool" in route or route.get("model_vendor") == "routed-pool":
+            raise RoutingError(
+                f"route {route_id} declares routed_pool but is not executable"
+            )
     candidates = catalog.get("candidates", [])
     if not isinstance(candidates, list):
         raise RoutingError("routing catalog candidates must be an array")
@@ -195,32 +201,51 @@ def _validate_executable_route(route: Mapping[str, Any], route_id: str) -> None:
     _validate_reviewed_evidence(
         route.get("connector_evidence"), f"route {route_id} connector evidence"
     )
-    evaluation = _validate_reviewed_evidence(
-        route.get("local_evaluation"), f"route {route_id} local evaluation"
-    )
-    scores = evaluation.get("task_scores")
-    if not isinstance(scores, Mapping) or not scores:
-        raise RoutingError(f"route {route_id} lacks task-relative scores")
-    if not all(
-        isinstance(band, str)
-        and band
-        and not isinstance(score, bool)
-        and isinstance(score, int)
-        and 0 <= score <= 100
-        for band, score in scores.items()
-    ):
-        raise RoutingError(f"route {route_id} has invalid task-relative scores")
-    acceptance_rate = evaluation.get("acceptance_rate")
-    if isinstance(acceptance_rate, bool) or not isinstance(acceptance_rate, (int, float)) or not 0 < acceptance_rate <= 1:
-        raise RoutingError(f"route {route_id} lacks a valid acceptance_rate")
-    median_duration_ms = evaluation.get("median_duration_ms")
-    if median_duration_ms is not None and (
-        isinstance(median_duration_ms, bool)
-        or not isinstance(median_duration_ms, (int, float))
-        or not math.isfinite(float(median_duration_ms))
-        or median_duration_ms <= 0
-    ):
-        raise RoutingError(f"route {route_id} local_evaluation.median_duration_ms is invalid")
+    # An OmniRoute pool route IS its pool declaration: the key's presence —
+    # even malformed — opts into pool validation and can never fall through
+    # to ordinary exact-route eligibility, and a routed-pool vendor without
+    # the declaration is malformed.
+    is_pool = ("routed_pool" in route or route.get("model_vendor") == "routed-pool"
+               or route.get("provider") == _pool.POOL_PROVIDER)
+    if is_pool:
+        try:
+            _pool.validate_pool_spec(route)
+        except _pool.RoutedPoolError as exc:
+            raise RoutingError(str(exc)) from exc
+    evaluation: Mapping[str, Any] | None = None
+    if not is_pool:
+        evaluation = _validate_reviewed_evidence(
+            route.get("local_evaluation"), f"route {route_id} local evaluation"
+        )
+    elif route.get("local_evaluation") is not None:
+        raise RoutingError(
+            f"route {route_id} routed_pool members carry the evaluations; "
+            "a route-level local_evaluation is not allowed"
+        )
+    if not is_pool:
+        scores = evaluation.get("task_scores")
+        if not isinstance(scores, Mapping) or not scores:
+            raise RoutingError(f"route {route_id} lacks task-relative scores")
+        if not all(
+            isinstance(band, str)
+            and band
+            and not isinstance(score, bool)
+            and isinstance(score, int)
+            and 0 <= score <= 100
+            for band, score in scores.items()
+        ):
+            raise RoutingError(f"route {route_id} has invalid task-relative scores")
+        acceptance_rate = evaluation.get("acceptance_rate")
+        if isinstance(acceptance_rate, bool) or not isinstance(acceptance_rate, (int, float)) or not 0 < acceptance_rate <= 1:
+            raise RoutingError(f"route {route_id} lacks a valid acceptance_rate")
+        median_duration_ms = evaluation.get("median_duration_ms")
+        if median_duration_ms is not None and (
+            isinstance(median_duration_ms, bool)
+            or not isinstance(median_duration_ms, (int, float))
+            or not math.isfinite(float(median_duration_ms))
+            or median_duration_ms <= 0
+        ):
+            raise RoutingError(f"route {route_id} local_evaluation.median_duration_ms is invalid")
     cost_model = route.get("cost_model")
     if not isinstance(cost_model, Mapping):
         raise RoutingError(f"route {route_id} lacks a reviewed cost model")
@@ -237,6 +262,18 @@ def _validate_executable_route(route: Mapping[str, Any], route_id: str) -> None:
             value = rates.get(field)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
                 raise RoutingError(f"route {route_id} cost_model.rates.{field} is invalid")
+    if is_pool:
+        # Pool cost is a reviewed ROUTER-specific envelope, never a sum of
+        # copied direct-provider prices. "unknown" is explicit and excludes
+        # the route from cost-optimized ranking; "known" requires reviewed
+        # conservative bound rates.
+        envelope = cost_model.get("pool_envelope")
+        if not isinstance(envelope, Mapping) or envelope.get("state") not in {"known", "unknown"}:
+            raise RoutingError(f"route {route_id} cost_model.pool_envelope is invalid")
+        if envelope["state"] == "known" and rates is None:
+            raise RoutingError(
+                f"route {route_id} known pool envelope requires reviewed bound rates"
+            )
     capabilities = route.get("capabilities")
     if not isinstance(capabilities, Mapping):
         raise RoutingError(f"route {route_id} lacks reviewed capabilities")
@@ -704,6 +741,10 @@ def _estimate_cost(
     cost_model = route.get("cost_model")
     if not isinstance(cost_model, Mapping):
         return None
+    if isinstance(route.get("routed_pool"), Mapping):
+        envelope = cost_model.get("pool_envelope")
+        if not isinstance(envelope, Mapping) or envelope.get("state") != "known":
+            return None
     if profile["session_cost_basis"] == "route-specific-cohort" and route.get("id") != profile["cohort_route_id"]:
         return None
     attempts = profile["session_attempts"]
@@ -748,6 +789,9 @@ def _candidate_or_reasons(
     catalog: Mapping[str, Any],
     runtime_allowlist: frozenset[tuple[str, str, str, str]],
     credential_present_routes: frozenset[tuple[str, str, str, str]],
+    routed_contracts: Mapping[tuple[str, str, str, str], Mapping[str, Any]] | None,
+    routed_policy_snapshots: Sequence[Mapping[str, Any]] | None,
+    now_utc: datetime,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     route_id = str(route.get("id", "unknown"))
     reasons: list[str] = []
@@ -817,46 +861,203 @@ def _candidate_or_reasons(
     if is_glm and profile["required_connectors"]:
         if route.get("connector_retention") != "worker-host":
             reasons.append("glm-connector-hard-gate")
+    # validate_catalog already rejected a missing/malformed routed_pool, so
+    # key presence is the exact pool test — never silently an exact route.
+    is_pool = ("routed_pool" in route or route.get("model_vendor") == "routed-pool"
+               or route.get("provider") == _pool.POOL_PROVIDER)
     evidence = route.get("local_evaluation")
     score: int | None = None
-    if not isinstance(evidence, Mapping) or evidence.get("verified") is not True:
-        reasons.append("local-eval-missing")
-    elif not _fresh_on(
-        evidence, "verified_on", now, int(catalog["freshness_days"]["evidence"])
-    ):
-        reasons.append("local-eval-stale")
-    else:
-        scores = evidence.get("task_scores")
-        if not isinstance(scores, Mapping) or not isinstance(scores.get(profile["task_band"]), int):
-            reasons.append("task-fit-unverified")
-        else:
-            score = int(scores[profile["task_band"]])
-            if score < profile["quality_floor"]:
-                reasons.append("quality-floor-not-met")
     median_duration_ms: float | None = None
-    if profile["max_duration_ms"] is not None:
-        raw_duration = evidence.get("median_duration_ms") if isinstance(evidence, Mapping) else None
-        if isinstance(raw_duration, bool) or not isinstance(raw_duration, (int, float)) or raw_duration <= 0:
-            reasons.append("duration-unverified")
+    pool_acceptance: float | None = None
+    pool_spec: Mapping[str, Any] | None = None
+    if is_pool:
+        pool_spec = route["routed_pool"]
+        contract_key = (
+            route.get("provider"), route.get("host"), route.get("mode"), route.get("model")
+        )
+        contracted = (
+            routed_contracts.get(contract_key)
+            if isinstance(routed_contracts, Mapping) else None
+        )
+        if contracted is None:
+            reasons.append("routed-runtime-contract-missing")
+        elif (
+            not isinstance(contracted, Mapping)
+            or contracted.get("settings_precedence") != "verified"
+            or contracted.get("policy_revision") != pool_spec["policy_revision"]
+            # The server routing-policy fingerprint intentionally excludes
+            # the composite admission block; the live contract pins the
+            # AUTO policy only.
+            or contracted.get("policy_fingerprint") != _pool.pool_policy_fingerprint(pool_spec)
+            or not isinstance(contracted.get("allowed_upstream_models"), frozenset)
+            or contracted["allowed_upstream_models"] != _pool.member_attested_set(pool_spec)
+        ):
+            reasons.append("routed-runtime-contract-mismatch")
+        evidence_days = int(catalog["freshness_days"]["evidence"])
+        snapshot_reason = _pool.match_snapshot(
+            routed_policy_snapshots,
+            route,
+            pool_spec,
+            now_utc=now_utc,
+            today=now,
+            evidence_days=evidence_days,
+        )
+        if snapshot_reason is not None:
+            reasons.append(snapshot_reason)
+        member_scores: list[int] = []
+        member_acceptances: list[float] = []
+        member_durations: list[float] = []
+        # Full approximate context = input + cached input + output; omitting
+        # output would let a member pass that cannot fit the whole request.
+        needed_input = (
+            profile["input_tokens"]
+            + profile["cached_input_tokens"]
+            + profile["output_tokens"]
+        )
+        evidence_days = int(catalog["freshness_days"]["evidence"])
+        composite = pool_spec.get("composite_evidence")
+        controlled_by_attested: dict[str, Mapping[str, Any]] = {}
+        if composite is not None:
+            for q in composite.get("controlled_qualification", []):
+                if isinstance(q, Mapping) and isinstance(q.get("attested_member"), str):
+                    controlled_by_attested[q["attested_member"]] = q
+        for member in pool_spec["members"]:
+            label = str(member["attested_model"])
+            evaluation = member["evaluation"]
+            identity = evaluation.get("identity", {})
+            qual = controlled_by_attested.get(label)
+            if qual is not None:
+                expected_identity = (
+                    qual["gateway"], qual["selector"], member["provider"],
+                    member["model"], qual["host"], qual["protocol"],
+                    qual["policy_revision"],
+                )
+                mapping = qual.get("receipt")
+                if not isinstance(mapping, Mapping) or mapping.get("verified") is not True:
+                    reasons.append(f"composite-mapping-unverified:{label}")
+                elif not _fresh_on(mapping, "verified_on", now, evidence_days):
+                    reasons.append(f"composite-mapping-stale:{label}")
+            else:
+                expected_identity = (
+                    route.get("gateway"), pool_spec["selector"], member["provider"],
+                    member["model"], route.get("host"), route.get("protocol"),
+                    pool_spec["policy_revision"],
+                )
+            actual_identity = (
+                identity.get("gateway"), identity.get("selector"), identity.get("provider"),
+                identity.get("model"), identity.get("host"), identity.get("protocol"),
+                identity.get("policy_revision"),
+            )
+            if actual_identity != expected_identity:
+                reasons.append(f"pool-member-eval-identity-mismatch:{label}")
+            if not _fresh_on(evaluation, "verified_on", now, evidence_days):
+                reasons.append(f"pool-member-eval-stale:{label}")
+            member_scores_map = evaluation.get("task_scores", {})
+            member_score = member_scores_map.get(profile["task_band"])
+            if isinstance(member_score, bool) or not isinstance(member_score, int):
+                reasons.append(f"pool-member-task-fit-unverified:{label}")
+            elif member_score < profile["quality_floor"]:
+                reasons.append(f"pool-member-quality-floor-not-met:{label}")
+            else:
+                member_scores.append(member_score)
+            member_acceptances.append(float(evaluation["acceptance_rate"]))
+            capabilities = member["capabilities"]
+            if not profile["required_capabilities"].issubset(capabilities["supported"]):
+                reasons.append(f"pool-member-capability-not-supported:{label}")
+            if not profile["required_connectors"].issubset(capabilities["connectors"]):
+                reasons.append(f"pool-member-connector-not-supported:{label}")
+            if profile["privacy_class"] not in capabilities["privacy_classes"]:
+                reasons.append(f"pool-member-privacy-boundary-not-met:{label}")
+            if (
+                member["provider"] in profile["avoid"]
+                or member["model_vendor"] in profile["avoid"]
+            ):
+                # The router may fall back to ANY member, so an avoided member
+                # excludes the whole pool — never silently narrows it.
+                reasons.append(f"pool-member-avoided:{label}")
+            for required in profile["required_behavioral_capabilities"]:
+                record = member.get("behavioral_capabilities", {}).get(required)
+                if not isinstance(record, Mapping):
+                    reasons.append(f"pool-member-behavioral-capability-unverified:{required}:{label}")
+                    continue
+                types = record.get("evidence_types")
+                member_behavior_score = record.get("score")
+                if not isinstance(types, list) or "local-evaluation" not in types:
+                    reasons.append(f"pool-member-behavioral-capability-lacks-local-evidence:{required}:{label}")
+                if (
+                    isinstance(member_behavior_score, bool)
+                    or not isinstance(member_behavior_score, int)
+                    or member_behavior_score < profile["quality_floor"]
+                ):
+                    reasons.append(f"pool-member-behavioral-capability-floor-not-met:{required}:{label}")
+            # Approximate context/output estimates only — never a tokenizer
+            # guarantee. Every member must fit; the router may pick any.
+            context_limit = member.get("approx_context_tokens")
+            output_limit = member.get("max_output_tokens")
+            if (
+                isinstance(context_limit, bool)
+                or not isinstance(context_limit, int)
+                or context_limit < needed_input
+            ):
+                reasons.append(f"pool-member-context-too-small:{label}")
+            if (
+                isinstance(output_limit, bool)
+                or not isinstance(output_limit, int)
+                or output_limit < profile["output_tokens"]
+            ):
+                reasons.append(f"pool-member-output-too-small:{label}")
+            if profile["max_duration_ms"] is not None:
+                raw_duration = evaluation.get("median_duration_ms")
+                if isinstance(raw_duration, bool) or not isinstance(raw_duration, (int, float)) or raw_duration <= 0:
+                    reasons.append(f"pool-member-duration-unverified:{label}")
+                else:
+                    member_durations.append(float(raw_duration))
+                    if raw_duration > profile["max_duration_ms"]:
+                        reasons.append(f"pool-member-duration-budget-exceeded:{label}")
+        if len(member_scores) == len(pool_spec["members"]):
+            score = min(member_scores)
+        if member_acceptances:
+            pool_acceptance = min(member_acceptances)
+        if profile["max_duration_ms"] is not None and len(member_durations) == len(pool_spec["members"]):
+            median_duration_ms = max(member_durations)
+    else:
+        if not isinstance(evidence, Mapping) or evidence.get("verified") is not True:
+            reasons.append("local-eval-missing")
+        elif not _fresh_on(
+            evidence, "verified_on", now, int(catalog["freshness_days"]["evidence"])
+        ):
+            reasons.append("local-eval-stale")
         else:
-            median_duration_ms = float(raw_duration)
-            if median_duration_ms > profile["max_duration_ms"]:
-                reasons.append("duration-budget-exceeded")
-    behavioral = route.get("behavioral_capabilities")
-    for required in profile["required_behavioral_capabilities"]:
-        record = behavioral.get(required) if isinstance(behavioral, Mapping) else None
-        if not isinstance(record, Mapping):
-            reasons.append(f"behavioral-capability-unverified:{required}")
-            continue
-        evidence_types = record.get("evidence_types")
-        behavior_score = record.get("score")
-        if not isinstance(evidence_types, list) or "local-evaluation" not in evidence_types:
-            reasons.append(f"behavioral-capability-lacks-local-evidence:{required}")
-        if isinstance(behavior_score, bool) or not isinstance(behavior_score, int) or behavior_score < profile["quality_floor"]:
-            reasons.append(f"behavioral-capability-floor-not-met:{required}")
-    privacy = route.get("privacy_classes", ["ordinary"])
-    if not isinstance(privacy, list) or profile["privacy_class"] not in privacy:
-        reasons.append("privacy-boundary-not-met")
+            scores = evidence.get("task_scores")
+            if not isinstance(scores, Mapping) or not isinstance(scores.get(profile["task_band"]), int):
+                reasons.append("task-fit-unverified")
+            else:
+                score = int(scores[profile["task_band"]])
+                if score < profile["quality_floor"]:
+                    reasons.append("quality-floor-not-met")
+        if profile["max_duration_ms"] is not None:
+            raw_duration = evidence.get("median_duration_ms") if isinstance(evidence, Mapping) else None
+            if isinstance(raw_duration, bool) or not isinstance(raw_duration, (int, float)) or raw_duration <= 0:
+                reasons.append("duration-unverified")
+            else:
+                median_duration_ms = float(raw_duration)
+                if median_duration_ms > profile["max_duration_ms"]:
+                    reasons.append("duration-budget-exceeded")
+        behavioral = route.get("behavioral_capabilities")
+        for required in profile["required_behavioral_capabilities"]:
+            record = behavioral.get(required) if isinstance(behavioral, Mapping) else None
+            if not isinstance(record, Mapping):
+                reasons.append(f"behavioral-capability-unverified:{required}")
+                continue
+            evidence_types = record.get("evidence_types")
+            behavior_score = record.get("score")
+            if not isinstance(evidence_types, list) or "local-evaluation" not in evidence_types:
+                reasons.append(f"behavioral-capability-lacks-local-evidence:{required}")
+            if isinstance(behavior_score, bool) or not isinstance(behavior_score, int) or behavior_score < profile["quality_floor"]:
+                reasons.append(f"behavioral-capability-floor-not-met:{required}")
+        privacy = route.get("privacy_classes", ["ordinary"])
+        if not isinstance(privacy, list) or profile["privacy_class"] not in privacy:
+            reasons.append("privacy-boundary-not-met")
     if route.get("model_vendor") in profile["avoid"]:
         reasons.append("provider-avoided")
     cost = _estimate_cost(
@@ -871,7 +1072,10 @@ def _candidate_or_reasons(
     if cost is not None:
         expected_cost = cost.get("expected_cost_per_accepted_result")
         if expected_cost is None and profile["session_cost_basis"] == "hypothetical-workload":
-            acceptance = evidence.get("acceptance_rate") if isinstance(evidence, Mapping) else None
+            if is_pool:
+                acceptance = pool_acceptance
+            else:
+                acceptance = evidence.get("acceptance_rate") if isinstance(evidence, Mapping) else None
             if isinstance(acceptance, (int, float)) and not isinstance(acceptance, bool) and acceptance > 0:
                 expected_cost = round(float(cost["value"]) / float(acceptance), 8)
         if profile["policy"] == "cost-optimized" and expected_cost is None:
@@ -908,15 +1112,56 @@ def _candidate_or_reasons(
             else "observed-route-specific-cohorts" if profile["session_cost_basis"] == "route-specific-cohorts"
             else "local-evaluation-rate-assumption"
         ),
-        "acceptance_rate": evidence.get("acceptance_rate"),
+        "acceptance_rate": (
+            pool_acceptance if is_pool else evidence.get("acceptance_rate")
+        ),
         "behavioral_capabilities": sorted(profile["required_behavioral_capabilities"]),
         "community_signal_refs": sorted(route.get("community_signal_refs", [])),
         "glm_availability": profile["glm_availability"] if is_glm else None,
-        "local_evaluation_source": evidence.get("source"),
-        "local_evaluation_verified_on": evidence.get("verified_on"),
+        "local_evaluation_source": (
+            None if is_pool else evidence.get("source")
+        ),
+        "local_evaluation_verified_on": (
+            None if is_pool else evidence.get("verified_on")
+        ),
+        "routed_pool": (
+            {
+                "selector": pool_spec["selector"],
+                "policy_revision": pool_spec["policy_revision"],
+                "policy_fingerprint": _pool.pool_fingerprint(pool_spec),
+                "members": sorted(_pool.member_attested_set(pool_spec)),
+            }
+            if is_pool else None
+        ),
+        "pool_member_identities": (
+            sorted(
+                (
+                    {
+                        "provider": member["provider"],
+                        "model_vendor": member["model_vendor"],
+                        "model": member["model"],
+                    }
+                    for member in pool_spec["members"]
+                ),
+                key=lambda item: (item["provider"], item["model"]),
+            )
+            if is_pool else []
+        ),
         "pricing_verified_on": (route.get("cost_model") or {}).get("verified_on"),
         "allowlist_ref": route.get("allowlist_ref"),
     }, []
+
+
+def routed_contracts_from_models(
+    config: Mapping[str, Any],
+) -> dict[tuple[str, str, str, str], dict[str, Any]]:
+    """Extract configured routing policy contracts from the model allowlist.
+
+    See :func:`side_lane.routed_pool.routed_contracts_from_models`. Exposed
+    here so ``recommend`` callers pass it beside ``runtime_allowlist``.
+    """
+
+    return _pool.routed_contracts_from_models(config)
 
 
 def recommend(
@@ -925,7 +1170,10 @@ def recommend(
     *,
     runtime_allowlist: frozenset[tuple[str, str, str, str]],
     credential_present_routes: frozenset[tuple[str, str, str, str]],
+    routed_contracts: Mapping[tuple[str, str, str, str], Mapping[str, Any]] | None = None,
+    routed_policy_snapshots: Sequence[Mapping[str, Any]] | None = None,
     today: date | None = None,
+    now_utc: datetime | None = None,
 ) -> dict[str, Any]:
     """Return a deterministic, non-dispatching route recommendation.
 
@@ -938,6 +1186,9 @@ def recommend(
     validate_catalog(catalog)
     normalized = _profile(profile)
     now = today or date.today()
+    effective_now_utc = now_utc or datetime.now(timezone.utc)
+    if effective_now_utc.tzinfo is None:
+        effective_now_utc = effective_now_utc.replace(tzinfo=timezone.utc)
     candidates: list[dict[str, Any]] = []
     exclusions: list[dict[str, Any]] = []
     for route in catalog["routes"]:
@@ -948,6 +1199,9 @@ def recommend(
             catalog,
             runtime_allowlist,
             credential_present_routes,
+            routed_contracts,
+            routed_policy_snapshots,
+            effective_now_utc,
         )
         if candidate is None:
             exclusions.append({"route_id": route["id"], "reasons": sorted(set(reasons))})
@@ -957,9 +1211,29 @@ def recommend(
     preference_applied = False
     preferred_pool_applied = False
     preferred_pool_fallback = False
+    def _vendor_preferred(item: Mapping[str, Any], prefer: str) -> bool:
+        # A pool may serve ANY member, so it satisfies a vendor preference
+        # only when every possible fallback is that vendor — never narrowed.
+        if item["model_vendor"] == prefer:
+            return True
+        identities = item.get("pool_member_identities") or []
+        return bool(identities) and all(
+            prefer in {member["provider"], member["model_vendor"]}
+            for member in identities
+        )
+
+    def _in_preferred_pool(item: Mapping[str, Any], preferred_set: frozenset[str]) -> bool:
+        if item["provider"] in preferred_set or item["model_vendor"] in preferred_set:
+            return True
+        identities = item.get("pool_member_identities") or []
+        return bool(identities) and all(
+            {member["provider"], member["model_vendor"]} & preferred_set
+            for member in identities
+        )
+
     if normalized["prefer"]:
-        preferred = [item for item in candidates if item["model_vendor"] == normalized["prefer"]]
-        rejected = [item for item in candidates if item["model_vendor"] != normalized["prefer"]]
+        preferred = [item for item in candidates if _vendor_preferred(item, normalized["prefer"])]
+        rejected = [item for item in candidates if not _vendor_preferred(item, normalized["prefer"])]
         exclusions.extend(
             {"route_id": item["route_id"], "reasons": ["explicit-provider-preference"]}
             for item in rejected
@@ -970,8 +1244,7 @@ def recommend(
     if normalized["preferred_provider_pool"] and not normalized["prefer"]:
         preferred = [
             item for item in candidates
-            if item["provider"] in normalized["preferred_provider_pool"]
-            or item["model_vendor"] in normalized["preferred_provider_pool"]
+            if _in_preferred_pool(item, normalized["preferred_provider_pool"])
         ]
         if preferred:
             rejected = [item for item in candidates if item not in preferred]

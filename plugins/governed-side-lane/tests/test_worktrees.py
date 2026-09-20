@@ -348,6 +348,32 @@ class ScratchDirectoryTests(WorktreeTests):
         worktrees.create_worktree(repo, "second")
         self.assertEqual(exclude.read_text(encoding="utf-8").count(".side-lane-scratch/"), 1)
 
+    def test_devin_local_mcp_exclusion_is_root_anchored_and_appended_once(self) -> None:
+        repo = self.make_repo()
+        exclude = worktrees.ensure_devin_local_mcp_exclusion(repo)
+        lines = exclude.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines.count("/.devin/mcp_config.local.json"), 1)
+        worktrees.ensure_devin_local_mcp_exclusion(repo)
+        self.assertEqual(exclude.read_text(encoding="utf-8").splitlines().count(
+            "/.devin/mcp_config.local.json"), 1)
+        generated = repo / ".devin" / "mcp_config.local.json"
+        generated.parent.mkdir()
+        generated.write_text("{}\n", encoding="utf-8")
+        self.assertEqual(subprocess.run(
+            ["git", "-C", str(repo), "status", "--porcelain"],
+            check=True, capture_output=True, text=True).stdout, "")
+        nested = repo / "src" / ".devin" / "mcp_config.local.json"
+        nested.parent.mkdir(parents=True)
+        nested.write_text("{}\n", encoding="utf-8")
+        # Root-anchored: a nested same-named file stays visible to status.
+        nested_check = subprocess.run(
+            ["git", "-C", str(repo), "check-ignore", "-q",
+             "src/.devin/mcp_config.local.json"], capture_output=True)
+        self.assertNotEqual(nested_check.returncode, 0)
+        self.assertIn("src/", subprocess.run(
+            ["git", "-C", str(repo), "status", "--porcelain"],
+            check=True, capture_output=True, text=True).stdout)
+
     def test_scratch_files_never_block_disposal_and_die_with_the_worktree(self) -> None:
         repo = self.make_repo()
         lane = worktrees.create_worktree(repo, "review")

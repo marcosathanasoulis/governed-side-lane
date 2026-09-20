@@ -1,5 +1,7 @@
+import os
 from pathlib import Path
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -71,6 +73,196 @@ class ClaudeAdapterTests(unittest.TestCase):
         self.assertIn("acceptEdits", execute)
         self.assertIn("user,project,local", execute)
         self.assertIn("Injected canonical side-lane governance", execute[-1])
+
+    def test_routed_execute_sets_supported_context_budget_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            command = claude.build_command(
+                executable="claude", repo=repo, worktree=lane,
+                provider="omniroute", model="routed-selector",
+                provider_config={"gateway": "omniroute-router", "auth_method": "provider-key",
+                                 "billable": True, "base_url": "https://omniroute.example"},
+                model_config={"runtime_model": "routed-selector",
+                              "protocol": "anthropic-compatible",
+                              "qualification": {"verified": True, "verified_on": "2026-09-19", "source": "receipt"},
+                              "routing_policy_contract": {
+                                  "requested_selector": "routed-selector",
+                                  "allowed_upstream_models": ["deepseek-flash"],
+                                  "settings_precedence": "verified",
+                              }},
+                prompt="task",
+            )
+        self.assertEqual(command[command.index("--autocompact") + 1], "100k")
+
+    def test_routed_launch_uses_isolated_home_and_preserves_source_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            home = root / "home"
+            home.mkdir()
+            config_path = home / ".claude.json"
+            original = b'{"other":"preserve","mcpServers":{"cm-services":{"command":"svc"}}}\n'
+            config_path.write_bytes(original)
+            settings_dir = home / ".claude"
+            settings_dir.mkdir()
+            settings = b'{"permissions":{"allow":["Bash(git status)"]}}\n'
+            (settings_dir / "settings.json").write_bytes(settings)
+            (settings_dir / "CLAUDE.md").write_text("global context", encoding="utf-8")
+            (settings_dir / "skills").mkdir()
+            (settings_dir / "skills" / "probe.md").write_text("skill", encoding="utf-8")
+            (settings_dir / "plugins").mkdir()
+            observed: dict[str, object] = {}
+
+            def runner(command, **kwargs):
+                observed["command"] = command
+                observed["env"] = kwargs["env"]
+                child_config = Path(kwargs["env"]["CLAUDE_CONFIG_DIR"])
+                trusted = json.loads((child_config / ".claude.json").read_text())
+                observed["child_config"] = child_config
+                observed["config"] = trusted
+                observed["settings"] = (child_config / "settings.json").read_bytes()
+                observed["context_symlink"] = (child_config / "CLAUDE.md").is_symlink()
+                observed["skill"] = (child_config / "skills" / "probe.md").read_text()
+                observed["plugins_symlink"] = (child_config / "plugins").is_symlink()
+                return subprocess.CompletedProcess(
+                    command, 0,
+                    '{"type":"result","subtype":"success","model":"deepseek-flash",'
+                    '"usage":{"input_tokens":1,"output_tokens":1}}\n',
+                    "",
+                )
+
+            result = claude.launch(
+                executable="claude", repo=repo, worktree=lane,
+                provider="omniroute", model="routed-selector",
+                provider_config={"gateway": "omniroute-router", "auth_method": "provider-key",
+                                 "billable": True, "base_url": "https://omniroute.example"},
+                model_config={"runtime_model": "routed-selector",
+                              "protocol": "anthropic-compatible",
+                              "qualification": {"verified": True, "verified_on": "2026-09-19", "source": "receipt"},
+                              "routing_policy_contract": {
+                                  "requested_selector": "routed-selector",
+                                  "allowed_upstream_models": ["deepseek-flash"],
+                                  "settings_precedence": "verified",
+                              }},
+                prompt="task", env={"HOME": str(home), "PATH": "/bin"},
+                secret="router-secret", runner=runner,
+            )
+            self.assertEqual(result.returncode, 0)
+            child_config = observed["child_config"]
+            self.assertNotEqual(child_config, home)
+            self.assertFalse(Path(child_config).exists())
+            self.assertEqual(observed["env"]["HOME"], str(home))
+            self.assertEqual(observed["config"]["mcpServers"], {"cm-services": {"command": "svc"}})
+            self.assertNotIn("other", observed["config"])
+            self.assertEqual(observed["config"]["projects"][str(repo.resolve())]["hasTrustDialogAccepted"], True)
+            self.assertEqual(observed["config"]["projects"][str(lane.resolve())]["hasTrustDialogAccepted"], True)
+            self.assertEqual(observed["settings"], settings)
+            self.assertTrue(observed["context_symlink"])
+            self.assertTrue(observed["plugins_symlink"])
+            self.assertEqual(observed["skill"], "skill")
+            self.assertEqual(observed["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "16384")
+            self.assertEqual(config_path.read_bytes(), original)
+            self.assertEqual((settings_dir / "settings.json").read_bytes(), settings)
+
+    def test_routed_launch_cleans_isolated_home_when_validation_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            home = root / "home"
+            home.mkdir()
+            (home / ".claude.json").write_text('{"mcpServers": {}}\n', encoding="utf-8")
+            with self.assertRaises(claude.ClaudeAdapterError):
+                claude.launch(
+                    executable="claude", repo=repo, worktree=lane,
+                    provider="omniroute", model="routed-selector",
+                    provider_config={"gateway": "omniroute-router", "auth_method": "provider-key",
+                                     "billable": True, "base_url": "https://omniroute.example"},
+                    model_config={"runtime_model": "routed-selector",
+                                  "protocol": "anthropic-compatible",
+                                  "qualification": {"verified": True, "verified_on": "2026-09-19", "source": "receipt"},
+                                  "timeout_seconds": 0,
+                                  "routing_policy_contract": {
+                                      "requested_selector": "routed-selector",
+                                      "allowed_upstream_models": ["deepseek-flash"],
+                                      "settings_precedence": "verified",
+                                  }},
+                    prompt="task", env={"HOME": str(home), "PATH": "/bin"},
+                    secret="router-secret", runner=mock.Mock(),
+                )
+            self.assertEqual(list(root.glob(".side-lane-claude-config-*")), [])
+
+    def test_routed_launch_rejects_malformed_source_mcp_config_without_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            home = root / "home"
+            home.mkdir()
+            (home / ".claude.json").write_text('{"mcpServers": []}\n', encoding="utf-8")
+            worker = mock.Mock()
+            with self.assertRaises(claude.ClaudeAdapterError):
+                claude.launch(
+                    executable="claude", repo=repo, worktree=lane,
+                    provider="omniroute", model="routed-selector",
+                    provider_config={"gateway": "omniroute-router", "auth_method": "provider-key",
+                                     "billable": True, "base_url": "https://omniroute.example"},
+                    model_config={"runtime_model": "routed-selector",
+                                  "protocol": "anthropic-compatible",
+                                  "qualification": {"verified": True, "verified_on": "2026-09-19", "source": "receipt"},
+                                  "routing_policy_contract": {
+                                      "requested_selector": "routed-selector",
+                                      "allowed_upstream_models": ["deepseek-flash"],
+                                      "settings_precedence": "verified",
+                                  }},
+                    prompt="task", env={"HOME": str(home), "PATH": "/bin"},
+                    secret="router-secret", runner=worker,
+                )
+            worker.assert_not_called()
+            self.assertEqual(list(root.glob(".side-lane-claude-config-*")), [])
+
+    @unittest.skipUnless(shutil.which("claude"), "pinned Claude CLI is unavailable")
+    def test_pinned_claude_reads_mcp_from_config_dir_while_retaining_home(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = Path(directory) / "config"
+            config_dir.mkdir()
+            (config_dir / ".claude.json").write_text(
+                json.dumps({"mcpServers": {"probe": {"command": "false"}}, "projects": {}}),
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env["HOME"] = str(Path(directory) / "host-home")
+            env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+            result = subprocess.run(
+                [shutil.which("claude"), "mcp", "list"],
+                env=env, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("probe", result.stdout)
+
+    @unittest.skipUnless(shutil.which("claude"), "pinned Claude CLI is unavailable")
+    def test_pinned_claude_reads_installed_plugins_from_config_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = Path(directory) / "config"
+            plugin_path = config_dir / "plugins" / "cache" / "demo"
+            plugin_path.mkdir(parents=True)
+            (plugin_path / "plugin.json").write_text(
+                json.dumps({"name": "demo", "version": "1.0.0"}), encoding="utf-8"
+            )
+            (config_dir / "plugins" / "installed_plugins.json").write_text(
+                json.dumps({"version": 2, "plugins": {"demo@local": [{
+                    "scope": "user", "installPath": str(plugin_path), "version": "1.0.0",
+                    "installedAt": "2026-01-01T00:00:00Z", "lastUpdated": "2026-01-01T00:00:00Z",
+                }]}}), encoding="utf-8"
+            )
+            env = os.environ.copy()
+            env["HOME"] = str(Path(directory) / "host-home")
+            env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+            result = subprocess.run(
+                [shutil.which("claude"), "plugin", "list"],
+                env=env, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("demo@local", result.stdout)
 
     def test_playwright_execute_approves_only_the_requested_project_server(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -147,7 +339,7 @@ class ClaudeAdapterTests(unittest.TestCase):
             "PATH": "/bin", "CLAUDE_CODE_USE_BEDROCK": "1",
             "CLAUDE_CODE_USE_VERTEX": "1", "CLAUDE_CODE_USE_FOUNDRY": "1",
             "CLAUDE_CODE_EFFORT_LEVEL": "max", "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1",
-            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "999999",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "999999", "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "999999",
         })
         self.assertEqual(child, {"PATH": "/bin"})
 
@@ -422,6 +614,208 @@ class FirstPartyAnthropicKeyRouteTests(unittest.TestCase):
         runner.assert_not_called()
 
 
+class ProjectMcpServerApprovalTests(unittest.TestCase):
+    """A capability grant approves exactly its project MCP server — nothing else."""
+
+    native = {"gateway": "native-claude", "auth_method": "oauth", "billable": False}
+
+    def command(self, mode: str, capabilities=()) -> list[str]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "fixed"
+            repo, lane = root / "repo", root / "lane"
+            for path in (repo, lane):
+                path.mkdir(parents=True)
+                (path / ".git").write_text("gitdir: /tmp/example\n", encoding="utf-8")
+            protocol = "native-claude-readonly" if mode == "review" else "native-claude"
+            return claude.build_command(executable="claude", repo=repo, worktree=lane,
+                provider="claude", model="claude-sonnet-5", provider_config=self.native,
+                model_config={"runtime_model": "claude-sonnet-5", "protocol": protocol},
+                prompt="task", mode=mode, capabilities=capabilities)
+
+    def settings_of(self, command: list[str]) -> dict:
+        return json.loads(command[command.index("--settings") + 1])
+
+    def system_prompt_of(self, command: list[str]) -> str:
+        return command[command.index("--append-system-prompt") + 1]
+
+    def test_each_granted_capability_approves_only_its_exact_project_server(self) -> None:
+        for capability, server in (
+            ("playwright", "playwright"),
+            ("gitnexus", "gitnexus"),
+            ("codegraph", "codegraph"),
+            ("slack-read", "slack"),
+        ):
+            with self.subTest(capability=capability):
+                settings = self.settings_of(self.command("execute", (capability,)))
+                self.assertEqual(settings["enabledMcpjsonServers"], [server])
+                self.assertNotIn("enableAllProjectMcpServers", settings)
+                self.assertNotIn("disabledMcpjsonServers", settings)
+
+    def test_mixed_grants_approve_each_granted_server_once(self) -> None:
+        settings = self.settings_of(self.command(
+            "execute", ("slack-read", "gitnexus", "playwright", "codegraph")))
+        self.assertEqual(
+            settings["enabledMcpjsonServers"],
+            ["codegraph", "gitnexus", "playwright", "slack"])
+        repeated = self.settings_of(self.command("execute", ("gitnexus", "gitnexus")))
+        self.assertEqual(repeated["enabledMcpjsonServers"], ["gitnexus"])
+
+    def test_unrequested_servers_stay_unapproved(self) -> None:
+        settings = self.settings_of(self.command("execute", ("shell",)))
+        self.assertNotIn("enabledMcpjsonServers", settings)
+        granted = self.settings_of(self.command("execute", ("gitnexus",)))
+        self.assertEqual(granted["enabledMcpjsonServers"], ["gitnexus"])
+        for unrequested in ("slack", "playwright", "codegraph"):
+            self.assertNotIn(unrequested, granted["enabledMcpjsonServers"])
+
+    def test_graph_and_slack_grants_do_not_trigger_the_readiness_probe(self) -> None:
+        readiness = mock.Mock()
+        worker = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "done", ""))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = root / "repo", root / "lane"
+            for path in (repo, lane):
+                path.mkdir()
+                (path / ".git").write_text("gitdir: /tmp/example\n", encoding="utf-8")
+            claude.launch(executable="claude", repo=repo, worktree=lane,
+                provider="claude", model="claude-sonnet-5", provider_config=self.native,
+                model_config={"runtime_model": "claude-sonnet-5", "protocol": "native-claude"},
+                prompt="task", capabilities=("gitnexus", "codegraph", "slack-read"),
+                env={"PATH": "/bin"}, runner=worker, readiness_runner=readiness)
+        readiness.assert_not_called()
+        worker.assert_called_once()
+        # Playwright keeps its pre-launch probe even alongside other grants.
+        probe = mock.Mock(return_value=subprocess.CompletedProcess(
+            [], 0, "playwright:\n  Status: ✔ Connected\n", ""))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = root / "repo", root / "lane"
+            for path in (repo, lane):
+                path.mkdir()
+                (path / ".git").write_text("gitdir: /tmp/example\n", encoding="utf-8")
+            claude.launch(executable="claude", repo=repo, worktree=lane,
+                provider="claude", model="claude-sonnet-5", provider_config=self.native,
+                model_config={"runtime_model": "claude-sonnet-5", "protocol": "native-claude"},
+                prompt="task", capabilities=("playwright", "slack-read"),
+                env={"PATH": "/bin"}, runner=worker, readiness_runner=probe)
+        self.assertEqual(probe.call_count, 1)
+        self.assertEqual(probe.call_args.args[0][-3:], ["mcp", "get", "playwright"])
+        approved = self.settings_of(list(worker.call_args.args[0]))
+        self.assertEqual(
+            approved["enabledMcpjsonServers"], ["playwright", "slack"])
+
+    def test_cm_services_capabilities_use_the_fixed_user_scope_server(self) -> None:
+        # asana-read/drive-read map to the fixed user-global cm-services
+        # registration, which is not a project .mcp.json entry — so no
+        # enabledMcpjsonServers approval is emitted for it.
+        for capabilities in (("asana-read",), ("drive-read",), ("gcloud-read",), ("database-read",), ("algolia-read",), ("asana-read", "drive-read", "gcloud-read", "database-read", "algolia-read")):
+            with self.subTest(capabilities=capabilities):
+                settings = self.settings_of(self.command("execute", capabilities))
+                self.assertNotIn("cm-services", settings.get("enabledMcpjsonServers", []))
+        # A project-scoped grant alongside still approves only its own server.
+        settings = self.settings_of(self.command("execute", ("asana-read", "gitnexus")))
+        self.assertEqual(settings["enabledMcpjsonServers"], ["gitnexus"])
+
+    def test_cm_services_probe_runs_once_per_server_not_per_capability(self) -> None:
+        probe = mock.Mock(return_value=subprocess.CompletedProcess(
+            [], 0, "cm-services:\n  Status: ✔ Connected\n", ""))
+        worker = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "done", ""))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = root / "repo", root / "lane"
+            for path in (repo, lane):
+                path.mkdir()
+                (path / ".git").write_text("gitdir: /tmp/example\n", encoding="utf-8")
+            claude.launch(executable="claude", repo=repo, worktree=lane,
+                provider="claude", model="claude-sonnet-5", provider_config=self.native,
+                model_config={"runtime_model": "claude-sonnet-5", "protocol": "native-claude"},
+                prompt="task", capabilities=("asana-read", "drive-read", "gcloud-read", "database-read", "algolia-read"),
+                env={"PATH": "/bin"}, runner=worker, readiness_runner=probe)
+        # Both capabilities share cm-services: one probe, by bare name — a
+        # user-scope registration takes no project-server approval settings.
+        probe.assert_called_once()
+        argv = probe.call_args.args[0]
+        self.assertEqual(argv[-3:], ["mcp", "get", "cm-services"])
+        self.assertNotIn("--settings", argv)
+        prompt = self.system_prompt_of(list(worker.call_args.args[0]))
+        self.assertEqual(prompt.count("cm-services startup"), 1)
+        self.assertIn('servers: ["cm-services"]', prompt)
+        self.assertIn("presence evidence only", prompt)
+        # The instruction names only the granted tools, not the whole server.
+        self.assertIn("mcp__cm-services__asana_get_task", prompt)
+        self.assertIn("mcp__cm-services__drive_doc_get", prompt)
+        self.assertIn("mcp__cm-services__gcp_menu", prompt)
+        self.assertIn("mcp__cm-services__postgres_select", prompt)
+        self.assertIn("mcp__cm-services__algolia_get_settings", prompt)
+
+    def test_cm_services_probe_failure_fails_closed_before_the_worker(self) -> None:
+        probe = mock.Mock(return_value=subprocess.CompletedProcess(
+            [], 1, "cm-services:\n  Status: ✘ failed\n", ""))
+        worker = mock.Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = root / "repo", root / "lane"
+            for path in (repo, lane):
+                path.mkdir()
+                (path / ".git").write_text("gitdir: /tmp/example\n", encoding="utf-8")
+            with self.assertRaisesRegex(claude.ClaudeAdapterError, "not ready"):
+                claude.launch(executable="claude", repo=repo, worktree=lane,
+                    provider="claude", model="claude-sonnet-5", provider_config=self.native,
+                    model_config={"runtime_model": "claude-sonnet-5", "protocol": "native-claude"},
+                    prompt="task", capabilities=("asana-read",),
+                    env={"PATH": "/bin"}, runner=worker, readiness_runner=probe)
+        worker.assert_not_called()
+
+    def test_graph_startup_instruction_names_exact_servers_and_wait(self) -> None:
+        prompt = self.system_prompt_of(self.command("execute", ("gitnexus",)))
+        self.assertIn("Claude Code code-graph startup", prompt)
+        self.assertIn('servers: ["gitnexus"]', prompt)
+        self.assertIn("mcp__<server>__", prompt)
+        self.assertNotIn('servers: ["slack"]', prompt)
+        both = self.system_prompt_of(self.command("execute", ("codegraph", "gitnexus")))
+        # Canonical order regardless of the grant tuple's order.
+        self.assertIn('["gitnexus", "codegraph"]', both)
+        plain = self.system_prompt_of(self.command("execute", ("shell",)))
+        self.assertNotIn("code-graph startup", plain)
+
+    def test_slack_startup_instruction_waits_without_claiming_read_proof(self) -> None:
+        prompt = self.system_prompt_of(self.command("execute", ("slack-read",)))
+        self.assertIn('servers: ["slack"]', prompt)
+        self.assertIn("presence evidence only", prompt)
+        self.assertIn("never\nproof of authentication", prompt)
+
+    def test_review_mode_stays_isolated_from_project_server_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "fixed"
+            repo, lane = root / "repo", root / "lane"
+            for path in (repo, lane):
+                path.mkdir(parents=True)
+                (path / ".git").write_text("gitdir: /tmp/example\n", encoding="utf-8")
+            def review(capabilities=()) -> list[str]:
+                return claude.build_command(executable="claude", repo=repo, worktree=lane,
+                    provider="claude", model="claude-sonnet-5", provider_config=self.native,
+                    model_config={"runtime_model": "claude-sonnet-5", "protocol": "native-claude-readonly"},
+                    prompt="task", mode="review", capabilities=capabilities)
+            granted = review(("playwright", "gitnexus", "codegraph", "slack-read"))
+            plain = review()
+        self.assertEqual(granted, plain)
+        self.assertNotIn("--settings", granted)
+        self.assertNotIn("--allowedTools", granted)
+        self.assertIn("--strict-mcp-config", granted)
+        self.assertIn('{"mcpServers":{}}', granted)
+        for item in granted:
+            self.assertNotIn("enabledMcpjsonServers", item)
+        prompt = self.system_prompt_of(granted)
+        for absent in ("Playwright startup", "Slack read startup", "code-graph startup"):
+            self.assertNotIn(absent, prompt)
+
+    def test_native_execute_settings_keep_native_auth_shape(self) -> None:
+        settings = self.settings_of(self.command("execute", ("gitnexus",)))
+        self.assertEqual(
+            settings,
+            {"sandbox": {"enabled": False}, "enabledMcpjsonServers": ["gitnexus"]})
+
+
 class AllowedToolsTests(unittest.TestCase):
     native = {"gateway": "native-claude", "auth_method": "oauth", "billable": False}
 
@@ -461,15 +855,83 @@ class AllowedToolsTests(unittest.TestCase):
             "find_symbol", "find_callers", "find_callees", "find_importers",
             "neighbors", "impact_of", "path_between"))
         base = claude.allowed_tools("execute", ())
-        self.assertEqual(claude.allowed_tools("execute", ("gitnexus",)), base + gitnexus)
-        self.assertEqual(claude.allowed_tools("execute", ("codegraph",)), base + codegraph)
-        self.assertEqual(claude.allowed_tools("execute", ("gitnexus", "codegraph")), base + gitnexus + codegraph)
+        self.assertEqual(claude.allowed_tools("execute", ("gitnexus",)), base + ("WaitForMcpServers",) + gitnexus)
+        self.assertEqual(claude.allowed_tools("execute", ("codegraph",)), base + ("WaitForMcpServers",) + codegraph)
+        self.assertEqual(claude.allowed_tools("execute", ("gitnexus", "codegraph")), base + ("WaitForMcpServers",) + gitnexus + codegraph)
         # Index-mutating GitNexus tools stay ungranted; no wildcard grants.
         for tool in claude.allowed_tools("execute", ("gitnexus", "codegraph")):
             self.assertNotRegex(tool, r"rename|group_sync|analyze|clean|__\*$")
         self.assertFalse(any(tool.startswith("mcp__") for tool in base))
         self.assertEqual(claude.allowed_tools("review", ("gitnexus", "codegraph")), ())
         self.assertEqual(claude.disallowed_tools("execute", ("gitnexus", "codegraph")), ())
+
+    def test_slack_read_grants_exact_read_only_tools_and_keeps_review_strict(self) -> None:
+        slack = ("mcp__slack__slack_read_thread", "mcp__slack__slack_read_channel")
+        base = claude.allowed_tools("execute", ())
+        self.assertEqual(claude.allowed_tools("execute", ("slack-read",)), base + ("WaitForMcpServers",) + slack)
+        granted = [tool for tool in claude.allowed_tools("execute", ("slack-read",))
+                   if tool.startswith("mcp__slack__")]
+        self.assertEqual(sorted(granted), sorted(slack))
+        self.assertNotIn("mcp__slack__*", claude.allowed_tools("execute", ("slack-read",)))
+        # Review never receives the grants regardless of the capability.
+        self.assertEqual(claude.allowed_tools("review", ("slack-read",)), ())
+        self.assertEqual(claude.disallowed_tools("review", ("slack-read",)), ())
+        # CLI propagation: the exact tool IDs reach the rendered argv, and the
+        # execute system prompt carries the slack-read startup instruction.
+        command = self.command("execute", ("slack-read",))
+        for tool in slack:
+            self.assertIn(tool, command)
+        prompt = command[command.index("--append-system-prompt") + 1]
+        self.assertIn("slack_read_thread", prompt)
+        self.assertIn("Slack read startup", prompt)
+        review = self.command("review", ("slack-read",))
+        self.assertNotIn("--allowedTools", review)
+        review_prompt = review[review.index("--append-system-prompt") + 1]
+        self.assertNotIn("Slack read startup", review_prompt)
+        plain = self.command("execute")
+        plain_prompt = plain[plain.index("--append-system-prompt") + 1]
+        self.assertNotIn("Slack read startup", plain_prompt)
+
+    def test_cm_services_grants_are_exact_and_disjoint(self) -> None:
+        asana = tuple(f"mcp__cm-services__{name}" for name in (
+            "asana_get_task", "asana_get_project", "asana_list_project_tasks"))
+        drive = tuple(f"mcp__cm-services__{name}" for name in (
+            "drive_file_info", "drive_sheet_tabs", "drive_sheet_get", "drive_doc_get"))
+        gcp = tuple(f"mcp__cm-services__{name}" for name in (
+            "gcp_logs", "gcp_run_services", "gcp_run_jobs", "gcp_scheduler_jobs",
+            "gcp_functions", "gcp_billing_mtd", "gcp_billing_daily", "gcp_menu"))
+        database = ("mcp__cm-services__postgres_select",)
+        algolia = ("mcp__cm-services__algolia_get_settings",)
+        base = claude.allowed_tools("execute", ())
+        self.assertEqual(
+            claude.allowed_tools("execute", ("asana-read",)),
+            base + ("WaitForMcpServers",) + asana)
+        self.assertEqual(
+            claude.allowed_tools("execute", ("drive-read",)),
+            base + ("WaitForMcpServers",) + drive)
+        self.assertEqual(
+            claude.allowed_tools("execute", ("gcloud-read",)),
+            base + ("WaitForMcpServers",) + gcp)
+        self.assertEqual(
+            claude.allowed_tools("execute", ("database-read",)),
+            base + ("WaitForMcpServers",) + database)
+        self.assertEqual(
+            claude.allowed_tools("execute", ("algolia-read",)),
+            base + ("WaitForMcpServers",) + algolia)
+        both = claude.allowed_tools("execute", ("asana-read", "drive-read"))
+        self.assertEqual(both, base + ("WaitForMcpServers",) + asana + drive)
+        # Granting one capability never unlocks the other's tools on the
+        # shared server, and no rule anywhere is a server-wide wildcard.
+        for tool in both:
+            self.assertNotRegex(tool, r"__\*$")
+        self.assertFalse(any(tool.startswith("mcp__cm-services__") for tool in base))
+        self.assertEqual(claude.allowed_tools("review", ("asana-read", "drive-read")), ())
+        # The startup instruction appears once and names the exact server.
+        prompt = self.command("execute", ("asana-read",))[
+            self.command("execute", ("asana-read",)).index("--append-system-prompt") + 1]
+        self.assertIn("cm-services startup", prompt)
+        self.assertIn("mcp__cm-services__asana_get_task", prompt)
+        self.assertNotIn("mcp__cm-services__drive_doc_get", prompt)
 
     def test_shell_or_workspace_write_adds_ordinary_dev_commands_not_push(self) -> None:
         for capability in ("shell", "workspace-write"):

@@ -25,11 +25,19 @@ import json
 import os
 from pathlib import Path
 import subprocess
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from side_lane.credentials import scrub_backend_environment
 from side_lane.governance import lane_system_prompt
 from side_lane.hosts import with_support_dir
+from side_lane.mcp_run_config import (
+    McpRunServer,
+    codex_overrides,
+    ensure_no_registration_conflicts,
+    require_env_references,
+    startup_note,
+)
+from side_lane.read_roots import scope_note
 from side_lane.results import LaneResult
 
 
@@ -205,6 +213,8 @@ def build_codex_command(
     prompt: str,
     *,
     mode: str = "execute",
+    read_roots: "Sequence[Path]" = (),
+    run_mcp_servers: "Mapping[str, McpRunServer] | None" = None,
 ) -> tuple[str, ...]:
     if not isinstance(executable, str) or not executable:
         raise CodexAdapterError("Codex executable is required")
@@ -212,6 +222,16 @@ def build_codex_command(
         raise CodexAdapterError("mode must be review or execute")
     if not isinstance(prompt, str) or not prompt.strip():
         raise CodexAdapterError("task prompt must be non-empty")
+    if read_roots and mode != "execute":
+        # A review lane is read-only by sandbox mode and its argv is the
+        # strict form; Codex's only directory control (`--add-dir` /
+        # `sandbox_workspace_write.writable_roots`) is a WRITE grant, so a
+        # granted read root cannot be expressed there without widening.
+        raise CodexAdapterError("read roots are execute-only for the Codex host")
+    if run_mcp_servers and mode != "execute":
+        # Review mode's argv carries `-c mcp_servers={}` — strict no-MCP by
+        # canonical governance — and no per-run registration may widen it.
+        raise CodexAdapterError("per-run MCP config is execute-only for the Codex host")
     repo_path = _validate_worktree(repo)
     worktree_path = _validate_worktree(worktree)
     if repo_path == worktree_path:
@@ -219,7 +239,23 @@ def build_codex_command(
     runtime_model = _validate_selection(
         provider, model, provider_config, model_config, mode
     )
-    task = lane_system_prompt(mode, repo_path) + "\n\n# Approved task\n\n" + prompt
+    # An execute lane runs `danger-full-access`, so a read root grants no new
+    # reachable path here; it is named in the worker's instructions because
+    # the coordinator granted it for this task. `--add-dir` is deliberately
+    # NOT emitted: it grants write access, which a read root must never carry.
+    note = scope_note(read_roots)
+    if run_mcp_servers:
+        # Codex (0.155 `codex mcp add --help`) delivers streamable-HTTP MCP
+        # servers natively with the bearer referenced by env-var NAME
+        # (`bearer_token_env_var`). The `-c` dotted overrides touch only the
+        # one server being registered, so every server already configured in
+        # $CODEX_HOME/config.toml or a project config keeps loading —
+        # additive, never a replacement. No file is written and nothing
+        # enters the argv except the URL and the env NAME.
+        note = (note or "") + startup_note(run_mcp_servers)
+    task = (lane_system_prompt(mode, repo_path)
+            + (f"\n\n{note}" if note else "")
+            + "\n\n# Approved task\n\n" + prompt)
     command = [
         executable,
         "exec",
@@ -234,6 +270,8 @@ def build_codex_command(
     ]
     if mode == "review":
         command.extend(("-c", "mcp_servers={}"))
+    elif run_mcp_servers:
+        command.extend(codex_overrides(run_mcp_servers))
     command.append(task)
     return tuple(command)
 
@@ -254,12 +292,18 @@ def run_codex(
     support_dir: str | None = None,
     secret: str | None = None,
     runner: Runner = subprocess.run,
+    read_roots: "Sequence[Path]" = (),
+    run_mcp_servers: "Mapping[str, McpRunServer] | None" = None,
 ) -> LaneResult:
     repo_path = _validate_worktree(repo)
     worktree_path = _validate_worktree(worktree)
     _runtime_model, gateway, auth_method, billable = _route_metadata(
         provider, model, provider_config, model_config, mode
     )
+    if run_mcp_servers and mode != "execute":
+        # Adapter-level fail-closed mirror of the build_codex_command guard;
+        # run_codex may be called without going through that guard's inputs.
+        raise CodexAdapterError("per-run MCP config is execute-only for the Codex host")
     argv = build_codex_command(
         executable,
         repo_path,
@@ -270,6 +314,8 @@ def run_codex(
         model_config,
         prompt,
         mode=mode,
+        read_roots=read_roots,
+        run_mcp_servers=run_mcp_servers,
     )
     child_env = with_support_dir(
         build_transport_environment(
@@ -283,6 +329,19 @@ def run_codex(
         ),
         support_dir,
     )
+    if run_mcp_servers:
+        # Fail closed before any process starts when the bearer env NAME the
+        # config references is not exported into the worker child environment.
+        require_env_references(
+            run_mcp_servers,
+            child_env,
+        )
+        # A same-name ``[mcp_servers.<name>]`` entry in config.toml would be
+        # silently replaced by these ``-c`` overrides (whose precedence over
+        # an existing entry is not equivalence-provable); fail first.
+        ensure_no_registration_conflicts(
+            run_mcp_servers, "codex", worktree_path, env=child_env
+        )
     try:
         completed = runner(
             argv,

@@ -39,6 +39,51 @@ connector-backed write.
 | Database investigation | The database's official driver/connector for the target system | Use the database vendor's setup and least-privilege guidance. | The exact database, identity, and read scope. Side Lane execution is limited to read-only queries and metadata inspection. |
 | A task-specific SaaS workflow | That service's official connector or API | Follow the service's own authentication and scope documentation. | Named object, recipient, and write authority. Do not add a general workflow connector preemptively. |
 
+## Per-run MCP registration (`--mcp-config`)
+
+A coordinator may deliver one remote MCP registration into an execute lane
+per run instead of pre-configuring a host:
+
+```bash
+side-lane run --host <claude|codex|devin> --mode execute \
+  --capability aws-read \
+  --mcp-config /path/to/run-mcp.json \
+  --lane-name <lane> --prompt-file <task>
+```
+
+The run file is a JSON object with exactly one key `mcpServers`, each entry
+`{"type": "http", "url": "https://…", "headers": {"Authorization":
+"Bearer ${ENV_NAME}"}}` — the credential is referenced by env NAME only.
+Validation (the single source is `side_lane/mcp_run_config.py`) rejects
+literal credentials, stdio entries, dirty URLs, and plaintext HTTP outside
+the exact loopback literals (`127.0.0.1`, `localhost`, `::1`). Every
+declared server name must map from a capability also passed with
+`--capability` (today `aws-read` → the server named `aws`); there is no
+server-wide wildcard and no blanket `mcp__*` grant. Each referenced env name
+must already be present and non-empty in the environment the worker child
+will run with, or the run fails closed before launch. `--read-root` is
+independent: it widens file reads only and interacts with MCP delivery not
+at all. Review mode rejects the flag outright.
+
+A declared server name that the chosen host already registers in any scope
+aborts the run before any model starts — same-name merge precedence is not
+established, so an existing registration and its auth are never silently
+overwritten. Only server names are read from host registration files, never
+values.
+
+Proof boundaries, established per host (not assumed from one host's JSON
+conventions): Claude Code's `${ENV}` header expansion is live-verified
+against a local mock MCP server; the Codex override shape
+(`mcp_servers.<name>.url` + `bearer_token_env_var`) is CLI-accepted, and the
+Codex host accepts only an exact Bearer scheme — any other Authorization
+scheme fails closed rather than being converted; Devin accepts the file
+shape, but whether it expands `${ENV}` inside header values is UNVERIFIED,
+so a Devin delivery can fail visibly at the bridge (401) and must then be
+reported as that exact state — never labeled success and never generalized
+into "all hosts work" from config acceptance alone. In every case a
+registration is presence evidence only: authentication and a live permitted
+read stay unproven until the worker observes the exact granted tool names.
+
 ## Host and authority rules
 
 Execute workers run locally in their dedicated Git worktree under the user

@@ -1,9 +1,33 @@
 ---
 name: side-lane
-description: Discover and qualify optional model lanes, then route approved tasks through exact configured workers, including Prompt it staffing and explicit spend routing.
+description: Use at the start of an implementation task to discover and qualify optional model lanes, then route approved tasks through exact configured workers, including Prompt it staffing and explicit spend routing.
 ---
 
 # Side lane
+
+Use at the start of an implementation task to discover and qualify optional
+model lanes, then route approved tasks through exact configured workers,
+including Prompt it staffing and explicit spend routing. Installation is
+optional: when the skill is not installed or no route qualifies, continue on
+the originating host and record the exception; when it is installed, assess it at
+the appropriate implementation task start, not only when the user explicitly
+asks for delegation.
+
+On an eligible execution request, run the documented host-specific
+`check-capabilities` and `recommend` assessment before deciding staffing,
+whether or not the user invoked Prompt it. The Side Lane assessment also runs
+outside the Prompt it workflow; follow the applicable proportional-planning
+rules. The assessment is not automatic dispatch and not automatic billable
+approval: a recommendation never dispatches a lane, and every existing gate
+still applies — host readiness, task eligibility and evidence, the user's
+existing task/delegation authorization, explicit execution approval,
+`--approve-billable-route`, capability grants, worktree isolation, and the
+preapproved-backup rules. Existing authorization covers the approved
+delegation; this assessment does not add a per-node permission prompt. If no
+route is eligible or an eligible route is unavailable, use the qualified
+preapproved backup under the existing availability policy when its conditions
+are met; otherwise continue on the originating host and record the exception.
+Never silently substitute a route.
 
 Use the [bundled runner](../../bin/side-lane), resolving that link relative to
 this `SKILL.md` and invoking the resulting absolute path.
@@ -110,9 +134,18 @@ retain its worktree for coordinator inspection. Add only capabilities the task
 actually requires. The runner injects
 `config/lane-governance.md`; do not duplicate or weaken those rules in a prompt.
 
-Prompt it may call `side-lane recommend` when installed and configured. If it is
-missing or returns no eligible route, Prompt it continues on the originating
-host. The coordinator stays fixed while Codex and Claude worker hosts are
+When execute work needs shared instructions outside its worktree, pass repeatable
+`--read-root /absolute/directory` grants for the required directories. The runner
+validates and audits them. Devin receives additional read-only file-tool grants;
+Claude and Codex receive task-scope instructions without extra workspace/write
+grants. This is not an OS sandbox. Review mode rejects read roots.
+
+`side-lane recommend` runs for an eligible execution request whether staffing
+happens inside Prompt it or on an ordinary request that never invoked it; when
+installed and configured, both paths call it the same way. If the runner is
+missing or returns no eligible route, the coordinator follows the qualified
+preapproved-backup policy when applicable, otherwise continuing on the
+originating host. The coordinator stays fixed while Codex and Claude worker hosts are
 qualified independently against their own OAuth, connectors, and tools.
 Recommendations are capability/evidence gated and never dispatch a lane.
 Coordinator origin does not select a provider: Codex-origin staffing may
@@ -180,6 +213,32 @@ execute lanes do not render this allowlist. The grants name the server, so on
 the Claude host the MCP server must be registered as exactly `gitnexus` /
 `codegraph`; `check-capabilities` reports `name-mismatch` for a near-miss and
 the launch gate refuses it. Codex lanes keep connector-name presence.
+
+`--capability slack-read` grants the execute-only Slack read tools on the MCP
+server registered exactly as `slack`: `slack_read_thread` and
+`slack_read_channel`, and nothing else — no sending, editing, search, files,
+membership changes, or wildcard tools. Claude-host and Devin execute lanes
+receive those exact per-tool grants; Codex lanes keep their existing
+capability behavior. The capability is not task authority: the coordinator's
+task must name the authorized channel or thread, and the same-user harness is
+not an argument-level sandbox. Registration is presence evidence only —
+`check-capabilities` reports it separately from Slack authentication and a
+live read, which stay unproven until the worker observes the exact granted
+tool names; a server exposing different tool names fails qualification with a
+reported mismatch rather than a wildcard fallback.
+
+`--capability asana-read`, `--capability drive-read`, and `--capability
+algolia-read` grant disjoint exact read-only tool sets on the fixed local MCP
+server registered exactly as `cm-services` (`mcp__cm-services__asana_*` /
+`mcp__cm-services__drive_*` / `mcp__cm-services__algolia_get_settings`),
+which the coordinator provisions into the worker host's user-global config
+under the same account before the run. Granting one capability never grants
+the other's tools, there is no server-wide wildcard, and every capability is
+read-only — any future write capability is a separate grant. Claude-host
+execute lanes also health-probe `cm-services` before launch and instruct the
+worker to `WaitForMcpServers` for it. Registration is presence evidence
+only — same-account provisioning, service authentication, and a live read
+stay unproven until the worker observes the exact granted tool names.
 
 ## AGENTS.md linkage
 
