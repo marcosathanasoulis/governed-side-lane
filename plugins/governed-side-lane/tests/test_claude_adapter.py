@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from side_lane import cli
+from side_lane import cli, report_stop_hook
 from side_lane.adapters import claude
 
 
@@ -1190,6 +1190,289 @@ class AllowedToolsTests(unittest.TestCase):
         self.assertIn("Bash(pnpm *)", result.argv)
         self.assertEqual(result.allowed_tools, claude.allowed_tools("execute", ("shell",)))
         self.assertIn("allowed_tools", result.as_dict())
+
+
+class ReportOnlyModeTests(unittest.TestCase):
+    """`--report-only` adds a same-invocation Stop hook and nothing else.
+
+    The opt-in exists because a cloud worker navigated, saved its screenshot,
+    ended its turn with exit 0, and reported a report it never wrote. Prose
+    was the only artifact. The repair is a deterministic Stop hook inside the
+    same Claude Code invocation: it blocks one stop and feeds the same model
+    loop a reason to write the report, then allows the stop.
+    """
+
+    native = {"gateway": "native-claude", "auth_method": "oauth", "billable": False}
+    REPORT_NAME = "SIDE_LANE_REPORT.md"
+
+    def repo(self, root: Path, name: str) -> Path:
+        path = root / name
+        path.mkdir()
+        (path / ".git").write_text("gitdir: /tmp/example\n", encoding="utf-8")
+        return path
+
+    def routed_provider_config(self) -> dict:
+        return {"gateway": "omniroute-router", "auth_method": "provider-key",
+                "billable": True, "base_url": "https://omniroute.example"}
+
+    def routed_model_config(self, **overrides) -> dict:
+        config = {"runtime_model": "routed-selector",
+                  "protocol": "anthropic-compatible",
+                  "qualification": {"verified": True, "verified_on": "2026-09-19",
+                                    "source": "receipt"},
+                  "routing_policy_contract": {
+                      "requested_selector": "routed-selector",
+                      "allowed_upstream_models": ["deepseek-flash"],
+                      "settings_precedence": "verified",
+                  }}
+        config.update(overrides)
+        return config
+
+    def native_model_config(self, **overrides) -> dict:
+        config = {"runtime_model": "claude-sonnet-5", "protocol": "native-claude"}
+        config.update(overrides)
+        return config
+
+    def command(self, repo: Path, lane: Path, *, model_config=None, **kwargs) -> list[str]:
+        return claude.build_command(
+            executable="claude", repo=repo, worktree=lane, provider="claude",
+            model="claude-sonnet-5", provider_config=self.native,
+            model_config=model_config or self.native_model_config(max_budget_usd=2.5),
+            prompt="task", mode="execute", **kwargs,
+        )
+
+    def launch_settings(self, command: list[str]) -> dict:
+        settings = json.loads(command[command.index("--settings") + 1])
+        self.assertIsInstance(settings, dict)
+        return settings
+
+    def stop_hook_entry(self, command: list[str]) -> dict:
+        settings = self.launch_settings(command)
+        stop = settings.get("hooks", {}).get("Stop")
+        self.assertIsInstance(stop, list)
+        self.assertEqual(len(stop), 1)
+        return stop[0]["hooks"][0]
+
+    def hook_argv(self, command: list[str]) -> list[str]:
+        return shlex.split(self.stop_hook_entry(command)["command"])
+
+    # --- the hook is present exactly when opted in ---------------------------
+
+    def test_opt_in_installs_one_stop_hook_with_the_fixed_report_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            command = self.command(repo, lane, report_only=True)
+        entry = self.stop_hook_entry(command)
+        self.assertEqual(entry["type"], "command")
+        self.assertEqual(entry["timeout"], claude.REPORT_ONLY_HOOK_TIMEOUT_SECONDS)
+        argv = self.hook_argv(command)
+        # An unresolved relative module path would make the interpreter exit 2
+        # and a non-zero hook exit blocks every stop.
+        self.assertEqual(argv[0], sys.executable)
+        self.assertTrue(Path(argv[1]).is_absolute())
+        self.assertEqual(argv[1], str(Path(argv[1]).resolve()))
+        self.assertEqual(argv[2], "--settings")
+        self.assertEqual(json.loads(argv[3])["report_path"],
+                         str((lane / self.REPORT_NAME).resolve()))
+
+    def test_default_commands_carry_no_stop_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            for provider_config, model_config, extra in (
+                (self.native, self.native_model_config(), {}),
+                (self.routed_provider_config(),
+                 self.routed_model_config(max_budget_usd=2.5), {}),
+                (self.native, {"runtime_model": "claude-sonnet-5",
+                               "protocol": "native-claude-readonly"}, {"mode": "review"}),
+            ):
+                with self.subTest(extra=extra, routed=provider_config is not self.native):
+                    command = claude.build_command(
+                        executable="claude", repo=repo, worktree=lane,
+                        provider="omniroute" if provider_config is not self.native else "claude",
+                        model="routed-selector" if provider_config is not self.native else "claude-sonnet-5",
+                        provider_config=provider_config, model_config=model_config,
+                        prompt="task", **extra,
+                    )
+                    self.assertFalse(any("report_stop_hook" in part for part in command))
+                    if "--settings" in command:
+                        self.assertNotIn("hooks", self.launch_settings(command))
+
+    def test_routed_opt_in_hook_survives_the_isolated_config_home(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            home = root / "home"
+            home.mkdir()
+            observed: dict[str, object] = {}
+
+            def runner(command, **kwargs):
+                child_config = Path(kwargs["env"]["CLAUDE_CONFIG_DIR"])
+                observed["command"] = list(command)
+                observed["settings"] = json.loads((child_config / "settings.json").read_text())
+                return subprocess.CompletedProcess(
+                    command, 0,
+                    '{"type":"result","subtype":"success","model":"deepseek-flash",'
+                    '"usage":{"input_tokens":1,"output_tokens":1}}\n', "")
+
+            claude.launch(
+                executable="claude", repo=repo, worktree=lane, provider="omniroute",
+                model="routed-selector", provider_config=self.routed_provider_config(),
+                model_config=self.routed_model_config(max_budget_usd=1.0),
+                prompt="task", env={"HOME": str(home), "PATH": "/bin"},
+                secret="router-secret", runner=runner, report_only=True,
+            )
+        # The Stop hook is process-local: it rides the run's own --settings
+        # payload, never the disposable config home's files.
+        command = observed["command"]
+        settings = json.loads(command[command.index("--settings") + 1])
+        self.assertEqual(settings["hooks"]["Stop"][0]["hooks"][0]["type"], "command")
+        self.assertNotIn("Stop", observed["settings"].get("hooks", {}))
+        self.assertIn("--max-budget-usd", command)
+
+    def test_opt_in_preserves_every_other_execute_control(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            plain = self.command(repo, lane, capabilities=("shell",))
+            opted = self.command(repo, lane, capabilities=("shell",), report_only=True)
+        # Same argv but for the settings payload: the opt-in must not widen
+        # tools, permission mode, MCP handling, or the model selector.
+        def without_settings(argv: list[str]) -> list[str]:
+            index = argv.index("--settings")
+            return argv[:index] + argv[index + 2:]
+
+        self.assertEqual(without_settings(plain), without_settings(opted))
+        allowed = [part for part in opted if part.startswith("Bash(")]
+        self.assertIn("Bash(git commit *)", allowed)
+        self.assertNotIn("Bash(git push *)", allowed)
+
+    # --- fail closed before any model launch ---------------------------------
+
+    def test_opt_in_requires_a_finite_positive_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            for label, value in (("missing", None), ("zero", 0), ("negative", -1),
+                                 ("infinite", float("inf")), ("nan", float("nan")),
+                                 ("text", "much"), ("true", True)):
+                with self.subTest(label=label):
+                    model_config = self.native_model_config()
+                    if value is not None:
+                        model_config["max_budget_usd"] = value
+                    with self.assertRaises(claude.ClaudeAdapterError):
+                        self.command(repo, lane, model_config=model_config,
+                                     report_only=True)
+
+    def test_opt_in_budget_is_forwarded_as_the_usd_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            command = self.command(repo, lane, report_only=True)
+        self.assertEqual(command[command.index("--max-budget-usd") + 1], "2.5")
+
+    def test_opt_in_is_rejected_outside_execute_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            config = {"runtime_model": "claude-sonnet-5",
+                      "protocol": "native-claude-readonly", "max_budget_usd": 2.5}
+            for mode in ("review", "plan"):
+                with self.subTest(mode=mode):
+                    with self.assertRaises(claude.ClaudeAdapterError):
+                        claude.build_command(
+                            executable="claude", repo=repo, worktree=lane,
+                            provider="claude", model="claude-sonnet-5",
+                            provider_config=self.native, model_config=config,
+                            prompt="task", mode=mode, report_only=True,
+                        )
+
+    def test_launch_fails_before_the_model_when_the_budget_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "done", ""))
+            with self.assertRaises(claude.ClaudeAdapterError):
+                claude.launch(
+                    executable="claude", repo=repo, worktree=lane, provider="claude",
+                    model="claude-sonnet-5", provider_config=self.native,
+                    model_config=self.native_model_config(), prompt="task",
+                    mode="execute", env={"PATH": "/bin"}, runner=runner,
+                    report_only=True,
+                )
+        runner.assert_not_called()
+
+    def test_opt_in_runs_the_model_exactly_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            runner = mock.Mock(
+                return_value=subprocess.CompletedProcess([], 0, "done", ""))
+            claude.launch(
+                executable="claude", repo=repo, worktree=lane, provider="claude",
+                model="claude-sonnet-5", provider_config=self.native,
+                model_config=self.native_model_config(max_budget_usd=2.5),
+                prompt="task", mode="execute", env={"PATH": "/bin"}, runner=runner,
+                report_only=True,
+            )
+        self.assertEqual(runner.call_count, 1)
+        # One subprocess, one timeout: the opt-in adds no estimate, no second
+        # invocation, and no resume/continue of the same worker.
+        self.assertEqual(runner.call_args.kwargs["timeout"], 1800)
+        command = runner.call_args.args[0]
+        self.assertEqual(command.count("-p"), 1)
+
+    # --- the installed hook actually protects the run -------------------------
+
+    def _run_installed_hook(self, command: list[str], stdin: dict) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            self.hook_argv(command), input=json.dumps(stdin).encode("utf-8"),
+            capture_output=True, timeout=10,
+        )
+
+    def test_installed_hook_blocks_the_stop_when_the_report_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            command = self.command(repo, lane, report_only=True)
+            result = self._run_installed_hook(command, {
+                "hook_event_name": "Stop", "cwd": str(repo), "stop_hook_active": False})
+            self.assertEqual(result.returncode, 0)
+            decision = json.loads(result.stdout.decode("utf-8"))
+            self.assertEqual(decision["decision"], "block")
+            self.assertIn("report", decision["reason"].lower())
+            # A first block feeds the same loop; the second round is bounded.
+            second = self._run_installed_hook(command, {
+                "hook_event_name": "Stop", "cwd": str(repo), "stop_hook_active": True})
+            self.assertEqual(second.returncode, 0)
+            self.assertEqual(second.stdout.strip(), b"")
+
+    def test_installed_hook_allows_the_stop_once_the_report_is_written(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            command = self.command(repo, lane, report_only=True)
+            (lane / self.REPORT_NAME).write_text("# Findings\n- item\n", encoding="utf-8")
+            result = self._run_installed_hook(command, {
+                "hook_event_name": "Stop", "cwd": str(repo), "stop_hook_active": False})
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), b"")
+
+    def test_installed_hook_is_shell_safe_for_awkward_worktree_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "lane with 'quotes' & $(spaces)"
+            root.mkdir()
+            repo = self.repo(Path(directory), "repo")
+            lane = root
+            (lane / ".git").write_text("gitdir: /tmp/example\n", encoding="utf-8")
+            command = self.command(repo, lane, report_only=True)
+            argv = self.hook_argv(command)
+            self.assertEqual(argv[1], str(Path(report_stop_hook.__file__).resolve()))
+            result = self._run_installed_hook(command, {
+                "hook_event_name": "Stop", "cwd": "/", "stop_hook_active": False})
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout.decode("utf-8"))["decision"], "block")
 
 
 if __name__ == "__main__":

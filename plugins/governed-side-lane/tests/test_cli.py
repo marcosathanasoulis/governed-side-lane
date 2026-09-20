@@ -1966,3 +1966,226 @@ class HostExecutableCliTests(unittest.TestCase):
         self.assertEqual(report["runtime"], str(bundled))
         self.assertEqual(report["capability_evidence"]["shell"]["state"], "verified")
         status.assert_called_with("codex", executable=str(bundled))
+
+
+class ReportOnlyCliTests(unittest.TestCase):
+    """`side-lane run --report-only`: CLI gating, plumbing, and final acceptance.
+
+    The flag is the CLI half of the same-invocation Stop-hook repair: it is
+    opt-in, execute-only, Claude-only, and requires the finite USD cap that
+    makes the cap and the hook the same command. The runner's last word is its
+    own look at the report — a lane that never produced one is not accepted,
+    whatever the completion prose said.
+    """
+
+    REPORT_NAME = "SIDE_LANE_REPORT.md"
+
+    def setUp(self) -> None:
+        # Keep host-executable resolution hermetic, as the shared base does.
+        patcher = mock.patch.dict(
+            os.environ,
+            {"SIDE_LANE_CODEX_EXECUTABLE": "", "SIDE_LANE_CLAUDE_EXECUTABLE": ""},
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def repo(self) -> Path:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name)
+        subprocess.run(
+            ["git", "init", "-b", "main", str(path)], check=True, capture_output=True
+        )
+        (path / "CLAUDE.md").write_text("# Rules\n", encoding="utf-8")
+        (path / "AGENTS.md").write_text(
+            "You must read [CLAUDE.md](./CLAUDE.md); it is the authoritative "
+            "source of truth.\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def _args(self, **overrides):
+        values = dict(
+            host="claude", mode="execute", provider="claude",
+            model="claude-sonnet-5", capability=[], lane_name="task", skill=[],
+            approve_billable_route=False, worktree_root=None,
+            allow_no_commit=False, no_publish=True, verify=None,
+            read_root=[], mcp_config=None, report_only=True,
+        )
+        values.update(overrides)
+        return mock.Mock(**values)
+
+    def _drive(self, *, report_only=True, report=None, model_config=None,
+               host="claude", mode="execute", no_publish=True):
+        """Run _launch through a mocked Claude adapter; return what happened.
+
+        ``report`` is written into the lane worktree by the fake adapter, the
+        way a worker would, so the real post-run gate is what is under test.
+        """
+
+        repo = self.repo()
+        worktree = repo / "execute-worktree"
+        lane = mock.Mock(worktree=worktree, branch="side-lane/task-1")
+        result = LaneResult(
+            ("claude",), 0, worktree, "claude", "claude", "native-claude",
+            "claude-sonnet-5", "oauth", False, "done", "",
+        )
+
+        def fake_launch(*_args, **_kwargs):
+            if report is not None:
+                worktree.mkdir(parents=True, exist_ok=True)
+                (worktree / self.REPORT_NAME).write_text(report, encoding="utf-8")
+            return result
+
+        launch = mock.MagicMock(side_effect=fake_launch)
+        claude_route = (
+            {"gateway": "native-claude", "auth_method": "oauth", "billable": False},
+            model_config if model_config is not None
+            else {"runtime_model": "claude-sonnet-5", "protocol": "native-claude",
+                  "max_budget_usd": 2.5},
+        )
+        with (
+            mock.patch("side_lane.cli._require_host_executable",
+                       return_value="/opt/hosts/claude"),
+            mock.patch("side_lane.cli.select_route", return_value=claude_route),
+            mock.patch("side_lane.cli.create_worktree", return_value=lane),
+            mock.patch("side_lane.cli.require_native_oauth"),
+            mock.patch("side_lane.adapters.claude.launch", launch),
+            mock.patch("side_lane.cli.lane_delivery",
+                       return_value=LaneDelivery(committed=True, uncommitted=())),
+            mock.patch("side_lane.cli.git_status", return_value="## task"),
+            mock.patch("side_lane.cli.write_audit",
+                       return_value=repo / ".git" / "audit.json"),
+            mock.patch("side_lane.cli.dispose_clean_worktree"),
+            mock.patch("side_lane.cli.publish_lane_branch",
+                       return_value="origin/side-lane/task-1") as publish,
+            contextlib.redirect_stdout(io.StringIO()) as output,
+            contextlib.redirect_stderr(io.StringIO()) as errors,
+        ):
+            code = cli._launch(
+                self._args(report_only=report_only, host=host, mode=mode,
+                           no_publish=no_publish),
+                cli.load_config(), repo, "Implement",
+            )
+        self.publish_lane = publish
+        return code, output.getvalue(), errors.getvalue(), launch, worktree
+
+    # --- the flag exists only on the one supported route ---------------------
+
+    def test_parser_accepts_the_flag(self) -> None:
+        args = cli.make_parser().parse_args([
+            "run", "--host", "claude", "--mode", "execute", "--provider", "claude",
+            "--model", "claude-sonnet-5", "--repo", ".", "--lane-name", "task",
+            "--prompt", "Implement", "--report-only",
+        ])
+        self.assertTrue(args.report_only)
+
+    def test_review_mode_is_rejected_before_anything_is_created(self) -> None:
+        repo = self.repo()
+        with (
+            mock.patch("side_lane.cli.create_worktree") as create,
+            mock.patch("side_lane.adapters.claude.launch") as launch,
+        ):
+            with self.assertRaises(cli.SideLaneError) as caught:
+                cli._launch(self._args(mode="review"), cli.load_config(), repo, "Review")
+        self.assertIn("execute", str(caught.exception))
+        create.assert_not_called()
+        launch.assert_not_called()
+
+    def test_other_hosts_are_rejected_before_anything_is_created(self) -> None:
+        for host in ("codex", "devin"):
+            with self.subTest(host=host):
+                repo = self.repo()
+                with mock.patch("side_lane.cli.create_worktree") as create:
+                    with self.assertRaises(cli.SideLaneError) as caught:
+                        cli._launch(self._args(host=host), cli.load_config(), repo,
+                                    "Implement")
+                self.assertIn("claude", str(caught.exception))
+                create.assert_not_called()
+
+    def test_missing_or_invalid_budget_fails_before_any_worktree(self) -> None:
+        base = {"runtime_model": "claude-sonnet-5", "protocol": "native-claude"}
+        for label, extra in (
+            ("missing", {}),
+            ("zero", {"max_budget_usd": 0}),
+            ("infinite", {"max_budget_usd": float("inf")}),
+            ("text", {"max_budget_usd": "much"}),
+        ):
+            with self.subTest(label=label):
+                repo = self.repo()
+                model_config = dict(base, **extra)
+                with (
+                    mock.patch("side_lane.cli._require_host_executable",
+                               return_value="/opt/hosts/claude"),
+                    mock.patch("side_lane.cli.select_route", return_value=(
+                        {"gateway": "native-claude", "auth_method": "oauth",
+                         "billable": False}, model_config)),
+                    mock.patch("side_lane.cli.create_worktree") as create,
+                    mock.patch("side_lane.adapters.claude.launch") as launch,
+                ):
+                    with self.assertRaises(cli.SideLaneError):
+                        cli._launch(self._args(), cli.load_config(), repo, "Implement")
+                create.assert_not_called()
+                launch.assert_not_called()
+
+    # --- the flag reaches only the Claude execute adapter --------------------
+
+    def test_opt_in_is_forwarded_to_the_claude_adapter(self) -> None:
+        code, _stdout, _stderr, launch, _worktree = self._drive(report="# Findings\n- item\n")
+        self.assertEqual(code, 0)
+        self.assertIs(launch.call_args.kwargs["report_only"], True)
+
+    def test_default_execute_run_does_not_forward_the_opt_in(self) -> None:
+        code, _stdout, _stderr, launch, _worktree = self._drive(
+            report_only=False, report="# Findings\n")
+        self.assertEqual(code, 0)
+        self.assertIs(launch.call_args.kwargs["report_only"], False)
+
+    # --- the runner's own look at the report is the last word ----------------
+
+    def test_missing_report_after_one_feedback_is_not_accepted(self) -> None:
+        code, stdout, stderr, _launch, worktree = self._drive(report=None)
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        self.assertEqual(_only_summary(stdout).get("report_present"), False)
+        self.assertIn(self.REPORT_NAME, stderr)
+        self.assertIn(str(worktree), stderr)
+
+    def test_missing_report_blocks_publication_and_delivery_summary(self) -> None:
+        code, stdout, _stderr, _launch, _worktree = self._drive(
+            report=None, no_publish=False)
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        self.publish_lane.assert_not_called()
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertNotIn("published", summary)
+
+    def test_invalid_report_blocks_publication_and_delivery_summary(self) -> None:
+        code, stdout, _stderr, _launch, _worktree = self._drive(
+            report=" \n\t ", no_publish=False)
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        self.publish_lane.assert_not_called()
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertNotIn("published", summary)
+
+    def test_blank_report_is_not_accepted(self) -> None:
+        for label, report in (("empty", ""), ("whitespace", "   \n\t ")):
+            with self.subTest(label=label):
+                code, stdout, _stderr, _launch, _worktree = self._drive(report=report)
+                self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+                self.assertEqual(
+                    _only_summary(stdout).get("report_present"), False)
+
+    def test_present_report_is_accepted(self) -> None:
+        code, stdout, _stderr, _launch, worktree = self._drive(report="# Findings\n- item\n")
+        self.assertEqual(code, 0)
+        summary = _only_summary(stdout)
+        self.assertEqual(summary.get("report_present"), True)
+        self.assertEqual(summary.get("report_path"),
+                         str(worktree / self.REPORT_NAME))
+
+    def test_report_gate_is_absent_without_the_opt_in(self) -> None:
+        code, stdout, _stderr, _launch, _worktree = self._drive(
+            report_only=False, report=None)
+        self.assertEqual(code, 0)
+        self.assertNotIn("report_present", _only_summary(stdout))

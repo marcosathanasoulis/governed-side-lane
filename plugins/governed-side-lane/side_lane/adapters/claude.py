@@ -16,7 +16,7 @@ import tempfile
 from typing import Any, Callable, Mapping, Sequence, Union
 from urllib.parse import urlparse
 
-from side_lane import routed_read_pagination
+from side_lane import report_stop_hook, routed_read_pagination
 from side_lane.credentials import scrub_backend_environment
 from side_lane.governance import known_capabilities, lane_system_prompt, tool_policy
 from side_lane.mcp_run_config import (
@@ -95,6 +95,11 @@ GLM_QUOTA_PAUSE = re.compile(
 )
 SUPPORTED_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 MCP_READINESS_TIMEOUT_SECONDS = 20
+# Report-only execute lanes (`--report-only`) get one deterministic Stop hook
+# inside the same invocation. The filename and action are fixed here; a worker
+# never chooses its own acceptance path.
+REPORT_ONLY_REPORT_NAME = "SIDE_LANE_REPORT.md"
+REPORT_ONLY_HOOK_TIMEOUT_SECONDS = 10
 # Process-local controls for routed runs. Compaction starts below the
 # reviewed OmniRoute ceiling and output is bounded per response; these do not
 # claim provider capacity or replace the router's fail-closed guard.
@@ -674,12 +679,87 @@ def _required_mcp_servers(capabilities: Capabilities) -> tuple[str, ...]:
                          and name not in RUN_CONFIG_CAPABILITIES}))
 
 
+def _merge_stop_hook(settings: object, command: str) -> dict[str, Any]:
+    """Return copied Claude settings with the report Stop hook appended.
+
+    Mirrors ``_merge_read_pagination_hook``: every inherited key survives and a
+    malformed ``hooks`` block fails closed at launch preparation. Only the
+    ``Stop`` key is touched, so an inherited ``PreToolUse`` entry — or any
+    other event — keeps running exactly as before.
+    """
+
+    if not isinstance(settings, Mapping):
+        raise ClaudeAdapterError("Claude settings must be a JSON object")
+    merged: dict[str, Any] = {key: value for key, value in settings.items()}
+    hooks = merged.get("hooks")
+    if hooks is None:
+        merged_hooks: dict[str, Any] = {}
+    elif isinstance(hooks, Mapping):
+        merged_hooks = {key: value for key, value in hooks.items()}
+    else:
+        raise ClaudeAdapterError("Claude settings hooks must be a JSON object")
+    existing = merged_hooks.get("Stop", [])
+    if not isinstance(existing, list):
+        raise ClaudeAdapterError("Claude settings hooks.Stop must be an array")
+    merged_hooks["Stop"] = [*existing, {
+        "hooks": [{
+            "type": "command",
+            "command": command,
+            "timeout": REPORT_ONLY_HOOK_TIMEOUT_SECONDS,
+        }],
+    }]
+    merged["hooks"] = merged_hooks
+    return merged
+
+
+def report_only_hook_command(report_path: Path) -> str:
+    """Shell-quote the trusted helper invocation that guards one run's stop.
+
+    The command is built from the current interpreter, this package's own
+    helper module, and the fixed report path — never from model input or hook
+    stdin. ``shlex.join`` quotes it so a worktree path containing spaces,
+    quotes, or shell metacharacters survives as one argv.
+    """
+
+    helper = Path(report_stop_hook.__file__).resolve()
+    settings = json.dumps(
+        {"report_path": str(report_path)}, separators=(",", ":"), sort_keys=True
+    )
+    return shlex.join((sys.executable, str(helper), "--settings", settings))
+
+
+def report_only_report_path(worktree: Path) -> Path:
+    """The one report path a report-only lane is judged on."""
+
+    return worktree / REPORT_ONLY_REPORT_NAME
+
+
+def require_report_only_budget(model_config: Mapping[str, Any]) -> str:
+    """Return the finite positive USD cap a report-only lane must carry.
+
+    The opt-in promises the Stop hook and the spend cap travel in the same
+    invocation, so a missing or unusable ``max_budget_usd`` fails before any
+    model starts rather than launching an unbounded lane. Nothing here changes
+    the catalog or the ordinary execute path, which still treats the budget as
+    optional.
+    """
+
+    budget = _optional_budget(model_config)
+    if budget is None:
+        raise ClaudeAdapterError(
+            "report-only requires a finite positive max_budget_usd: the Stop "
+            "hook and the USD cap must be part of the same invocation"
+        )
+    return budget
+
+
 def _per_launch_settings(
     provider: str,
     model: str,
     mode: str,
     base_url: str | None = None,
     capabilities: Capabilities = (),
+    report_only_report: Path | None = None,
 ) -> str:
     """Return nonsecret settings that outrank user/project/local settings.
 
@@ -705,6 +785,13 @@ def _per_launch_settings(
         if base_url is not None:
             settings["env"]["ANTHROPIC_BASE_URL"] = base_url.rstrip("/")
         settings["alwaysThinkingEnabled"] = True
+    if report_only_report is not None:
+        # Process-local only: this hook rides the run's own --settings payload,
+        # so no saved settings file, user hook, or permission is written,
+        # replaced, or disabled. Inherited hooks keep loading from their own
+        # setting sources alongside this one.
+        settings = _merge_stop_hook(
+            settings, report_only_hook_command(report_only_report))
     return json.dumps(settings, separators=(",", ":"), sort_keys=True)
 
 
@@ -721,6 +808,10 @@ def _optional_budget(model_config: Mapping[str, Any]) -> str | None:
     value = model_config.get("max_budget_usd")
     if value is None:
         return None
+    if isinstance(value, bool):
+        # `true` is not a USD amount, and float(True) == 1.0 would silently
+        # become a one-dollar cap instead of the input error it is.
+        raise ClaudeAdapterError("max_budget_usd must be a positive finite number")
     try:
         parsed = float(value)
     except (TypeError, ValueError) as exc:
@@ -745,12 +836,21 @@ def build_command(
     read_roots: Sequence[Path] = (),
     mcp_config_path: str | Path | None = None,
     run_mcp_servers: "Mapping[str, Any] | None" = None,
+    report_only: bool = False,
 ) -> list[str]:
     executable = _nonempty(executable, "Claude executable")
     repo_path = validate_worktree(repo)
     worktree_path = validate_worktree(worktree)
     if repo_path == worktree_path:
         raise ClaudeAdapterError(f"{mode} lane requires a dedicated worktree")
+    if report_only and mode != "execute":
+        # The hook rides the execute lane's own argv and settings; a review
+        # lane's argv is the strict read-only form and must stay byte-identical.
+        raise ClaudeAdapterError("report-only is execute mode only for the Claude host")
+    if report_only:
+        # Fail before the model, not after: the opt-in only makes sense if the
+        # Stop hook and the USD cap are both in this one command.
+        require_report_only_budget(model_config)
     if read_roots and mode != "execute":
         # A review lane's argv is the strict read-only form; a granted read
         # root cannot be added to it without either assuming the plan-mode
@@ -806,7 +906,9 @@ def build_command(
                 "--verbose",
                 "--settings",
                 _per_launch_settings(
-                    provider, runtime_model, mode, provider_config.get("base_url"), capabilities
+                    provider, runtime_model, mode, provider_config.get("base_url"),
+                    capabilities,
+                    report_only_report_path(worktree_path) if report_only else None,
                 ),
             )
         )
@@ -918,6 +1020,7 @@ def launch(
     readiness_runner: Runner = None,
     read_roots: Sequence[Path] = (),
     run_mcp_servers: "Mapping[str, McpRunServer] | None" = None,
+    report_only: bool = False,
 ) -> LaneResult:
     if provider != NATIVE_PROVIDER and provider != "glm":
         qualification = model_config.get("qualification")
@@ -968,6 +1071,7 @@ def launch(
             read_roots=read_roots,
             run_mcp_servers=run_mcp_servers,
             run_config_path=run_config_path,
+            report_only=report_only,
         )
     finally:
         if run_config_path is not None:
@@ -996,6 +1100,7 @@ def _launch_worker(
     read_roots: Sequence[Path],
     run_mcp_servers: "Mapping[str, McpRunServer] | None",
     run_config_path: Path | None,
+    report_only: bool = False,
 ) -> LaneResult:
     command = build_command(
         executable=executable,
@@ -1011,6 +1116,7 @@ def _launch_worker(
         read_roots=read_roots,
         mcp_config_path=run_config_path,
         run_mcp_servers=run_mcp_servers,
+        report_only=report_only,
     )
     runtime_model, gateway, auth_method, billable = _route_metadata(
         provider, model, provider_config, model_config, mode

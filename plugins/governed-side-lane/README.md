@@ -77,3 +77,42 @@ command does once it runs. A hook block lets the model continue; without it
 the write would reach Devin's `accept-edits` confirmation, which ends a
 non-interactive session outright. The lane worktree path travels to the
 hook in the per-run `devin-command-policy.json` rules file.
+
+## Report-only execute lanes (`--report-only`)
+
+A worker can end its turn with exit 0, having navigated and saved its
+screenshots, and describe in prose a findings report it never wrote. Prose in
+a transcript is not an artifact, so `--report-only` makes
+`SIDE_LANE_REPORT.md` at the lane worktree root a checked precondition:
+
+```bash
+side-lane run --host claude --mode execute --provider <p> --model <m> \
+  --lane-name <lane> --prompt-file <task> --report-only
+```
+
+It is deliberately narrow: Claude host, execute mode, and a finite positive
+`max_budget_usd` on the route (the USD cap and the repair must travel in the
+same command; no catalog or global budget change is involved). Ordinary execute
+and review lanes are untouched, and the flag is rejected before a worktree,
+credential, or host executable is touched anywhere else.
+
+Two checks enforce it. Inside the same invocation, a Claude Code `Stop`
+command hook — this package's own stdlib helper, invoked through the run's
+process-local `--settings` payload with a shell-quoted absolute path — reads
+the fixed report path from its own argument, never from hook stdin, and blocks
+one stop when the report is missing, empty, whitespace-only, a symlink, or not
+a regular file. The block hands the same model loop a reason to write the real
+report; `stop_hook_active` then lets the next stop through, bounding the
+feedback to one round. No saved settings file, user hook, permission, or
+inherited hook is written, replaced, or disabled. After the worker exits, the
+runner applies the same rule as its own acceptance gate and exits
+`3` (`LANE_NOT_DELIVERED`) if the report is still unusable, so completion prose
+can never be recorded as an accepted delivery.
+
+Scope of the claim: the hook is a quality gate on the lane's own artifact, not
+a sandbox — the same-user harness is not an OS boundary, and the run's existing
+single subprocess timeout and USD cap are unchanged. The outer GCF consumer's
+own report collection remains authoritative for source changes, containment,
+sizes, and scrubbing; until that consumer is wired to this flag, a report-only
+lane's report must also satisfy it.
+

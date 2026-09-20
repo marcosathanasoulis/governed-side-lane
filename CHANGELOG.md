@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.26 - 2026-09-20
+
+- Add explicit `--report-only` Claude execute runs with a required finite,
+  positive USD budget. A per-run Stop hook checks the actual worktree report
+  and requests one correction within the same invocation when it is missing
+  or invalid. The correction shares the original timeout and budget; it never
+  starts another worker or resumes a separate session.
+- Validate report-only artifacts before treating delivery as successful or
+  publishing a branch. Unsupported hosts and review mode reject the option;
+  ordinary execution retains its existing contract.
+
 ## 0.4.25 - 2026-09-20
 
 - Harden native Devin `env` command handling: only literal task-scoped

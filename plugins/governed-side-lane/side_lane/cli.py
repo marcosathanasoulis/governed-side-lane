@@ -10,7 +10,7 @@ import shutil
 import sys
 from typing import Any, Mapping, Sequence
 
-from side_lane import evaluation, routing, selector_policy
+from side_lane import evaluation, report_stop_hook, routing, selector_policy
 from side_lane.auth import AuthError, auth_status, require_native_oauth
 from side_lane.credentials import CredentialError, credential_present, read_credential
 from side_lane.connector_metadata import json_mcp_name_scopes, toml_mcp_names
@@ -32,7 +32,7 @@ from side_lane.mcp_run_config import (
 )
 from side_lane.read_roots import ReadRootError, parse_read_roots
 from side_lane.skill_bundle import SkillBundleError, catalog_note, deliver_skills
-from side_lane.adapters.claude import ClaudeAdapterError
+from side_lane.adapters.claude import ClaudeAdapterError, require_report_only_budget
 from side_lane.adapters.codex import CodexAdapterError
 from side_lane.adapters.devin import DevinAdapterError
 from side_lane.worktrees import (
@@ -356,6 +356,18 @@ def make_parser() -> argparse.ArgumentParser:
         "and credential values are not",
     )
     run.add_argument("--approve-billable-route", action="store_true")
+    run.add_argument(
+        "--report-only",
+        action="store_true",
+        help="Claude execute lanes only. Require SIDE_LANE_REPORT.md in the lane "
+        "worktree and enforce it twice: a deterministic Stop hook inside the "
+        "same Claude Code invocation blocks one stop — feeding the same worker "
+        "the reason to write the real findings report — and the runner itself "
+        "refuses to accept the lane if the report is still missing, empty, or a "
+        "symlink when the worker exits. Requires a finite positive "
+        "max_budget_usd on the route so the USD cap and the hook travel in one "
+        "command. Ordinary execute and review lanes are unchanged",
+    )
     run.add_argument(
         "--allow-no-commit",
         action="store_true",
@@ -1072,6 +1084,30 @@ def _launch(
     provider_config, model_config = select_route(
         config, args.host, args.mode, args.provider, args.model
     )
+    # The report-only opt-in is the same-invocation repair for a worker that
+    # ended its turn with exit 0 and reported a report it never wrote. It is
+    # deliberately narrow: execute mode only, the Claude host only (the
+    # mechanism is a Claude Code Stop hook), and gated on an explicit spend cap
+    # so the cap and the hook are part of one command. Everything else about an
+    # execute lane — its argv, tools, permissions, MCP handling, timeout — is
+    # untouched by this flag, and review lanes never see it.
+    # Exact-boolean read: an argparse Namespace always carries the declared
+    # flag, and anything other than an explicit True means the opt-in was not
+    # given, so no lane can be steered into report-only mode by accident.
+    report_only = getattr(args, "report_only", False) is True
+    report_path: Path | None = None
+    if report_only:
+        if args.mode != "execute":
+            raise SideLaneError("--report-only is supported only in execute mode")
+        if args.host != "claude":
+            raise SideLaneError(
+                "--report-only is supported only on the claude host: the repair "
+                "is a Claude Code Stop hook inside the same invocation"
+            )
+        try:
+            require_report_only_budget(model_config)
+        except ClaudeAdapterError as exc:
+            raise SideLaneError(str(exc)) from exc
     if args.capability and args.mode != "execute":
         raise SideLaneError("--capability is supported only in execute mode")
     if run_mcp_servers and args.mode != "execute":
@@ -1227,6 +1263,7 @@ def _launch(
                 secret=secret,
                 read_roots=read_roots,
                 run_mcp_servers=run_mcp_servers,
+                report_only=report_only,
             )
         else:
             from side_lane.adapters.devin import launch
@@ -1351,7 +1388,19 @@ def _launch(
 
     summary["committed"] = delivery.committed
     summary["uncommitted"] = list(delivery.uncommitted)
-    summary["delivered"] = delivery.delivered
+    # The runner's own look at the report, on the same rule the in-loop Stop
+    # hook applies. A report-only lane is not delivered until this acceptance
+    # precondition passes; this decision must precede both publication and the
+    # summary so a committed branch cannot be mistaken for an accepted lane.
+    report_present: bool | None = None
+    if report_only:
+        report_path = lane.worktree / report_stop_hook.REPORT_NAME
+        report_present = report_stop_hook.report_is_valid(report_path)
+        summary["report_present"] = report_present
+        summary["report_path"] = str(report_path)
+    summary["delivered"] = delivery.delivered and (
+        not report_only or report_present is True
+    )
     # 2026-09-17: a lane told to run the test suite ran it 18 times, saw
     # JSONDecodeError nine times, committed the failing tests anyway, and
     # exited 0 — caught only because a human re-ran the suite by hand. A
@@ -1373,7 +1422,7 @@ def _launch(
         # not imply one was reached and lost.
         summary["verified"] = None
     publish_warning = None
-    if not result.returncode and delivery.delivered:
+    if not result.returncode and summary["delivered"]:
         # A delivered lane's commits live on one machine until they are pushed:
         # measured 2026-09-17, 40 commits across 36 worktrees were on no remote,
         # and nothing ever reclaimed the trees. Pushing makes the commits
@@ -1406,6 +1455,22 @@ def _launch(
         )
     if result.returncode:
         return result.returncode
+    if report_only and not report_present:
+        # One feedback round was already spent inside the invocation; the
+        # report is still not there. A lane that wrote its work but no report
+        # is not an accepted delivery, and the exit code says so rather than
+        # leaving an operator to read the prose. Nothing was removed: the
+        # lane's commit, worktree, and audit are all intact. The outer GCF
+        # consumer's own report collection stays authoritative for source
+        # changes, containment, sizes, and scrubbing.
+        print(
+            f"side-lane: --report-only lane produced no usable "
+            f"{report_stop_hook.REPORT_NAME} at {report_path}; the worker's "
+            "completion prose is not the report. The lane's commit and audit "
+            "are intact.",
+            file=sys.stderr,
+        )
+        return LANE_NOT_DELIVERED
     if verify is not None and not verify.passed:
         return LANE_VERIFY_FAILED
     if source_check_error is not None:
