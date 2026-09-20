@@ -36,6 +36,8 @@ from side_lane.adapters.claude import ClaudeAdapterError, require_report_only_bu
 from side_lane.adapters.codex import CodexAdapterError
 from side_lane.adapters.devin import DevinAdapterError
 from side_lane.worktrees import (
+    ASSIGNMENT_SCHEMA_VERSION,
+    AssignmentRecord,
     WorktreeError,
     create_worktree,
     dispose_clean_worktree,
@@ -45,6 +47,7 @@ from side_lane.worktrees import (
     snapshot_source,
     source_mutations,
     verify_lane,
+    write_assignment,
     write_audit,
 )
 
@@ -52,6 +55,30 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = PACKAGE_ROOT / "config" / "models.json"
 MAX_PROMPT_CHARS = 100_000
 MAX_PROFILE_CHARS = 100_000
+MAX_MEASUREMENT_CHARS = 8_192
+# The vocabulary below is the measurement ledger's, not a new one: an
+# assignment captured here must be liftable into that ledger unchanged
+# (docs/automatic-side-lane/ledger-schema.json).
+MEASUREMENT_HOST_FAMILIES = frozenset({"local-codex", "slack-claude-tag"})
+MEASUREMENT_WEIGHTS = frozenset({1, 3, 8})
+MEASUREMENT_PLANNING_DISPOSITIONS = frozenset(
+    {"small-plan-and-run", "substantial-plan-approved"}
+)
+# The ledger's own task_id pattern, with an explicit length bound so the sidecar
+# stays small and its name-safe key stays name-safe.
+MEASUREMENT_TASK_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
+MEASUREMENT_REQUIRED_FIELDS = frozenset(
+    {
+        "schema_version",
+        "task_id",
+        "host_family",
+        "preassigned_weight",
+        "planning_disposition",
+        "rework",
+    }
+)
+MEASUREMENT_OPTIONAL_FIELDS = frozenset({"parent_task_id"})
+MEASUREMENT_FIELDS = MEASUREMENT_REQUIRED_FIELDS | MEASUREMENT_OPTIONAL_FIELDS
 REVIEW_UNSAFE = tuple(
     re.compile(p, re.I)
     for p in (
@@ -391,10 +418,126 @@ def make_parser() -> argparse.ArgumentParser:
         "the normal publication attempt, which --no-publish and a failed push "
         "can still leave without a remote branch",
     )
+    run.add_argument(
+        "--measurement-file",
+        metavar="JSON",
+        help="capture this run's pre-assigned delegation measurement. The file is "
+        "a bounded, metadata-only JSON object (schema_version, task_id, "
+        "host_family, preassigned_weight, planning_disposition, rework, and "
+        "parent_task_id for a rework); it is validated before any worktree is "
+        "created and published as an immutable assignment sidecar beside this "
+        "run's audit before the worker starts, so an interrupted or failed lane "
+        "still records what it was assigned. Omit it and the run is explicitly "
+        "unmeasured. Execute mode only",
+    )
     prompt = run.add_mutually_exclusive_group(required=True)
     prompt.add_argument("--prompt")
     prompt.add_argument("--prompt-file")
     return parser
+
+
+def load_measurement(path_argument: str) -> dict[str, Any]:
+    """Read and validate one bounded, metadata-only assignment record.
+
+    The file supplies the preassignment a lane's measurement needs and nothing
+    else: a task id, its host family, the weight assigned before execution, the
+    planning disposition, and the rework lineage. It is deliberately not a
+    place to put a prompt, a credential, or an output path — the field set is
+    closed and every field is a scalar, so a file that carries anything else,
+    however plausible, is refused rather than partly honoured. Validation is
+    total and happens before the caller creates a worktree, so an unusable
+    record cannot leave a lane behind.
+
+    Returning a normalized record (not the caller's object) keeps the sidecar's
+    contents a property of this contract instead of of the file that was read.
+    """
+
+    path = Path(path_argument).expanduser()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SideLaneError(f"cannot read measurement file: {exc}") from exc
+    if len(raw) > MAX_MEASUREMENT_CHARS:
+        raise SideLaneError(
+            f"measurement file is too large (limit {MAX_MEASUREMENT_CHARS} characters)"
+        )
+    try:
+        record = json.loads(raw)
+    except ValueError as exc:
+        raise SideLaneError(f"measurement file is not valid JSON: {exc}") from exc
+    if not isinstance(record, dict):
+        raise SideLaneError("measurement file must contain a JSON object")
+    unknown = sorted(set(record) - MEASUREMENT_FIELDS)
+    if unknown:
+        raise SideLaneError(
+            "measurement file has unsupported fields: " + ", ".join(unknown)
+        )
+    missing = sorted(MEASUREMENT_REQUIRED_FIELDS - set(record))
+    if missing:
+        raise SideLaneError(
+            "measurement file is missing required fields: " + ", ".join(missing)
+        )
+    if record["schema_version"] != ASSIGNMENT_SCHEMA_VERSION:
+        raise SideLaneError(
+            f"measurement file schema_version must be {ASSIGNMENT_SCHEMA_VERSION}"
+        )
+
+    def text(field: str) -> str:
+        value = record[field]
+        if not isinstance(value, str) or not MEASUREMENT_TASK_ID.match(value):
+            raise SideLaneError(
+                f"measurement file {field} must be a non-empty id of letters, "
+                "digits, underscores and dashes (at most 128 characters)"
+            )
+        return value
+
+    task_id = text("task_id")
+    host_family = record["host_family"]
+    if not isinstance(host_family, str) or host_family not in MEASUREMENT_HOST_FAMILIES:
+        raise SideLaneError(
+            "measurement file host_family must be one of: "
+            + ", ".join(sorted(MEASUREMENT_HOST_FAMILIES))
+        )
+    weight = record["preassigned_weight"]
+    # bool is an int subclass; a JSON `true` is not weight 1.
+    if not isinstance(weight, int) or isinstance(weight, bool) or weight not in MEASUREMENT_WEIGHTS:
+        raise SideLaneError(
+            "measurement file preassigned_weight must be one of: "
+            + ", ".join(str(item) for item in sorted(MEASUREMENT_WEIGHTS))
+        )
+    disposition = record["planning_disposition"]
+    if not isinstance(disposition, str) or disposition not in MEASUREMENT_PLANNING_DISPOSITIONS:
+        raise SideLaneError(
+            "measurement file planning_disposition must be one of: "
+            + ", ".join(sorted(MEASUREMENT_PLANNING_DISPOSITIONS))
+        )
+    rework = record["rework"]
+    if not isinstance(rework, bool):
+        raise SideLaneError("measurement file rework must be a boolean")
+    parent = record.get("parent_task_id")
+    if rework:
+        if not isinstance(parent, str) or not MEASUREMENT_TASK_ID.match(parent):
+            raise SideLaneError(
+                "measurement file parent_task_id is required for a rework and "
+                "must be a non-empty id of letters, digits, underscores and "
+                "dashes (at most 128 characters)"
+            )
+        if parent == task_id:
+            raise SideLaneError(
+                "measurement file parent_task_id must differ from task_id"
+            )
+    elif parent is not None:
+        raise SideLaneError(
+            "measurement file parent_task_id is only meaningful for a rework"
+        )
+    return {
+        "task_id": task_id,
+        "host_family": host_family,
+        "preassigned_weight": weight,
+        "planning_disposition": disposition,
+        "rework": rework,
+        "parent_task_id": parent,
+    }
 
 
 def load_recommendation_profile(path_argument: str) -> dict[str, Any]:
@@ -1080,6 +1223,7 @@ def _launch(
     args: argparse.Namespace, config: Mapping[str, Any], repo: Path, prompt: str,
     *, read_roots: Sequence[Path] = (),
     run_mcp_servers: "Mapping[str, Any] | None" = None,
+    measurement: "Mapping[str, Any] | None" = None,
 ) -> int:
     provider_config, model_config = select_route(
         config, args.host, args.mode, args.provider, args.model
@@ -1138,6 +1282,12 @@ def _launch(
         # Skills materialize inside the execute lane's worktree; a review
         # lane has nowhere to put them and would silently drop the request.
         raise SideLaneError("--skill is supported only in execute mode")
+    if measurement is not None and args.mode != "execute":
+        # An assignment measures execution work handed to a worker. A review
+        # lane produces no deliverable to accept or reject, so recording it as
+        # an assignment would put work in the measurement denominator that the
+        # measurement cannot score. Fail closed rather than half-record it.
+        raise SideLaneError("--measurement-file is supported only in execute mode")
     unknown = sorted(set(args.capability) - set(config["capabilities"]))
     if unknown:
         raise SideLaneError(f"unknown capabilities: {', '.join(unknown)}")
@@ -1204,6 +1354,7 @@ def _launch(
     # under references; a private skill unavailable outside a dev-tools
     # checkout fails here, naming the flag to drop.
     skill_catalog: list[dict[str, object]] = []
+    assignment: AssignmentRecord | None = None
     secret: str | None = None
     try:
         if args.mode == "execute":
@@ -1227,6 +1378,27 @@ def _launch(
         source_baseline = (
             snapshot_source(repo) if args.mode == "execute" else frozenset()
         )
+        if measurement is not None:
+            # The assignment is published here — after every precondition that
+            # can still fail for free, and BEFORE the adapter is invoked — so
+            # the sidecar exists for exactly the runs a worker could have
+            # started. A conflict or an unpublishable sidecar raises out of
+            # this block, which disposes the lane without ever starting a
+            # worker: an assignment is never retrofitted onto a run that
+            # already executed. The instant is this runner's own UTC clock,
+            # recorded once and never revised; the identity is what the route
+            # was *configured* with, not what the provider later resolved to.
+            assignment = write_assignment(
+                lane,
+                measurement=measurement,
+                assigned_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                planned={
+                    "provider": args.provider,
+                    "model": args.model,
+                    "host": args.host,
+                    "gateway": provider_config["gateway"],
+                },
+            )
         if args.host == "codex":
             from side_lane.adapters.codex import run_codex
 
@@ -1311,6 +1483,23 @@ def _launch(
     )
     summary["provider_exit_status"] = result.returncode
     summary["exit_status"] = source_exit_status
+    # The terminal audit links the assignment on every outcome that reaches it:
+    # a run that failed, or verified nothing, still points at what it was
+    # assigned. `None` is the explicit unmeasured case — no measurement was
+    # requested for this run. It never means "measurement was lost"; a sidecar
+    # that could not be published aborted the run before an adapter started,
+    # and nothing downstream could accept that worker's result either.
+    assignment_link = (
+        None
+        if assignment is None
+        else {
+            "path": str(assignment.path),
+            "sha256": assignment.sha256,
+            "task_id": measurement["task_id"] if measurement else None,
+            "schema_version": ASSIGNMENT_SCHEMA_VERSION,
+            "reused": assignment.reused,
+        }
+    )
     audit = write_audit(
         lane,
         host=result.host,
@@ -1340,9 +1529,11 @@ def _launch(
             else []
         ),
         source_changes=list(source_changes or ()),
+        assignment=assignment_link,
     )
     summary.update(
         {
+            "assignment": assignment_link,
             "branch": lane.branch,
             "worktree": str(lane.worktree),
             "git_status": status,
@@ -1598,10 +1789,17 @@ def run(argv: Sequence[str] | None = None) -> int:
     # structure, capability narrowing and env references are all checked here
     # (side_lane.mcp_run_config) before anything is created or started.
     run_mcp_servers = load_run_mcp_config(args.mcp_config) if args.mcp_config else None
+    # And the same for the optional measurement file: its size, field set and
+    # vocabulary are all checked here, so a malformed or over-large record
+    # stops the run before a worktree, a credential, or a host process exists.
+    measurement = (
+        load_measurement(args.measurement_file) if args.measurement_file else None
+    )
     return _launch(
         args, config, repo, load_prompt(args.prompt, args.prompt_file, args.mode),
         read_roots=read_roots,
         run_mcp_servers=run_mcp_servers,
+        measurement=measurement,
     )
 
 

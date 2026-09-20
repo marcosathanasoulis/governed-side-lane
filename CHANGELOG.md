@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.27 - 2026-09-20
+
+- Add optional metadata-only `--measurement-file` for execute runs. The runner
+  validates its scalar types and vocabulary before launch, then atomically
+  preserves an immutable assignment beside the run audit before invoking the
+  worker. Terminal audits link the assignment; interruptions retain it.
+- Existing callers remain explicitly unmeasured. Execution success does not
+  imply coordinator acceptance or change delegation scoring.
+
 ## 0.4.26 - 2026-09-20
 
 - Add explicit `--report-only` Claude execute runs with a required finite,
