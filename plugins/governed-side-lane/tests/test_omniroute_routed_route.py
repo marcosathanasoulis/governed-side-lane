@@ -16,6 +16,10 @@ from unittest import mock
 from side_lane.adapters import claude
 from side_lane import routing
 
+SUPPORTS_STRICT_MCP = mock.Mock(
+    return_value=subprocess.CompletedProcess([], 0, "--strict-mcp-config", "")
+)
+
 SELECTOR = "example-pool-selector"
 POOL = ["upstream-a/model-alpha", "upstream-b/model-beta"]
 POLICY = {
@@ -156,6 +160,10 @@ class RoutedRouteValidationTests(unittest.TestCase):
 
 
 class RoutedLaunchTests(unittest.TestCase):
+    def setUp(self):
+        claude._strict_mcp_executable_cache["claude"] = True
+
+
     def repo(self, root, name):
         path = root / name
         path.mkdir()
@@ -172,6 +180,7 @@ class RoutedLaunchTests(unittest.TestCase):
                 model=SELECTOR, provider_config=omniroute_provider(),
                 model_config=model_config or omniroute_model_config(),
                 prompt="task", secret="selected", runner=runner,
+                readiness_runner=SUPPORTS_STRICT_MCP,
             )
         runner.assert_called_once()
         return result
@@ -184,6 +193,7 @@ class RoutedLaunchTests(unittest.TestCase):
                 model=SELECTOR, provider_config=omniroute_provider(),
                 model_config=omniroute_model_config() | {"qualification": {"verified": False}},
                 prompt="task", secret="selected", runner=runner,
+                readiness_runner=SUPPORTS_STRICT_MCP,
             )
         runner.assert_not_called()
 

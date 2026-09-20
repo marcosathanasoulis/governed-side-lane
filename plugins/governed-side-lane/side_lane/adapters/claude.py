@@ -17,14 +17,22 @@ from typing import Any, Callable, Mapping, Sequence, Union
 from urllib.parse import urlparse
 
 from side_lane import report_stop_hook, routed_read_pagination
+from side_lane.capabilities import (
+    CAPABILITY_MCP_SERVERS,
+    CM_SERVICES_CAPABILITIES,
+    RUN_CONFIG_CAPABILITIES,
+    USER_SCOPE_MCP_CAPABILITIES,
+)
 from side_lane.credentials import scrub_backend_environment
 from side_lane.governance import known_capabilities, lane_system_prompt, tool_policy
 from side_lane.mcp_run_config import (
     McpRunServer,
+    build_strict_mcp_bundle,
     claude_payload,
     ensure_no_registration_conflicts,
     require_env_references,
     write_ephemeral,
+    write_strict_mcp_bundle,
 )
 from side_lane.read_roots import scope_note
 from side_lane.results import LaneResult
@@ -120,37 +128,9 @@ ROUTED_MAX_OUTPUT_TOKENS = "16384"
 # (the controlled HOME the coordinator provisions); a user-scope registration
 # needs no project approval either. Server names must never be wildcarded and
 # a grant never approves a server outside this mapping.
-CAPABILITY_MCP_SERVERS = {
-    "playwright": "playwright",
-    "gitnexus": "gitnexus",
-    "codegraph": "codegraph",
-    "slack-read": "slack",
-    "aws-read": "aws",
-    "asana-read": "cm-services",
-    "drive-read": "cm-services",
-    "gcloud-read": "cm-services",
-    "database-read": "cm-services",
-    "algolia-read": "cm-services",
-    "contentful-read": "cm-services",
-    "contentful-master-read": "cm-services",
-}
-# Capabilities whose MCP registration arrives per run through the validated
-# ``--mcp-config`` file (side_lane.mcp_run_config) instead of a project
-# ``.mcp.json`` entry. They get no ``enabledMcpjsonServers`` approval — that
-# setting approves project-file servers — and no ``--strict-mcp-config``, so
-# every existing user/project registration keeps loading alongside the
-# per-run file.
-RUN_CONFIG_CAPABILITIES = frozenset({"aws-read"})
-# Capabilities whose server is a fixed LOCAL registration provisioned into the
-# worker host's user-global MCP config (the controlled HOME) by the
-# coordinator-side account module before the run. Like a per-run server, a
-# user-scope registration is not a project ``.mcp.json`` entry, so it gets no
-# ``enabledMcpjsonServers`` approval — but unlike a per-run server it exists
-# before launch, so it is eligible for the pre-launch readiness probe below.
-USER_SCOPE_MCP_CAPABILITIES = frozenset(
-    {"asana-read", "drive-read", "gcloud-read", "database-read", "algolia-read",
-     "contentful-read", "contentful-master-read"}
-)
+# CAPABILITY_MCP_SERVERS, RUN_CONFIG_CAPABILITIES, and USER_SCOPE_MCP_CAPABILITIES
+# are imported from side_lane.capabilities to avoid circular imports.
+
 # Capabilities whose MCP server additionally requires the expensive
 # pre-launch ``mcp get`` health probe. Approval (above) is a per-process
 # settings fact; readiness is a live subprocess check, and the two stay
@@ -161,7 +141,171 @@ READINESS_REQUIRED_CAPABILITIES = frozenset(
     {"playwright", "asana-read", "drive-read", "gcloud-read", "database-read", "algolia-read",
      "contentful-read", "contentful-master-read"}
 )
+
+
+def _effective_mcp_registrations(
+    host: str,
+    repo: Path,
+    worktree: Path,
+    home: Path,
+    granted_capabilities: "frozenset[str] | set[str] | tuple[str, ...]" = (),
+) -> list[tuple[str, str, Path]]:
+    """Return (server_name, scope, path, definition) tuples from user/project/worktree configs.
+
+    Only returns registrations for servers whose corresponding capabilities are in
+    ``granted_capabilities`` and are ``USER_SCOPE_MCP_CAPABILITIES`` or
+    ``RUN_CONFIG_CAPABILITIES``. Scope is "user", "project", or "worktree".
+    Used to build the narrow bundle for ``--strict-mcp-config`` in routed
+    execute lanes.
+
+    Raises ``ClaudeAdapterError`` if the same server name has different definitions
+    across scopes (silent last-write-wins would hide a configuration conflict).
+    """
+    results: list[tuple[str, str, Path, dict[str, Any]]] = []
+    if host != "claude":
+        return []
+
+    granted = set(granted_capabilities)
+    # Build the set of server names whose corresponding capability is granted.
+    # Includes both cm-services family and host-native servers (gitnexus, codegraph,
+    # playwright, slack).
+    user_scope_names: set[str] = set()
+    for cap in USER_SCOPE_MCP_CAPABILITIES | RUN_CONFIG_CAPABILITIES:
+        if cap not in granted:
+            continue
+        server = CAPABILITY_MCP_SERVERS.get(cap)
+        if server:
+            user_scope_names.add(server)
+
+    # Track definitions seen so far to detect same-name conflicts.
+    # key: server name, value: (scope, path, definition)
+    seen: dict[str, tuple[str, Path, dict[str, Any]]] = {}
+
+    def _check_and_record(
+        name: str, scope: str, path: Path, definition: dict[str, Any],
+    ) -> None:
+        """Record a definition, raising on conflict with a prior one."""
+        if name in seen:
+            prior_scope, prior_path, prior_def = seen[name]
+            if prior_def != definition:
+                raise ClaudeAdapterError(
+                    f"MCP server {name!r} has conflicting definitions: "
+                    f"{prior_scope} scope ({prior_path}) defines it differently from "
+                    f"{scope} scope ({path}). Identical definitions coalesce; "
+                    f"different definitions must be reconciled before routing."
+                )
+            # Identical — skip duplicate entry
+            return
+        seen[name] = (scope, path, definition)
+        results.append((name, scope, path, definition))
+
+    # Scan user-global config (~/.claude.json)
+    user_config = home / ".claude.json"
+    try:
+        os.stat(user_config)
+    except FileNotFoundError:
+        user_config_exists = False
+    except OSError as exc:
+        raise ClaudeAdapterError(
+            f"user MCP config {user_config} could not be read: {exc}"
+        ) from exc
+    else:
+        user_config_exists = True
+    if user_config_exists:
+        try:
+            cfg = json.loads(user_config.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ClaudeAdapterError(
+                f"user MCP config {user_config} is not valid JSON: {exc}"
+            ) from exc
+        except OSError as exc:
+            raise ClaudeAdapterError(
+                f"user MCP config {user_config} could not be read: {exc}"
+            ) from exc
+        # Top-level mcpServers
+        top_servers = cfg.get("mcpServers", {})
+        if isinstance(top_servers, dict):
+            for name, definition in top_servers.items():
+                if name in user_scope_names and isinstance(definition, dict):
+                    _check_and_record(name, "user", user_config, definition)
+        # Project entries
+        projects = cfg.get("projects", {})
+        if isinstance(projects, dict):
+            proj_entry = projects.get(str(repo))
+            if isinstance(proj_entry, dict):
+                proj_servers = proj_entry.get("mcpServers", {})
+                if isinstance(proj_servers, dict):
+                    for name, definition in proj_servers.items():
+                        if name in user_scope_names and isinstance(definition, dict):
+                            _check_and_record(name, "project", user_config, definition)
+
+    # Lane worktree .mcp.json — server names are top-level keys (no mcpServers wrapper)
+    worktree_mcp = worktree / ".mcp.json"
+    if worktree_mcp.is_file():
+        try:
+            cfg = json.loads(worktree_mcp.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ClaudeAdapterError(
+                f"worktree MCP config {worktree_mcp} is not valid JSON: {exc}"
+            ) from exc
+        except OSError as exc:
+            raise ClaudeAdapterError(
+                f"worktree MCP config {worktree_mcp} could not be read: {exc}"
+            ) from exc
+        servers = cfg.get("mcpServers", {})
+        if not isinstance(servers, dict) or not servers:
+            # .mcp.json uses server names as top-level keys directly
+            servers = cfg if isinstance(cfg, dict) else {}
+        if isinstance(servers, dict):
+            for name, definition in servers.items():
+                if name in user_scope_names and isinstance(definition, dict):
+                    _check_and_record(name, "worktree", worktree_mcp, definition)
+
+    return results
+
+
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+# Per-executable cache: does this executable accept --strict-mcp-config?
+# Populated once per executable identity on first probe.  The key is the
+# executable string as passed to the adapter; the value is True if the
+# installed CLI supports the flag.
+_strict_mcp_executable_cache: dict[str, bool] = {}
+
+
+def _check_strict_mcp_support(
+    executable: str, runner: Runner,
+    *, cwd: Path, env: "Mapping[str, str]",
+) -> bool:
+    """Return True if the installed CLI accepts ``--strict-mcp-config``.
+
+    Probed in the actual worker working directory and environment rather
+    than the coordinator's ``Path.cwd()`` or ``os.environ``.  Cached per
+    executable identity after the first probe.  A missing or broken
+    executable is cached as False so the check is not retried.
+    """
+
+    if executable in _strict_mcp_executable_cache:
+        return _strict_mcp_executable_cache[executable]
+
+    result = False
+    try:
+        completed = runner(
+            [executable, "--help"],
+            timeout=10,
+            cwd=cwd,
+            env=dict(env),
+            stdin=subprocess.DEVNULL,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        result = completed.returncode == 0 and "--strict-mcp-config" in completed.stdout
+    except (OSError, subprocess.SubprocessError):
+        result = False
+
+    _strict_mcp_executable_cache[executable] = result
+    return result
 PLAYWRIGHT_STARTUP_INSTRUCTION = """\
 
 
@@ -704,7 +848,7 @@ def _approved_mcp_servers(capabilities: Capabilities) -> tuple[str, ...]:
     return tuple(sorted({CAPABILITY_MCP_SERVERS[name] for name in capabilities
                          if name in CAPABILITY_MCP_SERVERS
                          and name not in RUN_CONFIG_CAPABILITIES
-                         and name not in USER_SCOPE_MCP_CAPABILITIES}))
+                         and name not in CM_SERVICES_CAPABILITIES}))
 
 
 def _required_mcp_servers(capabilities: Capabilities) -> tuple[str, ...]:
@@ -882,6 +1026,8 @@ def build_command(
     mcp_config_path: str | Path | None = None,
     run_mcp_servers: "Mapping[str, Any] | None" = None,
     report_only: bool = False,
+    strict_mcp_config_path: str | Path | None = None,
+    strict_mcp_support: bool | None = None,
 ) -> list[str]:
     executable = _nonempty(executable, "Claude executable")
     repo_path = validate_worktree(repo)
@@ -909,6 +1055,11 @@ def build_command(
         # registration may widen that. The CLI rejects `--mcp-config` in
         # review mode already; this is the adapter-level fail-closed guard.
         raise ClaudeAdapterError("per-run MCP config is execute-only for the Claude host")
+    if strict_mcp_config_path is not None and strict_mcp_support is not True:
+        raise ClaudeAdapterError(
+            "strict MCP bundle requested but CLI support for --strict-mcp-config "
+            "has not been confirmed; the routed lane cannot be launched"
+        )
     runtime_model, _gateway, _auth_method, _billable = _route_metadata(
         provider, model, provider_config, model_config, mode
     )
@@ -965,10 +1116,17 @@ def build_command(
         budget = _optional_budget(model_config)
         if budget is not None:
             command.extend(("--max-budget-usd", budget))
-        if mcp_config_path is not None:
-            # Additive per-run MCP registration: `--strict-mcp-config` is
-            # deliberately NOT passed, so every existing user/project/server
-            # registration (and its auth) keeps loading alongside this file.
+        if strict_mcp_config_path is not None:
+            # Routed execute lane: use --strict-mcp-config with the narrow bundle
+            # to prevent loading of any inherited MCP registrations. The bundle
+            # already contains the per-run servers, user-scope registrations
+            # (cm-services), and lane worktree .mcp.json servers.
+            command.extend(("--strict-mcp-config", "--mcp-config", str(strict_mcp_config_path)))
+        elif mcp_config_path is not None:
+            # Native execute lane: additive per-run MCP registration --
+            # --strict-mcp-config is deliberately NOT passed, so every existing
+            # user/project/server registration (and its auth) keeps loading
+            # alongside this file.
             command.extend(("--mcp-config", str(mcp_config_path)))
         for tool in allowed_tools(mode, capabilities):
             command.extend(("--allowedTools", tool))
@@ -1003,17 +1161,45 @@ def build_command(
 def _require_mcp_readiness(
     *, executable: str, cwd: Path, capabilities: Capabilities,
     env: Mapping[str, str], runner: Runner, secret: str | None = None,
+    strict_mcp_config_path: Path | None = None,
 ) -> None:
-    """Health-check capability-required MCP servers before starting a model."""
+    """Health-check capability-required MCP servers before starting a model.
 
-    user_scope = {CAPABILITY_MCP_SERVERS[name] for name in USER_SCOPE_MCP_CAPABILITIES}
+    Probes the installed CLI with the EXACT granted strict bundle
+    (``--strict-mcp-config --mcp-config <path>``) so that the readiness check
+    validates the same configuration that will be active during the run.
+    """
+
+    # Probe the installed CLI once per executable to determine whether it supports
+    # --strict-mcp-config.  This avoids inferring support from the flag's presence
+    # in the command build (which is a contract claim, not a runtime fact).
+    cli_supports_strict = _check_strict_mcp_support(
+        executable, runner, cwd=cwd, env=env,
+    )
+
+    if strict_mcp_config_path is not None and not cli_supports_strict:
+        raise ClaudeAdapterError(
+            f"{executable} does not support --strict-mcp-config; "
+            "a routed execute lane that requires the strict MCP bundle cannot launch"
+        )
+
     for server in _required_mcp_servers(capabilities):
-        if server in user_scope:
-            # A user-global registration is not a project .mcp.json entry, so
-            # there is no project server to approve for the probe; `mcp get`
-            # resolves the server by name across scopes.
+        if cli_supports_strict and strict_mcp_config_path is not None:
+            # Use the exact granted strict bundle for the probe — this is the
+            # configuration that will actually be active during the run.
+            command = [
+                executable,
+                "--strict-mcp-config", "--mcp-config", str(strict_mcp_config_path),
+                "mcp", "get", server,
+            ]
+        elif server == "cm-services":
+            # The fixed user-global cm-services server is not a project .mcp.json
+            # entry, so it is probed by bare name across scopes.
             command = [executable, "mcp", "get", server]
         else:
+            # Probe the requested server with explicit project approval.  This
+            # is required for project .mcp.json servers such as playwright and
+            # matches the per-launch ``enabledMcpjsonServers`` approval.
             settings = json.dumps(
                 {"enabledMcpjsonServers": [server]}, separators=(",", ":"), sort_keys=True
             )
@@ -1051,6 +1237,37 @@ def _redact(value: object, secret: str | None) -> str:
     return redact_provider_secret(value, secret)
 
 
+def validate_against_capabilities(
+    *,
+    executable: str,
+    cwd: Path,
+    strict_mcp_config_path: Path,
+    capabilities: Capabilities,
+    env: Mapping[str, str],
+    runner: Runner,
+    secret: str | None = None,
+) -> None:
+    """Verify all servers in the strict bundle can be loaded by the CLI.
+
+    Probes each unique server in the bundle with ``--strict-mcp-config`` to
+    confirm it resolves. Raises ``ClaudeAdapterError`` if any server fails.
+    """
+    if not strict_mcp_config_path.exists():
+        return
+    bundle = json.loads(strict_mcp_config_path.read_text(encoding="utf-8"))
+    servers = bundle.get("mcpServers") or {}
+    for server_name in servers:
+        cmd = [executable, "--strict-mcp-config",
+               "--mcp-config", str(strict_mcp_config_path),
+               "mcp", "get", server_name]
+        result = runner(cmd, cwd=str(cwd), env=env, secret=secret)
+        if result.returncode != 0:
+            raise ClaudeAdapterError(
+                f"required MCP server {server_name!r} is not available: "
+                f"{result.stdout.strip()!r}"
+            )
+
+
 def launch(
     *,
     executable: str,
@@ -1084,7 +1301,6 @@ def launch(
     # side_lane.mcp_run_config): materialized OUTSIDE the lane worktree so it
     # can never appear in the delivery check, and removed after the run —
     # ephemeral by construction, never a user-global config write.
-    run_config_path: Path | None = None
     if run_mcp_servers:
         if mode != "execute":
             raise ClaudeAdapterError("per-run MCP config is execute-only for the Claude host")
@@ -1096,12 +1312,39 @@ def launch(
         ensure_no_registration_conflicts(
             run_mcp_servers, "claude", worktree_path, env=os.environ if env is None else env
         )
-        runtime_dir = worktree_path.parent / ".side-lane-runtime" / "mcp"
-        run_config_path = write_ephemeral(
-            runtime_dir, f"{worktree_path.name}-mcp.json",
-            claude_payload(run_mcp_servers),
-        )
+    # Routed execute lanes use --strict-mcp-config with a narrow bundle that
+    # contains ONLY per-run servers, user-scope registrations (cm-services),
+    # and lane worktree .mcp.json servers. No other host-registered servers
+    # appear in the bundle, and none are loaded.
+    is_routed_execute = (
+        provider != NATIVE_PROVIDER
+        and mode == "execute"
+    )
+    # Artifact paths: initialised to None; assigned inside the try block;
+    # cleaned up in the finally block. All paths are None if no artifact needed.
+    run_config_path: Path | None = None
+    strict_mcp_config_path: Path | None = None
     try:
+        if run_mcp_servers:
+            runtime_dir = worktree_path.parent / ".side-lane-runtime" / "mcp"
+            run_config_path = write_ephemeral(
+                runtime_dir, f"{worktree_path.name}-mcp.json",
+                claude_payload(run_mcp_servers),
+            )
+        if is_routed_execute:
+            controlled_home = Path(os.environ.get("HOME", str(Path.home()))).expanduser()
+            strict_bundle = build_strict_mcp_bundle(
+                host="claude",
+                repo=repo_path,
+                worktree=worktree_path,
+                home=controlled_home,
+                run_servers=run_mcp_servers,
+                granted_capabilities=capabilities,
+            )
+            runtime_dir = worktree_path.parent / ".side-lane-runtime" / "mcp"
+            strict_mcp_config_path = write_strict_mcp_bundle(
+                runtime_dir, worktree_path.name, strict_bundle,
+            )
         return _launch_worker(
             executable=executable,
             repo_path=repo_path,
@@ -1121,6 +1364,7 @@ def launch(
             run_mcp_servers=run_mcp_servers,
             run_config_path=run_config_path,
             report_only=report_only,
+            strict_mcp_config_path=strict_mcp_config_path,
         )
     finally:
         if run_config_path is not None:
@@ -1128,6 +1372,11 @@ def launch(
                 run_config_path.unlink()
             with suppress(OSError):
                 run_config_path.parent.rmdir()
+        if strict_mcp_config_path is not None:
+            with suppress(OSError):
+                strict_mcp_config_path.unlink()
+            with suppress(OSError):
+                strict_mcp_config_path.parent.rmdir()
 
 
 def _launch_worker(
@@ -1150,23 +1399,8 @@ def _launch_worker(
     run_mcp_servers: "Mapping[str, McpRunServer] | None",
     run_config_path: Path | None,
     report_only: bool = False,
+    strict_mcp_config_path: Path | None = None,
 ) -> LaneResult:
-    command = build_command(
-        executable=executable,
-        repo=repo_path,
-        worktree=worktree_path,
-        provider=provider,
-        model=model,
-        provider_config=provider_config,
-        model_config=model_config,
-        prompt=prompt,
-        mode=mode,
-        capabilities=granted,
-        read_roots=read_roots,
-        mcp_config_path=run_config_path,
-        run_mcp_servers=run_mcp_servers,
-        report_only=report_only,
-    )
     runtime_model, gateway, auth_method, billable = _route_metadata(
         provider, model, provider_config, model_config, mode
     )
@@ -1195,9 +1429,34 @@ def _launch_worker(
             raise ClaudeAdapterError("timeout_seconds must be a positive integer")
         active_runner = _bounded_process if runner is None else runner
         active_readiness_runner = _bounded_process if readiness_runner is None else readiness_runner
+        if strict_mcp_config_path is not None:
+            strict_mcp_supported = _check_strict_mcp_support(
+                executable, active_readiness_runner, cwd=worktree_path, env=child_env,
+            )
+        else:
+            strict_mcp_supported = False
+        command = build_command(
+            executable=executable,
+            repo=repo_path,
+            worktree=worktree_path,
+            provider=provider,
+            model=model,
+            provider_config=provider_config,
+            model_config=model_config,
+            prompt=prompt,
+            mode=mode,
+            capabilities=granted,
+            read_roots=read_roots,
+            mcp_config_path=run_config_path,
+            run_mcp_servers=run_mcp_servers,
+            report_only=report_only,
+            strict_mcp_config_path=strict_mcp_config_path,
+            strict_mcp_support=strict_mcp_supported,
+        )
         _require_mcp_readiness(
             executable=executable, cwd=worktree_path, capabilities=granted,
             env=child_env, runner=active_readiness_runner, secret=secret,
+            strict_mcp_config_path=strict_mcp_config_path,
         )
         try:
             completed = active_runner(

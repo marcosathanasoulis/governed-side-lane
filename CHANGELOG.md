@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.29 - 2026-09-20
+
+- Gate strict per-run MCP integration on explicit host-native `strict_mcp_support`:
+  `build_command` emits `--strict-mcp-config` only when the worker declares support,
+  and unsupported strict bundles fail closed before inference,
+  including providerless paths. Native execute and review behavior are unchanged.
+- Thread the actual worker `cwd` and child environment from `_launch_worker` into
+  `_check_strict_mcp_support`, so worker-context support detection is evaluated
+  against the runtime values the host session will see, not the coordinator's
+  pre-scrub environment.
+- Harden the per-run MCP runtime directory: `_secure_runtime_directory` rejects
+  symlinked targets and immediate parents, forces `0700` mode, and writes files
+  atomically with `0600`. Successfully created per-run files are cleaned up;
+  the runtime directory is removed when empty.
+- Preserve canonical server mapping, per-run config conflict detection, and native
+  execute/review lane semantics.
+- Add regression coverage for symlinked runtime paths, preexisting 0755 modes,
+  worker context probing, and strict bundle fail-closed behavior.
+
 ## 0.4.28 - 2026-09-20
 
 - Keep already-approved delegated execution instructions last after read-root

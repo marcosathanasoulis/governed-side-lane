@@ -12,8 +12,16 @@ from unittest import mock
 from side_lane import cli, report_stop_hook
 from side_lane.adapters import claude
 
+SUPPORTS_STRICT_MCP = mock.Mock(
+    return_value=subprocess.CompletedProcess([], 0, "--strict-mcp-config", "")
+)
+
 
 class ClaudeAdapterTests(unittest.TestCase):
+    def setUp(self):
+        claude._strict_mcp_executable_cache["claude"] = True
+
+
     native = {"gateway": "native-claude", "auth_method": "oauth", "billable": False}
     glm = {"gateway": "direct-zai", "auth_method": "provider-key", "billable": True, "base_url": "https://api.z.ai/api/anthropic"}
 
@@ -30,7 +38,9 @@ class ClaudeAdapterTests(unittest.TestCase):
                     claude.launch(executable="claude", repo=self.repo(root, "repo"),
                         worktree=self.repo(root, "lane"), provider="claude", model="claude-sonnet-5",
                         provider_config=self.native, model_config=config, prompt="task",
-                        mode=mode, env={"PATH": "/bin"}, runner=worker)
+                        mode=mode, env={"PATH": "/bin"}, runner=worker,
+                            readiness_runner=SUPPORTS_STRICT_MCP,
+                        )
                     self.assertEqual(worker.call_args.kwargs["timeout"], expected)
 
     def test_bounded_process_accepts_subprocess_run_capture_kwargs(self) -> None:
@@ -185,6 +195,7 @@ class ClaudeAdapterTests(unittest.TestCase):
                               }},
                 prompt="task", env={"HOME": str(home), "PATH": "/bin"},
                 secret="router-secret", runner=runner,
+                readiness_runner=SUPPORTS_STRICT_MCP,
             )
             self.assertEqual(result.returncode, 0)
             child_config = observed["child_config"]
@@ -268,6 +279,7 @@ class ClaudeAdapterTests(unittest.TestCase):
                 model_config=self.routed_model_config(),
                 prompt="task", env={"HOME": str(home), "PATH": "/bin"},
                 secret="router-secret", runner=runner,
+                readiness_runner=SUPPORTS_STRICT_MCP,
             )
             self.assertEqual(result.returncode, 0)
             settings = observed["settings"]
@@ -302,6 +314,7 @@ class ClaudeAdapterTests(unittest.TestCase):
                     model_config=self.routed_model_config(),
                     prompt="task", env={"HOME": str(home), "PATH": "/bin"},
                     secret="router-secret", runner=worker,
+                    readiness_runner=SUPPORTS_STRICT_MCP,
                 )
             worker.assert_not_called()
 
@@ -346,6 +359,7 @@ class ClaudeAdapterTests(unittest.TestCase):
                         model_config=self.routed_model_config(),
                         prompt="task", env={"HOME": str(home), "PATH": "/bin"},
                         secret="router-secret", runner=worker,
+                        readiness_runner=SUPPORTS_STRICT_MCP,
                     )
                 worker.assert_not_called()
 
@@ -375,6 +389,7 @@ class ClaudeAdapterTests(unittest.TestCase):
                 model_config=self.routed_model_config(),
                 prompt="task", env={"HOME": str(home), "PATH": "/bin"},
                 secret="router-secret", runner=runner,
+                readiness_runner=SUPPORTS_STRICT_MCP,
             )
             entry = observed["settings"]["hooks"]["PreToolUse"][0]["hooks"][0]
             self.assertNotIn("enabledPlugins", observed["settings"])
@@ -409,6 +424,7 @@ class ClaudeAdapterTests(unittest.TestCase):
                                       "protocol": protocol},
                         prompt="task", mode=mode, env={"PATH": "/bin"},
                         runner=runner,
+                        readiness_runner=SUPPORTS_STRICT_MCP,
                     )
                     self.assertNotIn("CLAUDE_CONFIG_DIR", observed["env"])
             # Routed providers are unqualified for review lanes and fail
@@ -422,6 +438,7 @@ class ClaudeAdapterTests(unittest.TestCase):
                     prompt="review", mode="review",
                     env={"PATH": "/bin"}, secret="router-secret",
                     runner=mock.Mock(),
+                    readiness_runner=SUPPORTS_STRICT_MCP,
                 )
 
     def test_routed_launch_cleans_isolated_home_when_validation_fails(self) -> None:
@@ -448,6 +465,7 @@ class ClaudeAdapterTests(unittest.TestCase):
                                   }},
                     prompt="task", env={"HOME": str(home), "PATH": "/bin"},
                     secret="router-secret", runner=mock.Mock(),
+                    readiness_runner=SUPPORTS_STRICT_MCP,
                 )
             self.assertEqual(list(root.glob(".side-lane-claude-config-*")), [])
 
@@ -475,6 +493,7 @@ class ClaudeAdapterTests(unittest.TestCase):
                                   }},
                     prompt="task", env={"HOME": str(home), "PATH": "/bin"},
                     secret="router-secret", runner=worker,
+                    readiness_runner=SUPPORTS_STRICT_MCP,
                 )
             worker.assert_not_called()
             self.assertEqual(list(root.glob(".side-lane-claude-config-*")), [])
@@ -632,7 +651,9 @@ class ClaudeAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(claude.ClaudeAdapterError, "transport qualification"):
             claude.launch(executable="claude", repo="/not-used", worktree="/not-used", provider="kimi",
                 model="k3-256k", provider_config=direct, model_config=config, prompt="task",
-                secret="selected", runner=runner)
+                secret="selected", runner=runner,
+                    readiness_runner=SUPPORTS_STRICT_MCP,
+                )
         runner.assert_not_called()
 
     def test_glm_requires_explicit_secret_and_uses_direct_gateway(self) -> None:
@@ -657,7 +678,9 @@ class ClaudeAdapterTests(unittest.TestCase):
             result = claude.launch(executable="claude", repo=repo, worktree=lane, provider="glm",
                 model="glm-5.3", provider_config=self.glm,
                 model_config={"runtime_model": "glm-5.3", "protocol": "anthropic-compatible"},
-                prompt="task", secret="selected", runner=runner)
+                prompt="task", secret="selected", runner=runner,
+                    readiness_runner=SUPPORTS_STRICT_MCP,
+                )
         self.assertEqual(result.gateway, "direct-zai")
         self.assertTrue(result.billable)
         self.assertNotIn("selected", result.stdout + result.stderr)
@@ -679,7 +702,9 @@ class ClaudeAdapterTests(unittest.TestCase):
             result = claude.launch(executable="claude", repo=repo, worktree=lane,
                 provider="kimi", model=model, provider_config=provider, model_config=config,
                 prompt="task", secret="selected",
-                runner=mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout, "")))
+                runner=mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout, "")),
+                    readiness_runner=SUPPORTS_STRICT_MCP,
+                )
         self.assertEqual(result.resolved_model, model)
         self.assertEqual(result.usage, {"input_tokens": 9})
         self.assertIn("stream-json", result.argv)
@@ -707,7 +732,9 @@ class ClaudeAdapterTests(unittest.TestCase):
                 result = claude.launch(executable="claude", repo=repo, worktree=lane,
                     provider="kimi", model=model, provider_config=provider, model_config=config,
                     prompt="task", secret="selected",
-                    runner=mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout, "")))
+                    runner=mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout, "")),
+                        readiness_runner=SUPPORTS_STRICT_MCP,
+                    )
                 self.assertEqual(result.returncode, 65)
                 self.assertIn(error, result.stderr)
 
@@ -719,7 +746,9 @@ class ClaudeAdapterTests(unittest.TestCase):
                 provider="claude", model="claude-sonnet-5", provider_config=self.native,
                 model_config={"runtime_model": "claude-sonnet-5", "protocol": "native-claude-readonly"},
                 prompt="review", mode="review",
-                runner=mock.Mock(return_value=subprocess.CompletedProcess([], 0, "review complete", "")))
+                runner=mock.Mock(return_value=subprocess.CompletedProcess([], 0, "review complete", "")),
+                    readiness_runner=SUPPORTS_STRICT_MCP,
+                )
         self.assertEqual(result.returncode, 0)
         self.assertIsNone(result.resolved_model)
 
@@ -746,7 +775,9 @@ class ClaudeAdapterTests(unittest.TestCase):
             result = claude.launch(executable="claude", repo=repo, worktree=lane,
                 provider="glm", model="glm-5.3", provider_config=self.glm,
                 model_config={"runtime_model": "glm-5.3", "protocol": "anthropic-compatible"},
-                prompt="task", secret="selected", runner=runner)
+                prompt="task", secret="selected", runner=runner,
+                    readiness_runner=SUPPORTS_STRICT_MCP,
+                )
         self.assertEqual(result.availability, "temporarily-unavailable")
         runner.assert_called_once()
 
@@ -765,6 +796,10 @@ class ClaudeAdapterTests(unittest.TestCase):
 
 
 class FirstPartyAnthropicKeyRouteTests(unittest.TestCase):
+    def setUp(self):
+        claude._strict_mcp_executable_cache["claude"] = True
+
+
     provider = {"gateway": "direct-anthropic", "auth_method": "provider-key", "billable": True,
                 "base_url": "https://api.anthropic.com"}
 
@@ -830,7 +865,9 @@ class FirstPartyAnthropicKeyRouteTests(unittest.TestCase):
                 provider="anthropic", model=model, provider_config=self.provider,
                 model_config=config, prompt="task", secret="selected",
                 runner=mock.Mock(return_value=subprocess.CompletedProcess(
-                    [], 7, "leak selected", "leak selected")))
+                    [], 7, "leak selected", "leak selected")),
+                        readiness_runner=SUPPORTS_STRICT_MCP,
+                    )
         self.assertNotIn("selected", result.stdout + result.stderr)
 
     def test_shipped_qualification_gate_admits_verified_models_and_rejects_unverified(self) -> None:
@@ -855,7 +892,9 @@ class FirstPartyAnthropicKeyRouteTests(unittest.TestCase):
                     result = claude.launch(executable="claude", repo=repo, worktree=lane,
                         provider="anthropic", model=model, provider_config=provider_config,
                         model_config=model_config, prompt="task", secret="selected",
-                        env={"PATH": "/bin"}, runner=runner)
+                        env={"PATH": "/bin"}, runner=runner,
+                            readiness_runner=SUPPORTS_STRICT_MCP,
+                        )
                 runner.assert_called_once()
                 self.assertEqual(result.returncode, 0)
                 self.assertEqual(result.resolved_model, model)
@@ -869,7 +908,9 @@ class FirstPartyAnthropicKeyRouteTests(unittest.TestCase):
                                     "external route lacks verified model transport qualification"):
             claude.launch(executable="claude", repo="/not-used", worktree="/not-used",
                 provider="anthropic", model="claude-fable-5-1", provider_config=provider_config,
-                model_config=unverified, prompt="task", secret="selected", runner=runner)
+                model_config=unverified, prompt="task", secret="selected", runner=runner,
+                    readiness_runner=SUPPORTS_STRICT_MCP,
+                )
         runner.assert_not_called()
 
 
@@ -1239,13 +1280,19 @@ class AllowedToolsTests(unittest.TestCase):
             result = claude.launch(executable="claude", repo=repo, worktree=lane, provider="claude",
                 model="claude-sonnet-5", provider_config=self.native,
                 model_config={"runtime_model": "claude-sonnet-5", "protocol": "native-claude"},
-                prompt="task", mode="execute", capabilities=("shell",), env={"PATH": "/bin"}, runner=runner)
+                prompt="task", mode="execute", capabilities=("shell",), env={"PATH": "/bin"}, runner=runner,
+                    readiness_runner=SUPPORTS_STRICT_MCP,
+                )
         self.assertIn("Bash(pnpm *)", result.argv)
         self.assertEqual(result.allowed_tools, claude.allowed_tools("execute", ("shell",)))
         self.assertIn("allowed_tools", result.as_dict())
 
 
 class ReportOnlyModeTests(unittest.TestCase):
+    def setUp(self):
+        claude._strict_mcp_executable_cache["claude"] = True
+
+
     """`--report-only` adds a same-invocation Stop hook and nothing else.
 
     The opt-in exists because a cloud worker navigated, saved its screenshot,
@@ -1375,6 +1422,7 @@ class ReportOnlyModeTests(unittest.TestCase):
                 model_config=self.routed_model_config(max_budget_usd=1.0),
                 prompt="task", env={"HOME": str(home), "PATH": "/bin"},
                 secret="router-secret", runner=runner, report_only=True,
+                readiness_runner=SUPPORTS_STRICT_MCP,
             )
         # The Stop hook is process-local: it rides the run's own --settings
         # payload, never the disposable config home's files.
@@ -1453,6 +1501,7 @@ class ReportOnlyModeTests(unittest.TestCase):
                     model_config=self.native_model_config(), prompt="task",
                     mode="execute", env={"PATH": "/bin"}, runner=runner,
                     report_only=True,
+                    readiness_runner=SUPPORTS_STRICT_MCP,
                 )
         runner.assert_not_called()
 
@@ -1468,6 +1517,7 @@ class ReportOnlyModeTests(unittest.TestCase):
                 model_config=self.native_model_config(max_budget_usd=2.5),
                 prompt="task", mode="execute", env={"PATH": "/bin"}, runner=runner,
                 report_only=True,
+                readiness_runner=SUPPORTS_STRICT_MCP,
             )
         self.assertEqual(runner.call_count, 1)
         # One subprocess, one timeout: the opt-in adds no estimate, no second

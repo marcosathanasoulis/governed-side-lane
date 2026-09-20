@@ -10,10 +10,17 @@ from side_lane.adapters import claude
 from side_lane.qualification import qualify_claude
 from side_lane.redaction import MARKER, redact_provider_secret
 
+SUPPORTS_STRICT_MCP = mock.Mock(
+    return_value=subprocess.CompletedProcess([], 0, "--strict-mcp-config", "")
+)
+
 SECRET = 'sk-synthetic-9aBcDeF0123456789qRsTuVwX'
 
 
 class RedactionTests(unittest.TestCase):
+    def setUp(self):
+        claude._strict_mcp_executable_cache["claude"] = True
+
     def test_known_fragments_and_masks(self):
         cases = [SECRET, SECRET[:13], SECRET[-12:], SECRET[13:25],
                  SECRET[:13] + '...', '...' + SECRET[-12:],
@@ -57,6 +64,7 @@ class RedactionTests(unittest.TestCase):
 
     def launch(self, root, runner, **kwargs):
         repo, lane = self.directories(root)
+        kwargs.setdefault('readiness_runner', SUPPORTS_STRICT_MCP)
         return claude.launch(executable='claude', repo=repo, worktree=lane,
             provider='glm', model='glm-5.3',
             provider_config={'gateway': 'direct-zai', 'auth_method': 'provider-key',
