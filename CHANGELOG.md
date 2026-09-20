@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.24 - 2026-09-20
+
+- Bound each native `Read` call in a routed Claude execute lane. A per-run
+  `PreToolUse` hook (`side_lane.routed_read_pagination`) rewrites an
+  unbounded read into an explicit `offset`/`limit` line range (200 lines by
+  default, overridable per run) and names the next range as continuation
+  guidance, so the remainder of the file stays reachable. The hook emits no
+  permission decision — every call continues through the normal permission
+  flow — and no capability, grant, or lane rule changes. Smaller explicit
+  reads, non-text paths (`.pdf`, `.ipynb`, images), other tools, and
+  malformed events pass through untouched; the hook config and merged
+  settings are written 0600 into the disposable per-run config directory, so
+  inherited `PreToolUse` entries survive and the real user home is never
+  modified.
+
 ## 0.4.23 - 2026-09-19
 
 - Add the `asana-read` and `drive-read` execute capabilities for the fixed

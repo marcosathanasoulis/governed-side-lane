@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import json
+import shlex
 import shutil
 import subprocess
 import sys
@@ -121,7 +122,10 @@ class ClaudeAdapterTests(unittest.TestCase):
                 trusted = json.loads((child_config / ".claude.json").read_text())
                 observed["child_config"] = child_config
                 observed["config"] = trusted
-                observed["settings"] = (child_config / "settings.json").read_bytes()
+                observed["settings"] = json.loads(
+                    (child_config / "settings.json").read_text())
+                observed["hook_config"] = json.loads(
+                    (child_config / "routed-read-pagination.json").read_text())
                 observed["context_symlink"] = (child_config / "CLAUDE.md").is_symlink()
                 observed["skill"] = (child_config / "skills" / "probe.md").read_text()
                 observed["plugins_symlink"] = (child_config / "plugins").is_symlink()
@@ -157,13 +161,215 @@ class ClaudeAdapterTests(unittest.TestCase):
             self.assertNotIn("other", observed["config"])
             self.assertEqual(observed["config"]["projects"][str(repo.resolve())]["hasTrustDialogAccepted"], True)
             self.assertEqual(observed["config"]["projects"][str(lane.resolve())]["hasTrustDialogAccepted"], True)
-            self.assertEqual(observed["settings"], settings)
+            self.assertEqual(observed["settings"]["permissions"],
+                             {"allow": ["Bash(git status)"]})
+            entries = observed["settings"]["hooks"]["PreToolUse"]
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["matcher"], "Read")
+            hook_command = entries[0]["hooks"][0]["command"]
+            self.assertIn("routed_read_pagination.py", hook_command)
+            self.assertEqual(observed["hook_config"], {"limit": 200})
             self.assertTrue(observed["context_symlink"])
             self.assertTrue(observed["plugins_symlink"])
             self.assertEqual(observed["skill"], "skill")
             self.assertEqual(observed["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "16384")
             self.assertEqual(config_path.read_bytes(), original)
             self.assertEqual((settings_dir / "settings.json").read_bytes(), settings)
+
+    def routed_model_config(self) -> dict:
+        return {"runtime_model": "routed-selector",
+                "protocol": "anthropic-compatible",
+                "qualification": {"verified": True, "verified_on": "2026-09-19",
+                                  "source": "receipt"},
+                "routing_policy_contract": {
+                    "requested_selector": "routed-selector",
+                    "allowed_upstream_models": ["deepseek-flash"],
+                    "settings_precedence": "verified",
+                }}
+
+    def routed_provider_config(self) -> dict:
+        return {"gateway": "omniroute-router", "auth_method": "provider-key",
+                "billable": True, "base_url": "https://omniroute.example"}
+
+    def test_routed_execute_preserves_inherited_pre_tool_use_hooks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            home = root / "home"
+            settings_dir = home / ".claude"
+            settings_dir.mkdir(parents=True)
+            inherited_hook = {"matcher": "^Bash$",
+                              "hooks": [{"type": "command", "command": "check"}]}
+            (settings_dir / "settings.json").write_text(json.dumps({
+                "permissions": {"allow": ["Bash(git status)"]},
+                "hooks": {"PreToolUse": [inherited_hook],
+                          "PostToolUse": [{"matcher": "x", "hooks": []}]},
+            }), encoding="utf-8")
+            observed: dict[str, object] = {}
+
+            def runner(command, **kwargs):
+                child_config = Path(kwargs["env"]["CLAUDE_CONFIG_DIR"])
+                observed["settings"] = json.loads(
+                    (child_config / "settings.json").read_text())
+                return subprocess.CompletedProcess(
+                    command, 0,
+                    '{"type":"result","subtype":"success","model":"deepseek-flash",'
+                    '"usage":{"input_tokens":1,"output_tokens":1}}\n',
+                    "",
+                )
+
+            result = claude.launch(
+                executable="claude", repo=repo, worktree=lane,
+                provider="omniroute", model="routed-selector",
+                provider_config=self.routed_provider_config(),
+                model_config=self.routed_model_config(),
+                prompt="task", env={"HOME": str(home), "PATH": "/bin"},
+                secret="router-secret", runner=runner,
+            )
+            self.assertEqual(result.returncode, 0)
+            settings = observed["settings"]
+            self.assertEqual(settings["permissions"],
+                             {"allow": ["Bash(git status)"]})
+            self.assertEqual(settings["hooks"]["PostToolUse"],
+                             [{"matcher": "x", "hooks": []}])
+            entries = settings["hooks"]["PreToolUse"]
+            self.assertEqual(entries[0], inherited_hook)
+            self.assertEqual(len(entries), 2)
+            self.assertEqual(entries[1]["matcher"], "Read")
+            self.assertIn("routed_read_pagination.py",
+                          entries[1]["hooks"][0]["command"])
+
+    def test_routed_execute_rejects_non_array_pre_tool_use_hooks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            home = root / "home"
+            settings_dir = home / ".claude"
+            settings_dir.mkdir(parents=True)
+            (settings_dir / "settings.json").write_text(
+                '{"hooks":{"PreToolUse":"not-an-array"}}', encoding="utf-8")
+            worker = mock.Mock(
+                return_value=subprocess.CompletedProcess([], 0, "", ""))
+            with self.assertRaisesRegex(claude.ClaudeAdapterError,
+                                        "hooks.PreToolUse must be an array"):
+                claude.launch(
+                    executable="claude", repo=repo, worktree=lane,
+                    provider="omniroute", model="routed-selector",
+                    provider_config=self.routed_provider_config(),
+                    model_config=self.routed_model_config(),
+                    prompt="task", env={"HOME": str(home), "PATH": "/bin"},
+                    secret="router-secret", runner=worker,
+                )
+            worker.assert_not_called()
+
+    def test_routed_execute_rejects_malformed_inherited_settings(self) -> None:
+        # Every malformed shape fails closed at launch preparation rather
+        # than silently dropping the inherited settings or the hook.
+        for label, settings_text, message in (
+                ("hooks_not_a_mapping",
+                 '{"hooks":["not-a-mapping"]}',
+                 "Claude settings hooks must be a JSON object"),
+                ("settings_not_an_object",
+                 '["not-an-object"]',
+                 "Claude settings must be a JSON object"),
+                ("settings_not_json",
+                 '{"hooks": ',
+                 "Claude settings are invalid JSON"),
+        ):
+            with self.subTest(label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+                home = root / "home"
+                settings_dir = home / ".claude"
+                settings_dir.mkdir(parents=True)
+                (settings_dir / "settings.json").write_text(
+                    settings_text, encoding="utf-8")
+                worker = mock.Mock(
+                    return_value=subprocess.CompletedProcess([], 0, "", ""))
+                with self.assertRaisesRegex(claude.ClaudeAdapterError, message):
+                    claude.launch(
+                        executable="claude", repo=repo, worktree=lane,
+                        provider="omniroute", model="routed-selector",
+                        provider_config=self.routed_provider_config(),
+                        model_config=self.routed_model_config(),
+                        prompt="task", env={"HOME": str(home), "PATH": "/bin"},
+                        secret="router-secret", runner=worker,
+                    )
+                worker.assert_not_called()
+
+    def test_pagination_hook_entry_carries_timeout_and_resolved_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            home = root / "home"
+            home.mkdir()
+            observed: dict[str, object] = {}
+
+            def runner(command, **kwargs):
+                child_config = Path(kwargs["env"]["CLAUDE_CONFIG_DIR"])
+                observed["settings"] = json.loads(
+                    (child_config / "settings.json").read_text())
+                return subprocess.CompletedProcess(
+                    command, 0,
+                    '{"type":"result","subtype":"success","model":"deepseek-flash",'
+                    '"usage":{"input_tokens":1,"output_tokens":1}}\n',
+                    "",
+                )
+
+            claude.launch(
+                executable="claude", repo=repo, worktree=lane,
+                provider="omniroute", model="routed-selector",
+                provider_config=self.routed_provider_config(),
+                model_config=self.routed_model_config(),
+                prompt="task", env={"HOME": str(home), "PATH": "/bin"},
+                secret="router-secret", runner=runner,
+            )
+            entry = observed["settings"]["hooks"]["PreToolUse"][0]["hooks"][0]
+            self.assertEqual(entry["type"], "command")
+            self.assertEqual(entry["timeout"], 5)
+            # An unresolved or relative module path would make the
+            # interpreter exit 2, and a non-zero hook exit blocks the Read.
+            module_argument = shlex.split(entry["command"])[1]
+            self.assertTrue(Path(module_argument).is_absolute())
+            self.assertEqual(module_argument,
+                             str(Path(module_argument).resolve()))
+            self.assertTrue(Path(module_argument).is_file())
+
+    def test_native_execute_and_review_install_no_pagination_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            for mode, protocol in (("execute", "native-claude"),
+                                   ("review", "native-claude-readonly")):
+                with self.subTest(mode=mode):
+                    observed: dict[str, object] = {}
+
+                    def runner(command, **kwargs):
+                        observed["env"] = kwargs["env"]
+                        return subprocess.CompletedProcess(command, 0, "done", "")
+
+                    claude.launch(
+                        executable="claude", repo=repo, worktree=lane,
+                        provider="claude", model="claude-sonnet-5",
+                        provider_config=self.native,
+                        model_config={"runtime_model": "claude-sonnet-5",
+                                      "protocol": protocol},
+                        prompt="task", mode=mode, env={"PATH": "/bin"},
+                        runner=runner,
+                    )
+                    self.assertNotIn("CLAUDE_CONFIG_DIR", observed["env"])
+            # Routed providers are unqualified for review lanes and fail
+            # closed before the routed config home is ever prepared.
+            with self.assertRaises(claude.ClaudeAdapterError):
+                claude.launch(
+                    executable="claude", repo=repo, worktree=lane,
+                    provider="omniroute", model="routed-selector",
+                    provider_config=self.routed_provider_config(),
+                    model_config=self.routed_model_config(),
+                    prompt="review", mode="review",
+                    env={"PATH": "/bin"}, secret="router-secret",
+                    runner=mock.Mock(),
+                )
 
     def test_routed_launch_cleans_isolated_home_when_validation_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

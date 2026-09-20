@@ -8,12 +8,15 @@ from contextlib import suppress
 from pathlib import Path
 import re
 import signal
+import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 from typing import Any, Callable, Mapping, Sequence, Union
 from urllib.parse import urlparse
 
+from side_lane import routed_read_pagination
 from side_lane.credentials import scrub_backend_environment
 from side_lane.governance import known_capabilities, lane_system_prompt, tool_policy
 from side_lane.mcp_run_config import (
@@ -385,6 +388,48 @@ def scrub_environment(inherited: Mapping[str, str]) -> dict[str, str]:
     })
 
 
+def _write_private_json(path: Path, payload: Mapping[str, Any]) -> None:
+    """Atomically write one 0600 JSON artifact inside a config directory."""
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, prefix=f"{path.name}.", delete=False
+    ) as temporary:
+        json.dump(payload, temporary, indent=2)
+        temporary.write("\n")
+        temporary_path = Path(temporary.name)
+    os.chmod(temporary_path, 0o600)
+    os.replace(temporary_path, path)
+
+
+def _merge_read_pagination_hook(settings: object, command: str) -> dict[str, Any]:
+    """Return copied Claude settings with the Read pagination hook appended.
+
+    Mirrors the Devin adapter's ``_merge_policy_hook``: every inherited
+    ``PreToolUse`` entry survives alongside the new one, and a malformed
+    ``hooks`` block fails closed at launch preparation.
+    """
+
+    if not isinstance(settings, Mapping):
+        raise ClaudeAdapterError("Claude settings must be a JSON object")
+    merged: dict[str, Any] = {key: value for key, value in settings.items()}
+    hooks = merged.get("hooks")
+    if hooks is None:
+        merged_hooks: dict[str, Any] = {}
+    elif isinstance(hooks, Mapping):
+        merged_hooks = {key: value for key, value in hooks.items()}
+    else:
+        raise ClaudeAdapterError("Claude settings hooks must be a JSON object")
+    existing = merged_hooks.get("PreToolUse", [])
+    if not isinstance(existing, list):
+        raise ClaudeAdapterError("Claude settings hooks.PreToolUse must be an array")
+    merged_hooks["PreToolUse"] = [*existing, {
+        "matcher": routed_read_pagination.hook_matcher(),
+        "hooks": [{"type": "command", "command": command, "timeout": 5}],
+    }]
+    merged["hooks"] = merged_hooks
+    return merged
+
+
 def _prepare_routed_claude_home(
     source_home: Path, repo_path: Path, worktree_path: Path
 ) -> Path:
@@ -413,22 +458,37 @@ def _prepare_routed_claude_home(
             str(path.resolve()): {"hasTrustDialogAccepted": True}
             for path in (repo_path, worktree_path)
         }
-        config_path = runtime_home / ".claude.json"
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=runtime_home, prefix=".claude.json.", delete=False
-        ) as temporary:
-            json.dump(config, temporary, indent=2)
-            temporary.write("\n")
-            temporary_path = Path(temporary.name)
-        os.chmod(temporary_path, 0o600)
-        os.replace(temporary_path, config_path)
+        _write_private_json(runtime_home / ".claude.json", config)
+        # Bound each native Read call to a line range through a per-run
+        # PreToolUse hook. The hook config and the merged settings live in
+        # this disposable config dir — never in the symlinked source hooks
+        # directory — so the real user home is untouched.
+        hook_config_path = runtime_home / "routed-read-pagination.json"
+        _write_private_json(
+            hook_config_path, {"limit": routed_read_pagination.DEFAULT_LINE_BOUND})
+        hook_command = shlex.join((
+            sys.executable,
+            str(Path(routed_read_pagination.__file__).resolve()),
+            str(hook_config_path),
+        ))
         source_claude_dir = source_home / ".claude"
-        for name in ("settings.json", "settings.local.json"):
-            source_settings = source_claude_dir / name
-            if source_settings.is_file():
-                target_settings = runtime_home / name
-                shutil.copyfile(source_settings, target_settings)
-                os.chmod(target_settings, 0o600)
+        source_settings = source_claude_dir / "settings.json"
+        inherited_settings: object = {}
+        if source_settings.is_file():
+            try:
+                inherited_settings = json.loads(
+                    source_settings.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ClaudeAdapterError("Claude settings are invalid JSON") from exc
+        _write_private_json(
+            runtime_home / "settings.json",
+            _merge_read_pagination_hook(inherited_settings, hook_command),
+        )
+        source_local = source_claude_dir / "settings.local.json"
+        if source_local.is_file():
+            target_local = runtime_home / "settings.local.json"
+            shutil.copyfile(source_local, target_local)
+            os.chmod(target_local, 0o600)
         # Claude resolves global instructions and skills relative to its
         # configuration home. Preserve same-user context and installed plugins
         # through shared links, including plugin bookkeeping. This is not a
