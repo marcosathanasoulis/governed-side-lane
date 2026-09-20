@@ -795,6 +795,7 @@ def _validate_component(component: list[_Token], allowed: Sequence[str],
         component = component[1:]
 
     argv: list[str] = []
+    argv_tokens: list[_Token] = []
     index = 0
     token_count = len(component)
     while index < token_count:
@@ -820,9 +821,51 @@ def _validate_component(component: list[_Token], allowed: Sequence[str],
             index += 1
             continue
         argv.append(token.text)
+        argv_tokens.append(token)
         index += 1
 
     argv = _strip_git_dash_c(argv, worktree_path, cwds)
+
+    # Devin's native permission matcher can pregrant ``Exec(env)`` as a
+    # prefix, while the canonical hook must still bind ``env`` to an already
+    # granted command.  Admit only literal NAME=value prefixes; options and
+    # shell-expanded values remain fail-closed.  This keeps a worker from
+    # using ``env`` as an unbounded command launcher or changing PATH to an
+    # outside directory.
+    if argv and argv[0] == "env":
+        # Bare ``env`` remains the exact read-only environment listing. Every
+        # non-bare form must be an assignment prefix followed by a command;
+        # otherwise ``Exec(env)`` would become an arbitrary launcher (including
+        # ``env -S``/``env -i`` and commands with redirections).
+        if len(argv) > 1 and len(argv_tokens) != len(argv):
+            return ({"decision": "block",
+                     "reason": "env options and redirections are not permitted"}, None)
+        assignment_end = 1
+        while assignment_end < len(argv):
+            token = argv_tokens[assignment_end]
+            value_word = argv[assignment_end]
+            if _ENV_ASSIGNMENT.match(value_word) is None:
+                break
+            if token.unquoted_expansion:
+                return ({"decision": "block",
+                         "reason": "environment assignment value outside the lane "
+                                  "worktree is not permitted"}, None)
+            value = value_word.split("=", 1)[1]
+            if not _env_value_contained(value, worktree_path, cwds):
+                return ({"decision": "block",
+                         "reason": "environment assignment value outside the lane "
+                                  "worktree is not permitted"}, None)
+            assignment_end += 1
+        if len(argv) > 1 and (assignment_end == 1 or assignment_end == len(argv)):
+            return ({"decision": "block",
+                     "reason": "env requires literal assignments and an already "
+                              "granted command"}, None)
+        if assignment_end > 1:
+            if argv[assignment_end] == "env":
+                return ({"decision": "block",
+                         "reason": "nested env launchers are not permitted"}, None)
+            argv = argv[assignment_end:]
+            argv = _strip_git_dash_c(argv, worktree_path, cwds)
 
     # Review lanes may refresh refs from the configured repository remote, but
     # must not turn `git fetch` into an arbitrary option/command launcher.

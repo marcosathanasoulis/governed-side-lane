@@ -72,6 +72,11 @@ class GovernanceParityTests(unittest.TestCase):
         self.assertNotIn("Bash(", skill)
         self.assertIn("Execute tool allowlist", skill)
 
+    def test_execute_prompt_guides_native_env_assignment_form(self) -> None:
+        prompt = lane_system_prompt("execute", Path("/repo"))
+        self.assertIn("env NAME=value <already-granted-command>", prompt)
+        self.assertIn("underlying command", prompt)
+
     def test_direct_session_entrypoint_marks_private_memory_non_authoritative(self) -> None:
         text = (ROOT / "config/agent-context.md").read_text(encoding="utf-8")
         for item in ("AGENTS.md", "CLAUDE.md", "open pull requests", "Codex product memory", "Claude Code auto-memory", "not authoritative"):

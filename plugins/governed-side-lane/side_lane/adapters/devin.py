@@ -420,6 +420,8 @@ def _runtime_config(model: str, capabilities: Sequence[str],
     # the canonical hook still enforces the underlying grant, deny rules,
     # and read/write bounds.
     if "shell" in capabilities:
+        if "Exec(env)" not in allow:
+            allow.append("Exec(env)")
         extra_pregrants: list[str] = []
         for rule in allow:
             if not (rule.startswith("Exec(") and rule.endswith(")")):

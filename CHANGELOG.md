@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.25 - 2026-09-20
+
+- Harden native Devin `env` command handling: only literal task-scoped
+  assignments followed by an already-granted command are admitted; nested
+  launchers, shell forms, redirections, and assignment-only invocations fail
+  closed. Execute prompts now document the supported `env NAME=value command`
+  form.
+
 ## 0.4.24 - 2026-09-20
 
 - Bound each native `Read` call in a routed Claude execute lane. A per-run

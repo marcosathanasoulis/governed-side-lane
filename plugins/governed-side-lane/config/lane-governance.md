@@ -153,6 +153,11 @@ backup is allowed, but no alternate GLM model is.
 - Stop and report when an action exceeds these boundaries or its authority is
   uncertain.
 
+For a task-scoped environment value, use `env NAME=value <already-granted-command>`;
+direct `NAME=value command` prefixes may prompt the native Devin permission layer.
+The `env` form does not grant a new launcher: the policy hook still checks the
+literal value and the underlying command against the execute allowlist.
+
 ## Execute tool allowlist
 
 The Claude host adapter renders this section, and only this section, into
@@ -229,6 +234,7 @@ from host registration files, never values.
 - `Bash(git worktree list *)`
 - `Bash(git rev-parse HEAD)`
 - `Bash(git branch --show-current)`
+- `Bash(git branch -a)`
 - `Bash(git branch -r)`
 - `Bash(git merge-base *)`
 - `Bash(git fetch origin *)`
@@ -257,6 +263,7 @@ from host registration files, never values.
 - `Bash(pwd)`
 - `Bash(which *)`
 - `Bash(env)`
+- `Bash(env *)`
 - `Bash(terraform fmt *)`
 - `Bash(terraform validate *)`
 - `Bash(terraform version)`

@@ -105,6 +105,8 @@ class DevinAdapterTests(unittest.TestCase):
         for interpreter in ("python", "python3", "python3.11"):
             self.assertIn(f"Exec(.venv/bin/{interpreter})", config["permissions"]["allow"])
         self.assertIn("Exec(git status)", config["permissions"]["allow"])
+        self.assertIn("Exec(git branch -a)", config["permissions"]["allow"])
+        self.assertIn("Exec(env)", config["permissions"]["allow"])
         self.assertIn("Exec(git commit)", config["permissions"]["allow"])
         self.assertNotIn("Exec(git)", config["permissions"]["allow"])
         self.assertFalse(any("*" in rule for rule in config["permissions"]["allow"]
