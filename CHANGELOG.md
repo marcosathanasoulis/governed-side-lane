@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.31 - 2026-09-21
+
+- Fix research-routing references to clarify that an authorized bounded
+  source-research task may use an execute harness with exact route, capabilities,
+  read roots, and a brief or report-only output scope; read-only scope does not
+  mean strict review-mode-only. Preserve the strict review no-secret/no-MCP
+  contract where explicitly required, and never relabel an execute lane as a
+  sandbox.
+- Add the optional OmniRoute add-on guide, linking it from the README, the core
+  side-lane skill, and the Prompt it side-lane routing companion. Native and
+  direct routes remain fully usable without installing a gateway.
+- Add offline regression checks that require the updated research/execute
+  contract and the optional/no-gateway path to remain present in the public
+  package.
+
 ## 0.4.30 - 2026-09-20
 
 - Fix the report Stop hook's bounded stdin read: the real Stop payload carries

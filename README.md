@@ -40,7 +40,9 @@ accounts, models, APIs, and connectors are never prerequisites. See the
 [model and account guide](plugins/governed-side-lane/docs/model-guide.md) for
 dated candidate and plan guidance, and the
 [connector guide](plugins/governed-side-lane/docs/connector-guide.md) for
-task-specific local setup and qualification.
+task-specific local setup and qualification. For optional pooled routing, see the
+[OmniRoute add-on guide](plugins/governed-side-lane/docs/omniroute-guide.md);
+native and direct routes remain fully usable without it.
 
 ### Optional Codex API-key route (hosts without an OAuth session)
 

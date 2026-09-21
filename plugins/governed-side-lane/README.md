@@ -8,9 +8,11 @@ The core skill works without Prompt it or organization-specific configuration.
 It requires Git, Python 3.10+, and at least one signed-in native host CLI.
 
 Optional model/account and connector setup guidance lives in the public
-[model guide](docs/model-guide.md) and
-[connector guide](docs/connector-guide.md). Neither is required to use a
-single native OpenAI or Claude host.
+[model guide](docs/model-guide.md),
+[connector guide](docs/connector-guide.md), and
+[OmniRoute add-on guide](docs/omniroute-guide.md). None of these is required to
+use a single native OpenAI or Claude host, and OmniRoute is optional even for
+pooled routing.
 
 ## Provider credentials
 
@@ -87,12 +89,19 @@ a transcript is not an artifact, so `--report-only` makes
 
 ```bash
 side-lane run --host claude --mode execute --provider <p> --model <m> \
-  --lane-name <lane> --prompt-file <task> --report-only
+  --lane-name <lane> --prompt-file <task> --report-only \
+  --allow-no-commit --no-publish \
+  --capability shell
 ```
 
 It is deliberately narrow: Claude host, execute mode, and a finite positive
 `max_budget_usd` on the route (the USD cap and the repair must travel in the
-same command; no catalog or global budget change is involved). Ordinary execute
+same command; no catalog or global budget change is involved). The `max_budget_usd`
+value is a client-side estimate guard, not proof that the upstream server or
+account enforces the same cap; verify provider-side and account limits separately.
+Add `shell` or `workspace-write` capabilities when the report generation/read
+tool needs to write artifacts, and use `--allow-no-commit` and `--no-publish` so
+a report-only outcome is not treated as a source commit or push. Ordinary execute
 and review lanes are untouched, and the flag is rejected before a worktree,
 credential, or host executable is touched anywhere else.
 

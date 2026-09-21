@@ -392,8 +392,14 @@ def make_parser() -> argparse.ArgumentParser:
         "the reason to write the real findings report — and the runner itself "
         "refuses to accept the lane if the report is still missing, empty, or a "
         "symlink when the worker exits. Requires a finite positive "
-        "max_budget_usd on the route so the USD cap and the hook travel in one "
-        "command. Ordinary execute and review lanes are unchanged",
+        "max_budget_usd on the route, which is a client-side estimate guard, "
+        "not proof that the upstream server or account enforces the same cap. "
+        "The report file is an output exception to ordinary execute rules; the "
+        "lane still runs in execute mode and is not a sandbox. Add shell or "
+        "workspace-write capabilities when the report generation/read tool needs "
+        "to write artifacts, and use --allow-no-commit and --no-publish so a "
+        "report-only outcome is not treated as a source commit or push. "
+        "Ordinary execute and review lanes are unchanged",
     )
     run.add_argument(
         "--allow-no-commit",

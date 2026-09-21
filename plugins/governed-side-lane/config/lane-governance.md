@@ -152,6 +152,18 @@ backup is allowed, but no alternate GLM model is.
   checkout-local graph may rebuild its own ignored database and nothing else.
 - Stop and report when an action exceeds these boundaries or its authority is
   uncertain.
+- An authorized bounded source-research task may use this execute harness with
+  an exact route, capabilities, read roots, and a brief or report-only output
+  scope, provided existing explicit execution, delegation, and spend authority
+  covers it and the task performs no implementation or external writes.
+  Read-only scope does not mean strict review-mode-only. Preserve the strict
+  review no-secret/no-MCP contract where the task explicitly requires it, and
+  never relabel an execute lane as a sandbox. Generic planning consent alone
+  grants no new external dispatch, costs, execute authority, or arbitrary
+  worktree writes. The coordinator owns the research question and final
+  synthesis, but may delegate evidence gathering or analysis to an economical
+  qualified route under existing authority; this does not introduce per-node
+  approval.
 
 For a task-scoped environment value, use `env NAME=value <already-granted-command>`;
 direct `NAME=value command` prefixes may prompt the native Devin permission layer.

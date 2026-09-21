@@ -49,7 +49,9 @@ public [model guide](../../docs/model-guide.md) and
 [connector guide](../../docs/connector-guide.md).
 They do not make a route executable: keep candidate, configured, available, and
 authorized states separate, and continue normally with one native OpenAI or
-Claude host when no optional route qualifies.
+Claude host when no optional route qualifies. For optional pooled routing, read
+the [OmniRoute add-on guide](../../docs/omniroute-guide.md); it is not required
+and Side Lane owns task fit and acceptance even when a gateway is present.
 
 For new provider setup or a first trial, read
 [provider qualification](references/provider-qualification.md). It covers
@@ -152,11 +154,16 @@ Coordinator origin does not select a provider: Codex-origin staffing may
 consider configured native Claude and fixed `glm-5.3` on its Claude worker;
 Claude-origin staffing may consider configured native Codex and the same
 explicitly enabled fixed GLM route on its Claude worker.
-During Prompt it research, the runner may launch a qualified review lane only
-when the user has explicitly authorized that bounded external research team;
-generic Prompt it consent and recommendation output do not authorize launch.
-Review governance still forbids MCP/connectors and secrets. Execute lanes,
-including GLM, retain their separate approval gates.
+During Prompt it research, the runner may launch a qualified review lane when
+the user has explicitly authorized that bounded external research team. An
+authorized bounded source-research task may also use an execute harness with an
+exact route, capabilities, read roots, and a brief or report-only output scope,
+when existing explicit execution, delegation, and spend authority covers it and
+the task performs no implementation or external writes. Read-only scope does not
+mean strict review-mode-only. Generic Prompt it consent and recommendation
+output do not authorize any launch. Review governance still forbids
+MCP/connectors and secrets. Execute lanes, including GLM, retain their separate
+approval gates.
 
 Claude-host and Devin-host workers default to a 30-minute (1,800-second)
 process timeout. An explicit model route's positive integer `timeout_seconds`

@@ -7,6 +7,7 @@ runtime qualification is claimed.
 """
 
 import json
+import re
 import subprocess
 import tempfile
 import unittest
@@ -254,6 +255,93 @@ class RoutedConfigTests(unittest.TestCase):
         self.assertIn(".invalid", entry["base_url"])
         self.assertEqual(sorted(entry["routing_policy_contract"]["allowed_upstream_models"]),
                          sorted(POOL))
+
+
+class GuideRegressionTests(unittest.TestCase):
+    """Public docs and examples keep a complete, accurate routed contract."""
+
+    def _extract_json_blocks(self, text):
+        return re.findall(r"```json\n(.*?)```", text, re.DOTALL)
+
+    def test_omniroute_guide_example_has_complete_contract(self):
+        package_root = Path(__file__).resolve().parents[1]
+        guide = (package_root / "docs/omniroute-guide.md").read_text()
+        blocks = self._extract_json_blocks(guide)
+        self.assertTrue(blocks, "no JSON code blocks in omniroute-guide.md")
+        contract_blocks = [
+            json.loads(block) for block in blocks
+            if "routing_policy_contract" in block
+        ]
+        self.assertTrue(
+            contract_blocks,
+            "no JSON block with a routing_policy_contract found in the guide",
+        )
+        for fragment in contract_blocks:
+            provider = fragment.get("provider", "")
+            model_configs = fragment.get("routes", {}).get("execute", {}).get(
+                "claude", {}).get("model_configs", {})
+            self.assertIn(SELECTOR, model_configs)
+            contract = model_configs[SELECTOR]["routing_policy_contract"]
+            self.assertEqual(contract["requested_selector"], SELECTOR)
+            for field in (
+                "allowed_upstream_models",
+                "policy_revision",
+                "policy_fingerprint",
+                "settings_precedence",
+            ):
+                self.assertIn(field, contract)
+            self.assertEqual(contract["settings_precedence"], "verified")
+            self.assertIsNotNone(provider)
+            self.assertTrue(
+                fragment.get("automatic_selector_policy") is True
+                or "routed-policy-snapshot" in guide,
+                "guide should mention automatic collection or a manual snapshot",
+            )
+
+    def test_disabled_profile_has_complete_contract(self):
+        package_root = Path(__file__).resolve().parents[1]
+        example = json.loads(
+            (package_root / "config/examples/provider-profiles.disabled.json").read_text()
+        )
+        entry = next(
+            item for item in example["providers"] if item["provider"] == "omniroute"
+        )
+        contract = entry["routing_policy_contract"]
+        for field in (
+            "requested_selector",
+            "allowed_upstream_models",
+            "policy_revision",
+            "policy_fingerprint",
+            "settings_precedence",
+        ):
+            self.assertIn(field, contract)
+        self.assertEqual(contract["settings_precedence"], "verified")
+
+    def test_omniroute_guide_does_not_overclaim_live_enforcement(self):
+        package_root = Path(__file__).resolve().parents[1]
+        guide = (package_root / "docs/omniroute-guide.md").read_text()
+        self.assertNotIn("validates only syntax and freshness", guide)
+        self.assertIn("does not prove live server", guide)
+        self.assertIn("automatic_selector_policy", guide)
+
+    def test_no_gateway_example_uses_a_configured_native_claude_model(self):
+        package_root = Path(__file__).resolve().parents[1]
+        guide = (package_root / "docs/omniroute-guide.md").read_text()
+        models = json.loads(
+            (package_root / "config/models.json").read_text(encoding="utf-8")
+        )
+        allowed = set(models["providers"]["claude"]["routes"]["execute"]["claude"]["models"])
+        for block in re.findall(r"```bash\n(.*?)```", guide, re.DOTALL):
+            if "--provider claude" in block and "--report-only" not in block:
+                match = re.search(r"--model\s+(\S+)", block)
+                if match:
+                    self.assertIn(
+                        match.group(1),
+                        allowed,
+                        f"no-gateway example model {match.group(1)!r} is not in the configured claude execute allowlist",
+                    )
+                    return
+        self.fail("no no-gateway native example block found in omniroute-guide.md")
 
 
 if __name__ == "__main__":

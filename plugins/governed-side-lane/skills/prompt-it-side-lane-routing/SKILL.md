@@ -108,7 +108,9 @@ reference. Include each task-fitting configured provider in the comparison,
 including economical variants, without presuming its flagship is preferable.
 Separate product/region/endpoint and local harness identity from model capability.
 Report unfinished setup as a dependency, not as a reason to purchase another
-account or silently use a different provider.
+account or silently use a different provider. For optional pooled routing, read
+the [OmniRoute add-on guide](../../docs/omniroute-guide.md); it is not required
+and native/direct routes remain fully usable without it.
 
 ## Build the task profile from evidence
 
@@ -207,19 +209,33 @@ replaces task-relative local validation.
 
 Prompt it may use its own native read-only helpers under its research contract;
 those helpers are not Side Lane routes. Keep the coordinator responsible for
-scope-shaping research, architecture, evidence evaluation, and synthesis.
+the research question, scope-shaping research, architecture, evidence
+evaluation, and final synthesis.
 
-An external Side Lane research helper uses `review` mode only. It may gather a
-bounded source set, investigate a bounded subsystem, or answer a targeted
-second-opinion question. Review mode has no MCP/connectors, secret access, or
-write authority, so connector-backed research stays with an authorized
-coordinator or qualified native helper. Never change a research task to
-`execute` merely to obtain a connector.
+An authorized bounded source-research task may use an external `execute` harness
+with an exact route, capabilities, read roots, and a brief or report-only output
+scope, when existing explicit execution, delegation, and spend authority covers
+it and the task performs no implementation or external writes. Read-only scope
+does not mean strict review-mode-only. Preserve the strict review
+no-secret/no-MCP contract where the task explicitly requires it, and never
+relabel an execute lane as a sandbox. Generic Prompt it planning consent alone
+grants no new external dispatch, costs, execute authority, or arbitrary worktree
+writes. The coordinator may delegate evidence gathering or analysis to an
+economical qualified route under existing authority; no forced expensive
+coordinator research is required when such a route qualifies. This authority does
+not introduce per-node approval.
 
-An external `execute` lane is an implementation worker proposed for after the
+An external Side Lane research helper otherwise uses `review` mode only. It may
+gather a bounded source set, investigate a bounded subsystem, or answer a
+targeted second-opinion question. Review mode has no MCP/connectors, secret
+access, or write authority, so connector-backed research stays with an authorized
+coordinator, qualified native helper, or the authorized execute harness above.
+Never change a research task to `execute` merely to obtain a connector.
+
+An external `execute` lane for implementation is proposed only after the
 execution brief is approved. GLM remains execute-only and keeps its separate
-explicit enablement and run authorization gates; research-team authorization
-does not enable GLM, provider-key use, new spend, or execute mode.
+explicit enablement and run authorization gates; research-team authorization does
+not enable GLM, provider-key use, new spend, or execute mode.
 
 ## Build the complete task graph
 
