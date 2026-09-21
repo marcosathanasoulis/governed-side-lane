@@ -80,6 +80,14 @@ the write would reach Devin's `accept-edits` confirmation, which ends a
 non-interactive session outright. The lane worktree path travels to the
 hook in the per-run `devin-command-policy.json` rules file.
 
+Native Devin 3000.10.31 was observed to prompt for a relative `../../..`
+output redirect with a nested `exec.workdir`, while accepting an equivalent
+absolute in-lane target. The native matcher's internal behavior is unverified.
+The adapter therefore adds shared guidance for every native Devin shell lane:
+use an absolute path under the lane's `.side-lane-scratch/` for temporary output
+and logs. Paths containing spaces are quoted in the generated example. This
+changes prompt guidance only; file containment and permission rules stay intact.
+
 ## Report-only execute lanes (`--report-only`)
 
 A worker can end its turn with exit 0, having navigated and saved its

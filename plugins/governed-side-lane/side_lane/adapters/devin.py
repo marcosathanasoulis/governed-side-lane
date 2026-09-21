@@ -30,6 +30,7 @@ from side_lane.read_roots import read_rule, scope_note
 from side_lane.results import LaneResult
 from side_lane.web_domains import devin_rules, scope_note as web_scope_note
 from side_lane.worktrees import (
+    SCRATCH_DIR_NAME,
     WorktreeError,
     ensure_devin_local_mcp_exclusion,
     ensure_devin_local_mcp_untracked,
@@ -73,6 +74,26 @@ _PYTHON_INTERPRETER_NAME = re.compile(r"python(?:\d+(?:\.\d+)*)?")
 #: pregrant.  It has no path or shell-expansion semantics and is paired
 #: exactly with an already-granted Python interpreter.
 _NATIVE_ENV_PREGRANT = "PYTHONDONTWRITEBYTECODE=1"
+
+#: Exact heading of the generated shell-output-path note. It doubles as the
+#: marker a test (or a reader) uses to tell this note apart from the task text.
+NATIVE_EXEC_NOTE_HEADING = "## Lane shell output paths"
+
+
+def _native_exec_note(worktree: Path) -> str:
+    """Use the in-lane spelling verified with native redirect permissions."""
+
+    scratch = worktree / SCRATCH_DIR_NAME
+    target = shlex.quote(str(scratch / "out.txt"))
+    return "\n".join([
+        NATIVE_EXEC_NOTE_HEADING,
+        "Use an absolute path inside your lane worktree for shell output redirects,",
+        f"for example: python3 -c '...' > {target} 2>&1",
+        f"Use `{scratch}/` for temporary output and logs; never write outside the lane worktree.",
+        "Especially with `exec.workdir`, native Devin may request confirmation for",
+        "an equivalent relative target. Do not use relative `../` targets; spell",
+        "the absolute in-lane target instead. Existing tool grants and task scope still apply.",
+    ])
 
 
 def _nonempty(value: object, label: str) -> str:
@@ -190,6 +211,10 @@ def build_command(
         # worktree's local-scope MCP file (see `launch`); the task text only
         # tells the worker they exist and that presence is not authentication.
         note = (note or "") + startup_note(run_mcp_servers)
+    # Shared across native Devin models; text only, with no permission changes.
+    if "shell" in set(capabilities):
+        exec_note = _native_exec_note(worktree_path)
+        note = f"{note}\n\n{exec_note}" if note else exec_note
     governed = (lane_system_prompt(mode, repo_path)
                 + (f"\n\n{note}" if note else "")
                 + "\n\n# Approved task\n\n" + task)

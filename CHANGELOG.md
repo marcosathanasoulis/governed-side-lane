@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.40 - 2026-09-21
+
+- Give every native Devin shell lane its absolute scratch-output path. Avoid observed native confirmation on equivalent relative redirects with nested `exec.workdir`, without changing permission rules or file containment.
+
 ## 0.4.39 - 2026-09-21
 
 - Treat an exact gateway-read connector registration as presence-only staffing evidence while leaving authentication and target scope pending dispatch. Keep route capability qualification and live dispatch checks separate; exclude review lanes.
