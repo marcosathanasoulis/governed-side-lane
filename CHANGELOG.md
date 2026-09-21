@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.36 - 2026-09-21
+
+- Accept report-only delivery without requiring an implementation commit. Require a fresh report, successful worker and verification, and unchanged source checkout; reject unrelated lane changes, tracked scratch mutations, commits, and source renames into the report. Recheck integrity after verification and keep ordinary execute/review delivery unchanged.
+
 ## 0.4.35 - 2026-09-21
 
 - Reject inherited unchanged reports in Claude report-only lanes by sharing a prelaunch content baseline between the Stop hook and final report check. Preserve historical reports in lane scratch without following preexisting preservation symlinks. This mechanical freshness check does not establish report quality or change the separate implementation delivery contract.

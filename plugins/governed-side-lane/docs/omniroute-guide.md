@@ -148,23 +148,34 @@ side-lane run --host claude --mode execute --provider omniroute \
 
 For an authorized bounded source-research task that produces only a report and
 uses read roots, add the capabilities the worker needs for report
-generation/reading (for example `shell` or `workspace-write`), and pass
-`--allow-no-commit --no-publish` so a report-only outcome is not treated as a
-source commit or push. The report file is an output exception to the ordinary
-execute rules; the lane still runs in execute mode and is not a sandbox.
+generation/reading (for example `shell` or `workspace-write`). The report file
+is an output exception to the ordinary execute rules; the lane still runs in
+execute mode and is not a sandbox. A report-only lane is accepted on its report
+artifact, so it needs no commit and is never pushed; leave its other lane files
+alone — screenshots and intermediate output belong in the lane's git-excluded
+`.side-lane-scratch/` directory as *untracked* files, or the run exits `3` naming
+them. The scratch directory is an exemption for untracked files, not for a path
+prefix: modifying, staging, adding, deleting, or renaming a *tracked* file there
+is source work and is refused like any other source change. `delivered` for the
+lane reflects the whole run, not the report alone — a non-zero worker exit, a
+changed coordinator checkout, a refused report, a failed `--verify`, or a
+verification command that itself changes the lane, report, or checkout all leave
+it false, and `--verify` is not run once the run has already failed.
 
 ```bash
 side-lane run --host claude --mode execute --provider omniroute \
   --model example-pool-selector --repo "$REPO" \
   --lane-name omni-research-001 \
   --report-only \
-  --allow-no-commit \
-  --no-publish \
   --approve-billable-route \
   --capability shell \
   --read-root /path/to/shared/sources \
   --prompt-file research-prompt.md
 ```
+
+`--allow-no-commit` and `--no-publish` remain valid here but are no longer
+needed: a report-only lane is not judged on a commit, and its branch is never
+published automatically.
 
 `--report-only` requires the route to have a finite positive `max_budget_usd`.
 That value is a client-side estimate guard, not a hard proof that the upstream

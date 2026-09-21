@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import contextlib
 import io
 import json
@@ -11,7 +13,13 @@ from unittest import mock
 
 from side_lane import cli, report_stop_hook
 from side_lane.results import LaneResult
-from side_lane.worktrees import LaneDelivery, VerifyResult, WorktreeError
+from side_lane.worktrees import (
+    UNTRACKED_STATUS as UNTRACKED,
+    ChangedPath,
+    LaneDelivery,
+    VerifyResult,
+    WorktreeError,
+)
 
 
 def _only_summary(stdout: str) -> dict:
@@ -738,6 +746,7 @@ class SideLaneTests(unittest.TestCase):
         publish_error=None,
         verify_command=None,
         verify_result=None,
+        worker_returncode=0,
     ):
         """Drive _launch through a finished execute lane; report what happened.
 
@@ -754,7 +763,7 @@ class SideLaneTests(unittest.TestCase):
         lane = mock.Mock(worktree=worktree, branch="side-lane/task-1")
         result = LaneResult(
             ("claude",),
-            0,
+            worker_returncode,
             worktree,
             "claude",
             "claude",
@@ -932,6 +941,24 @@ class SideLaneTests(unittest.TestCase):
         verify.assert_not_called()
         self.assertIsNone(summary["verified"])
         publish.assert_not_called()
+
+    def test_an_execute_lane_verifies_even_when_the_worker_exited_nonzero(self) -> None:
+        """Pinned on purpose: the report-only gate does not reach execute lanes.
+
+        An execute lane's verification is still gated on `delivery.delivered`
+        alone, exactly as it always was. Adding this run's other outcomes to
+        that gate would change the ordinary execute contract and its summary —
+        a separate decision, not a side effect of the report-only repair.
+        """
+        ok = VerifyResult(command="make test", exit_code=0, output="ok")
+        code, summary, _errors, _publish, _lane, verify = self._delivered_lane(
+            LaneDelivery(committed=True, uncommitted=()),
+            verify_command="make test", verify_result=ok, worker_returncode=3,
+        )
+        self.assertEqual(code, 3)
+        verify.assert_called_once()
+        self.assertTrue(summary["verified"])
+        self.assertTrue(summary["delivered"])
 
     def test_verify_is_rejected_outside_execute_mode(self) -> None:
         # A review lane disposes its worktree before verification could run;
@@ -2017,13 +2044,28 @@ class ReportOnlyCliTests(unittest.TestCase):
         return mock.Mock(**values)
 
     @contextlib.contextmanager
-    def _patched(self, repo, lane, launch, *, model_config=None, create=None):
+    def _patched(self, repo, lane, launch, *, model_config=None, create=None,
+                 delivery=None, delivery_error=None):
         """The hermetic CLI environment: no host executable, git, or network.
 
         ``create`` replaces the worktree factory when a test wants the real one
-        (the default is a mock returning ``lane``). Yields the
+        (the default is a mock returning ``lane``). ``delivery`` is the mocked
+        lane tree verdict — the default is a lane that wrote its report and
+        committed nothing, which is what a report-only worker is told to do —
+        and ``delivery_error`` makes the inspection itself fail. Yields the
         ``publish_lane_branch`` and ``dispose_clean_worktree`` mocks.
         """
+
+        if delivery_error is not None:
+            delivery_patch = {"side_effect": delivery_error}
+        else:
+            delivery_patch = {
+                "return_value": (
+                    LaneDelivery(committed=False, uncommitted=(self.REPORT_NAME,))
+                    if delivery is None
+                    else delivery
+                )
+            }
         claude_route = (
             {"gateway": "native-claude", "auth_method": "oauth", "billable": False},
             model_config if model_config is not None
@@ -2039,8 +2081,7 @@ class ReportOnlyCliTests(unittest.TestCase):
             mock.patch("side_lane.cli.select_route", return_value=claude_route),
             mock.patch("side_lane.cli.require_native_oauth"),
             mock.patch("side_lane.adapters.claude.launch", launch),
-            mock.patch("side_lane.cli.lane_delivery",
-                       return_value=LaneDelivery(committed=True, uncommitted=())),
+            mock.patch("side_lane.cli.lane_delivery", **delivery_patch),
             mock.patch("side_lane.cli.git_status", return_value="## task"),
             mock.patch("side_lane.cli.write_audit",
                        return_value=repo / ".git" / "audit.json"),
@@ -2052,7 +2093,8 @@ class ReportOnlyCliTests(unittest.TestCase):
 
     def _drive(self, *, report_only=True, report=None, model_config=None,
                host="claude", mode="execute", no_publish=True,
-               inherited_report=None, worker_writes=()):
+               inherited_report=None, worker_writes=(), delivery=None,
+               delivery_error=None, returncode=0, allow_no_commit=False):
         """Run _launch through a mocked Claude adapter; return what happened.
 
         ``inherited_report`` is written into the lane before the runner is
@@ -2061,6 +2103,9 @@ class ReportOnlyCliTests(unittest.TestCase):
         ``worker_writes`` are other files the fake worker creates, and
         ``report`` is the report the fake worker writes — the way a worker
         would — so the real post-run gate is what is under test.
+        ``delivery`` overrides the mocked lane tree verdict (the default is the
+        lane a report-only worker is told to leave: its report and no commit)
+        and ``delivery_error`` makes that inspection fail instead.
         """
 
         repo = self.repo()
@@ -2070,8 +2115,14 @@ class ReportOnlyCliTests(unittest.TestCase):
             (worktree / self.REPORT_NAME).write_text(
                 inherited_report, encoding="utf-8")
         lane = mock.Mock(worktree=worktree, branch="side-lane/task-1")
+        if delivery is None and delivery_error is None:
+            delivery = (
+                LaneDelivery(committed=False, uncommitted=(self.REPORT_NAME,))
+                if report_only
+                else LaneDelivery(committed=True, uncommitted=())
+            )
         result = LaneResult(
-            ("claude",), 0, worktree, "claude", "claude", "native-claude",
+            ("claude",), returncode, worktree, "claude", "claude", "native-claude",
             "claude-sonnet-5", "oauth", False, "done", "",
         )
 
@@ -2087,14 +2138,15 @@ class ReportOnlyCliTests(unittest.TestCase):
 
         launch = mock.MagicMock(side_effect=fake_launch)
         with (
-            self._patched(repo, lane, launch, model_config=model_config) as (
+            self._patched(repo, lane, launch, model_config=model_config,
+                          delivery=delivery, delivery_error=delivery_error) as (
                 publish, _dispose),
             contextlib.redirect_stdout(io.StringIO()) as output,
             contextlib.redirect_stderr(io.StringIO()) as errors,
         ):
             code = cli._launch(
                 self._args(report_only=report_only, host=host, mode=mode,
-                           no_publish=no_publish),
+                           no_publish=no_publish, allow_no_commit=allow_no_commit),
                 cli.load_config(), repo, "Implement",
             )
         self.publish_lane = publish
@@ -2372,3 +2424,646 @@ class ReportOnlyCliTests(unittest.TestCase):
                 self.assertEqual(dispose.call_count, 1)
                 self.assertTrue(report.is_symlink() if label == "symlink"
                                 else report.is_dir())
+
+    # --- report delivery is independent of implementation delivery -----------
+    #
+    # README documents report-only with `--allow-no-commit --no-publish`, but
+    # the pre-repair verdict ANDed the report gate with implementation
+    # `lane_delivery` (a commit plus a clean tree). A worker told to change no
+    # source and make no git change can never satisfy that half, so an
+    # authentic report-only lane exited 3 without `--allow-no-commit`, and with
+    # it could only reach exit 0 by way of the report being an uncommitted path
+    # the flag's own condition rejects — `delivered: false` for a lane that had
+    # in fact delivered its report. These tests exercise the acceptance the way
+    # a real lane meets it: a real worktree, real git, and the real
+    # `lane_delivery`.
+
+    GIT = ("git", "-c", "user.email=dev@example.com", "-c", "user.name=Dev")
+    FINDINGS = "# Findings\n\n- what this run actually measured\n"
+
+    def _committed_repo(self, *, tracked_report: str | None = None) -> Path:
+        """A repository whose checkout is clean, so a lane can be added."""
+        repo = self.repo()
+        if tracked_report is not None:
+            (repo / self.REPORT_NAME).write_text(tracked_report, encoding="utf-8")
+        subprocess.run(self.GIT + ("-C", str(repo), "add", "-A"),
+                       check=True, capture_output=True)
+        subprocess.run(self.GIT + ("-C", str(repo), "commit", "-m", "baseline"),
+                       check=True, capture_output=True)
+        return repo
+
+    def _real_lane(self, worker, *, args_overrides=None, tracked_report=None,
+                   verify=None, verify_lane=None, source_mutations_error=None,
+                   tracked_scratch=None):
+        """Drive _launch over a real lane worktree and real git inspection.
+
+        Only the host executable, the route, the adapter call, the audit write,
+        the push, and (when a test passes one) the verification call are
+        hermetic. The worktree is created by the real factory and the post-run
+        verdict comes from the real `lane_delivery`, so what is under test is
+        the state a lane actually reaches. ``worker`` receives the lane worktree
+        and the coordinator checkout, and may return an exit code for the fake
+        host process.
+
+        ``verify`` is a real shell command run by the real `verify_lane` (a
+        callable receives the coordinator checkout path, for a command that has
+        to name it). ``verify_lane`` replaces the verification call instead, for
+        tests that need to count calls or hand back a chosen verdict.
+        ``source_mutations_error`` makes the post-run checkout comparison fail,
+        and ``tracked_scratch`` commits one path under the scratch directory so
+        a lane can be given a *tracked* file to touch there.
+        """
+
+        repo = self._committed_repo(tracked_report=tracked_report)
+        if tracked_scratch is not None:
+            scratch_file = repo / tracked_scratch
+            scratch_file.parent.mkdir(parents=True, exist_ok=True)
+            scratch_file.write_text("tracked before the lane\n", encoding="utf-8")
+            subprocess.run(self.GIT + ("-C", str(repo), "add", "-A"),
+                           check=True, capture_output=True)
+            subprocess.run(self.GIT + ("-C", str(repo), "commit", "-m", "tracked scratch"),
+                           check=True, capture_output=True)
+        overrides = dict(args_overrides or {})
+        if verify is not None:
+            overrides["verify"] = verify(repo) if callable(verify) else verify
+        created: list = []
+        real_create = cli.create_worktree
+
+        def capture(*args, **kwargs):
+            lane = real_create(*args, **kwargs)
+            created.append(lane)
+            return lane
+
+        def fake_launch(*_args, **_kwargs):
+            worktree = created[0].worktree
+            outcome = worker(worktree, repo)
+            return LaneResult(
+                ("claude",), 0 if outcome is None else outcome, worktree,
+                "claude", "claude", "native-claude", "claude-sonnet-5",
+                "oauth", False, "done", "",
+            )
+
+        launch = mock.MagicMock(side_effect=fake_launch)
+        claude_route = (
+            {"gateway": "native-claude", "auth_method": "oauth", "billable": False},
+            {"runtime_model": "claude-sonnet-5", "protocol": "native-claude",
+             "max_budget_usd": 2.5},
+        )
+        # The real verify_lane runs unless a test says otherwise: the whole
+        # point of the integrity cases below is what a real command does to a
+        # real lane. A test that only needs the call counted passes its own
+        # mock.
+        patched_verify = (
+            contextlib.nullcontext() if verify_lane is None
+            else mock.patch("side_lane.cli.verify_lane", verify_lane)
+        )
+        source_patch = (
+            contextlib.nullcontext() if source_mutations_error is None
+            else mock.patch("side_lane.cli.source_mutations",
+                            side_effect=source_mutations_error)
+        )
+        with (
+            mock.patch("side_lane.cli.create_worktree", side_effect=capture),
+            mock.patch("side_lane.cli._require_host_executable",
+                       return_value="/opt/hosts/claude"),
+            mock.patch("side_lane.cli.select_route", return_value=claude_route),
+            mock.patch("side_lane.cli.require_native_oauth"),
+            mock.patch("side_lane.adapters.claude.launch", launch),
+            mock.patch("side_lane.cli.write_audit",
+                       return_value=repo / ".git" / "audit.json"),
+            mock.patch("side_lane.cli.publish_lane_branch") as publish,
+            source_patch,
+            patched_verify as verify_call,
+            contextlib.redirect_stdout(io.StringIO()) as output,
+            contextlib.redirect_stderr(io.StringIO()) as errors,
+        ):
+            code = cli._launch(
+                self._args(**overrides), cli.load_config(), repo, "Research",
+            )
+        self.verify_call = verify_call
+        return code, output.getvalue(), errors.getvalue(), publish, created[0], repo
+
+    def _write_report(self, worktree, content=None) -> None:
+        (worktree / self.REPORT_NAME).write_text(
+            self.FINDINGS if content is None else content, encoding="utf-8")
+
+    def test_real_report_only_lane_without_a_commit_is_delivered(self) -> None:
+        """The defect this repair closes: an authentic report-only lane.
+
+        The worker wrote its report and nothing else, and made no git change
+        because it was told not to. Pre-repair this exited 3 without
+        `--allow-no-commit` (and reported `delivered: false` with it).
+        """
+
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+
+        for allow_no_commit in (False, True):
+            with self.subTest(allow_no_commit=allow_no_commit):
+                code, stdout, errors, publish, lane, _repo = self._real_lane(
+                    worker, args_overrides={
+                        "allow_no_commit": allow_no_commit, "no_publish": True,
+                    })
+                self.assertEqual(code, 0, errors)
+                summary = _only_summary(stdout)
+                self.assertTrue(summary["delivered"])
+                self.assertEqual(summary["report_state"], "current")
+                self.assertFalse(summary["committed"])
+                self.assertEqual(summary["uncommitted"], [self.REPORT_NAME])
+                self.assertEqual(summary["report_only_unexpected_paths"], [])
+                publish.assert_not_called()
+
+    def test_real_report_only_lane_is_never_published(self) -> None:
+        """No automatic push of a report branch, with or without --no-publish."""
+
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+
+        code, stdout, errors, publish, _lane, _repo = self._real_lane(
+            worker, args_overrides={"no_publish": False})
+        self.assertEqual(code, 0, errors)
+        summary = _only_summary(stdout)
+        self.assertTrue(summary["delivered"])
+        publish.assert_not_called()
+        self.assertIsNone(summary["published"])
+        self.assertNotIn("published_ref", summary)
+
+    def test_real_report_only_lane_that_commits_is_not_delivered(self) -> None:
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+            (worktree / "notes.py").write_text("x = 1\n", encoding="utf-8")
+            subprocess.run(self.GIT + ("-C", str(worktree), "add", "notes.py"),
+                           check=True, capture_output=True)
+            subprocess.run(
+                self.GIT + ("-C", str(worktree), "commit", "-m", "worker commit"),
+                check=True, capture_output=True)
+
+        code, stdout, errors, publish, _lane, _repo = self._real_lane(worker)
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertTrue(summary["committed"])
+        self.assertIn("committed", errors)
+        publish.assert_not_called()
+
+    def test_real_report_only_lane_with_source_work_is_not_delivered(self) -> None:
+        """A fresh report does not excuse uncommitted implementation work."""
+
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+            (worktree / "src").mkdir()
+            (worktree / "src" / "change.py").write_text(
+                "print('unrelated')\n", encoding="utf-8")
+
+        code, stdout, errors, publish, _lane, _repo = self._real_lane(worker)
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        # The report itself is still this run's; the source tree is what fails.
+        self.assertEqual(summary["report_state"], "current")
+        # Git collapses a wholly untracked directory into one entry, and these
+        # are git's own paths: the operator is sent to what git reported.
+        self.assertEqual(summary["report_only_unexpected_paths"], ["src/"])
+        self.assertIn("src/", errors)
+        publish.assert_not_called()
+
+    def test_real_report_only_lane_may_replace_a_tracked_report(self) -> None:
+        """A tracked report shows up modified, not untracked — still allowed.
+
+        It is the lane's own artifact either way, and it is fresh, so the
+        replacement is the delivery. The inherited-and-untouched case is the
+        stale one covered above.
+        """
+
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+
+        code, stdout, errors, _publish, lane, _repo = self._real_lane(
+            worker, tracked_report=self.INHERITED)
+        self.assertEqual(code, 0, errors)
+        summary = _only_summary(stdout)
+        self.assertTrue(summary["delivered"])
+        self.assertEqual(summary["report_state"], "current")
+        self.assertEqual(summary["report_preexisting"], True)
+        self.assertEqual(summary["uncommitted"], [self.REPORT_NAME])
+        self.assertEqual((lane.worktree / self.REPORT_NAME).read_text(
+            encoding="utf-8"), self.FINDINGS)
+
+    def test_real_report_only_lane_is_not_delivered_when_the_checkout_changed(self) -> None:
+        """The source-checkout guard still fails the run, on exit 6.
+
+        A changed coordinator checkout is fatal for the run, and the
+        machine-readable verdict says so too: `delivered` is what a downstream
+        consumer (a model qualification, for one) reads, and it never sees the
+        exit code.
+        """
+
+        def worker(worktree, repo):
+            self._write_report(worktree)
+            (repo / "stray-report.md").write_text("outside the lane\n",
+                                                 encoding="utf-8")
+
+        code, stdout, errors, publish, _lane, _repo = self._real_lane(worker)
+        self.assertEqual(code, cli.LANE_SOURCE_MUTATED)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertEqual(summary["source_changes"], ["stray-report.md"])
+        self.assertIn("stray-report.md", errors)
+        publish.assert_not_called()
+
+    def test_scratch_and_screenshot_artifacts_are_not_implementation_work(self) -> None:
+        """The documented exceptions: the report, and *untracked* scratch files.
+
+        Screenshots and intermediate output belong in `.side-lane-scratch/`,
+        which git excludes — so this is decided from the tree verdict the runner
+        would receive if that exclusion were ever missing. The exemption is the
+        status (`??`) as much as the prefix, which the tracked-mutation test
+        below pins from the other side.
+        """
+        code, stdout, _stderr, _launch, _worktree = self._drive(
+            report="# Findings\n", delivery=LaneDelivery(
+                committed=False,
+                uncommitted=(self.REPORT_NAME,
+                             ".side-lane-scratch/notes.md",
+                             ".side-lane-scratch/screenshots/before.png"),
+                changed=(ChangedPath(UNTRACKED, self.REPORT_NAME),
+                         ChangedPath(UNTRACKED, ".side-lane-scratch/notes.md"),
+                         ChangedPath(UNTRACKED,
+                                     ".side-lane-scratch/screenshots/before.png")),
+            ))
+        self.assertEqual(code, 0)
+        summary = _only_summary(stdout)
+        self.assertTrue(summary["delivered"])
+        self.assertEqual(summary["report_only_unexpected_paths"], [])
+
+    def test_a_tracked_change_under_scratch_is_source_work(self) -> None:
+        """A path-only prefix match would accept this; the status is what stops it.
+
+        Each of these is a change to a path git tracks under the scratch
+        directory — the same string as a legitimate screenshot to a path-only
+        API, and a source change to git. Every one must be refused, and the
+        report itself must stay identified as this run's own.
+        """
+        for label, status in (
+            ("modified", " M"),
+            ("staged", "M "),
+            ("added to the index", "A "),
+            ("deleted", " D"),
+            ("renamed", "R "),
+        ):
+            with self.subTest(label=label):
+                scratch = ".side-lane-scratch/tracked-note.md"
+                code, stdout, stderr, _launch, _worktree = self._drive(
+                    report="# Findings\n", delivery=LaneDelivery(
+                        committed=False,
+                        uncommitted=(self.REPORT_NAME, scratch),
+                        changed=(ChangedPath(UNTRACKED, self.REPORT_NAME),
+                                 ChangedPath(status, scratch)),
+                    ))
+                self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+                summary = _only_summary(stdout)
+                self.assertFalse(summary["delivered"])
+                self.assertEqual(summary["report_state"], "current")
+                self.assertEqual(summary["report_only_unexpected_paths"], [scratch])
+                self.assertIn(scratch, stderr)
+
+    def test_a_path_without_a_status_is_refused_rather_than_guessed(self) -> None:
+        """An inspection that carried no status is not evidence of a screenshot.
+
+        `LaneDelivery` can be built without statuses (the tree verdict's other
+        callers never need them), and the one thing the scratch rule must not
+        do is read "no status" as "untracked" and wave a tracked edit through.
+        """
+        code, stdout, _stderr, _launch, _worktree = self._drive(
+            report="# Findings\n", delivery=LaneDelivery(
+                committed=False,
+                uncommitted=(self.REPORT_NAME, ".side-lane-scratch/notes.md"),
+            ))
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertEqual(summary["report_only_unexpected_paths"],
+                         [".side-lane-scratch/notes.md"])
+
+    def test_a_screenshot_outside_the_scratch_directory_is_refused(self) -> None:
+        """Fail closed and name the path instead of accepting it silently.
+
+        An uncommitted file outside the report and scratch tree does not
+        survive the worktree and is not the artifact this lane was dispatched
+        to produce; the operator is told where such artifacts belong.
+        """
+        code, stdout, stderr, _launch, _worktree = self._drive(
+            report="# Findings\n", delivery=LaneDelivery(
+                committed=False,
+                uncommitted=(self.REPORT_NAME, "screenshots/after.png"),
+            ))
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertEqual(summary["report_state"], "current")
+        self.assertEqual(summary["report_only_unexpected_paths"],
+                         ["screenshots/after.png"])
+        self.assertIn("screenshots/after.png", stderr)
+        self.assertIn(".side-lane-scratch", stderr)
+
+    def test_a_failed_lane_inspection_is_not_claimed_as_delivered(self) -> None:
+        code, stdout, stderr, _launch, _worktree = self._drive(
+            report="# Findings\n", no_publish=False,
+            delivery_error=WorktreeError("git status failed: no such worktree"))
+        self.assertEqual(code, cli.LANE_DELIVERY_UNVERIFIED)
+        summary = _only_summary(stdout)
+        self.assertIsNone(summary["delivered"])
+        self.assertIsNone(summary["verified"])
+        self.assertIn("git status failed", summary["delivery_unverified"])
+        self.assertIn("not claimed", stderr)
+        self.publish_lane.assert_not_called()
+
+    def test_a_nonzero_worker_exit_is_still_retained(self) -> None:
+        code, stdout, _stderr, _launch, _worktree = self._drive(
+            report="# Findings\n", returncode=4)
+        self.assertEqual(code, 4)
+        self.assertEqual(_only_summary(stdout)["provider_exit_status"], 4)
+
+    def test_a_report_path_outside_the_lane_is_not_judgeable(self) -> None:
+        """A path the lane does not contain decides nothing — fail closed."""
+        worktree = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, worktree, ignore_errors=True)
+        self.assertEqual(
+            cli._report_only_lane_artifacts(worktree, worktree / self.REPORT_NAME),
+            frozenset({self.REPORT_NAME}),
+        )
+        self.assertIsNone(
+            cli._report_only_lane_artifacts(worktree, Path("/elsewhere") / self.REPORT_NAME))
+        self.assertIsNone(
+            cli._report_only_lane_artifacts(
+                worktree, worktree / "nested" / self.REPORT_NAME))
+
+    def test_the_ordinary_execute_contract_is_unchanged(self) -> None:
+        """Without the opt-in, the report artifact is just an uncommitted file."""
+        code, stdout, _stderr, _launch, _worktree = self._drive(
+            report_only=False, report="# Findings\n",
+            delivery=LaneDelivery(committed=False,
+                                  uncommitted=(self.REPORT_NAME,)))
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertNotIn("report_only_unexpected_paths", summary)
+
+    # --- the machine-readable verdict covers the whole run -------------------
+    #
+    # `summary["delivered"]` is what a downstream consumer reads — the model
+    # qualification step among them — and it never sees this run's exit code.
+    # A lane this run has already failed must therefore not be reported as
+    # delivered, however good the report artifact is on its own.
+
+    def test_real_report_only_summary_is_false_when_the_worker_exits_nonzero(self) -> None:
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+            return 4
+
+        code, stdout, errors, publish, _lane, _repo = self._real_lane(worker)
+        self.assertEqual(code, 4, errors)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertEqual(summary["provider_exit_status"], 4)
+        # The report itself was a real one: it is the worker's exit, not the
+        # artifact, that the verdict now reflects.
+        self.assertEqual(summary["report_state"], "current")
+        publish.assert_not_called()
+
+    def test_real_report_only_summary_is_false_when_the_source_check_fails(self) -> None:
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+
+        code, stdout, errors, _publish, _lane, _repo = self._real_lane(
+            worker,
+            source_mutations_error=WorktreeError("git status failed: gone"),
+        )
+        self.assertEqual(code, cli.LANE_DELIVERY_UNVERIFIED)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertEqual(summary["report_state"], "current")
+        self.assertIn("git status failed", summary["source_check_unverified"])
+        self.assertIn("not claimed clean", errors)
+
+    def test_real_report_only_verify_failure_is_not_delivered(self) -> None:
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+
+        failing = mock.MagicMock(
+            return_value=VerifyResult("make test", 2, "FAILED (failures=1)"))
+        code, stdout, errors, _publish, _lane, _repo = self._real_lane(
+            worker, verify="make test", verify_lane=failing)
+        self.assertEqual(code, cli.LANE_VERIFY_FAILED)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertFalse(summary["verified"])
+        self.assertIn("FAILED (failures=1)", errors)
+
+    def test_real_report_only_verify_does_not_run_after_a_worker_failure(self) -> None:
+        """A run already failed for the worker is not worth a shell command."""
+
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+            return 5
+
+        verify = mock.MagicMock()
+        code, stdout, _errors, _publish, _lane, _repo = self._real_lane(
+            worker, verify="make test", verify_lane=verify)
+        self.assertEqual(code, 5)
+        verify.assert_not_called()
+        summary = _only_summary(stdout)
+        self.assertIsNone(summary["verified"])
+        self.assertFalse(summary["delivered"])
+        self.assertEqual(summary["report_only_verification_changes"], [])
+
+    def test_real_report_only_verify_does_not_run_when_the_checkout_changed(self) -> None:
+        def worker(worktree, repo):
+            self._write_report(worktree)
+            (repo / "stray.md").write_text("outside\n", encoding="utf-8")
+
+        verify = mock.MagicMock()
+        code, stdout, _errors, _publish, _lane, _repo = self._real_lane(
+            worker, verify="make test", verify_lane=verify)
+        self.assertEqual(code, cli.LANE_SOURCE_MUTATED)
+        verify.assert_not_called()
+        summary = _only_summary(stdout)
+        self.assertIsNone(summary["verified"])
+        self.assertFalse(summary["delivered"])
+
+    # --- --verify is a command, and it can change what was just judged -------
+    #
+    # It runs an arbitrary shell command inside the lane, so it can commit,
+    # leave files, rewrite the report the verdict was reached on, or write into
+    # the coordinator checkout. The lane that gets accepted must be the lane
+    # that was judged, so each of these is a real command against a real lane.
+
+    def test_real_report_only_verify_that_touches_nothing_is_delivered(self) -> None:
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+
+        code, stdout, errors, _publish, _lane, _repo = self._real_lane(
+            worker, verify="printf 'ok\\n'")
+        self.assertEqual(code, 0, errors)
+        summary = _only_summary(stdout)
+        self.assertTrue(summary["delivered"])
+        self.assertTrue(summary["verified"])
+        self.assertEqual(summary["verify_exit"], 0)
+        self.assertEqual(summary["report_only_verification_changes"], [])
+
+    def test_real_report_only_verify_that_rewrites_the_report_is_refused(self) -> None:
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+
+        code, stdout, errors, _publish, _lane, _repo = self._real_lane(
+            worker, verify=f"printf 'rewritten by verify\\n' > {self.REPORT_NAME}")
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        # The command exited 0; it is what it changed, not how it exited, that
+        # disqualifies the lane.
+        self.assertTrue(summary["verified"])
+        self.assertEqual(len(summary["report_only_verification_changes"]), 1)
+        self.assertIn("report artifact",
+                      summary["report_only_verification_changes"][0])
+        self.assertIn("--verify changed what this report-only run had judged",
+                      errors)
+
+    def test_real_report_only_verify_that_leaves_a_file_is_refused(self) -> None:
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+
+        code, stdout, _errors, _publish, _lane, _repo = self._real_lane(
+            worker, verify="printf 'out\\n' > build-output.txt")
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertEqual(summary["report_only_verification_changes"],
+                         ["it left build-output.txt in the lane"])
+
+    def test_real_report_only_verify_that_commits_is_refused(self) -> None:
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+
+        git = "git -c user.email=dev@example.com -c user.name=Dev"
+        code, stdout, _errors, publish, _lane, _repo = self._real_lane(
+            worker, verify=f"{git} add -A && {git} commit -m verified")
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertEqual(summary["report_only_verification_changes"],
+                         ["it committed work on the lane branch"])
+        publish.assert_not_called()
+
+    def test_real_report_only_verify_that_mutates_the_checkout_is_refused(self) -> None:
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+
+        code, stdout, errors, _publish, _lane, _repo = self._real_lane(
+            worker,
+            verify=lambda repo: f"printf 'x\\n' > '{repo / 'verify-stray.md'}'",
+        )
+        # A changed coordinator checkout is exit 6 whoever changed it, and the
+        # summary names the path rather than hiding it behind the lane refusal.
+        self.assertEqual(code, cli.LANE_SOURCE_MUTATED)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertTrue(summary["source_mutated"])
+        self.assertEqual(summary["source_changes"], ["verify-stray.md"])
+        self.assertIn("it changed the coordinator checkout at verify-stray.md",
+                      summary["report_only_verification_changes"])
+        self.assertIn("verify-stray.md", errors)
+
+    # --- the scratch exemption is a status, not a prefix ---------------------
+    #
+    # `.side-lane-scratch/` is git-excluded in a lane, so git normally says
+    # nothing about it at all. These drive real git on a repository that
+    # *tracks* a file there, which is the case a prefix-only rule would wave
+    # through: git reports the change, and it is a change to a tracked path.
+
+    SCRATCH_TRACKED = ".side-lane-scratch/tracked-note.md"
+
+    def test_real_source_renamed_into_report_is_refused(self) -> None:
+        def worker(worktree, _repo):
+            subprocess.run(self.GIT + ("-C", str(worktree), "mv",
+                           self.SCRATCH_TRACKED, self.REPORT_NAME),
+                           check=True, capture_output=True)
+
+        code, stdout, errors, _publish, _lane, _repo = self._real_lane(
+            worker, tracked_scratch=self.SCRATCH_TRACKED)
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED, errors)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertIn(self.REPORT_NAME, summary["report_only_unexpected_paths"])
+
+    def test_copy_status_at_report_path_is_refused(self) -> None:
+        delivery = LaneDelivery(
+            committed=False, uncommitted=(self.REPORT_NAME,),
+            changed=(ChangedPath("C ", self.REPORT_NAME),))
+        self.assertEqual(cli._report_only_unexpected_paths(
+            delivery, frozenset({self.REPORT_NAME})), (self.REPORT_NAME,))
+
+    def test_real_tracked_change_under_scratch_is_refused(self) -> None:
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+            (worktree / self.SCRATCH_TRACKED).write_text(
+                "edited by the worker\n", encoding="utf-8")
+
+        code, stdout, errors, _publish, _lane, _repo = self._real_lane(
+            worker, tracked_scratch=self.SCRATCH_TRACKED)
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED, errors)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertEqual(summary["report_state"], "current")
+        self.assertEqual(summary["report_only_unexpected_paths"],
+                         [self.SCRATCH_TRACKED])
+        self.assertIn(self.SCRATCH_TRACKED, errors)
+
+    def test_real_deletion_of_a_tracked_path_under_scratch_is_refused(self) -> None:
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+            (worktree / self.SCRATCH_TRACKED).unlink()
+
+        code, stdout, _errors, _publish, _lane, _repo = self._real_lane(
+            worker, tracked_scratch=self.SCRATCH_TRACKED)
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertEqual(summary["report_only_unexpected_paths"],
+                         [self.SCRATCH_TRACKED])
+
+    def test_real_staged_addition_under_scratch_is_refused(self) -> None:
+        added = ".side-lane-scratch/added.md"
+
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+            (worktree / added).write_text("staged by the worker\n", encoding="utf-8")
+            subprocess.run(self.GIT + ("-C", str(worktree), "add", "-f", added),
+                           check=True, capture_output=True)
+
+        code, stdout, _errors, _publish, _lane, _repo = self._real_lane(worker)
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertEqual(summary["report_only_unexpected_paths"], [added])
+
+    def test_real_untracked_screenshot_in_scratch_is_accepted(self) -> None:
+        """The legitimate case, on real git: a new file where the rules say.
+
+        Git excludes the lane's scratch tree, so the accepted lane is the
+        evidence: the screenshot is really on disk and the run was not failed
+        for a path the governance itself told the worker to use.
+        """
+        screenshot = Path(".side-lane-scratch") / "screenshots" / "after.png"
+
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+            (worktree / screenshot).parent.mkdir(parents=True, exist_ok=True)
+            (worktree / screenshot).write_bytes(b"\x89PNG\r\n\x1a\n")
+
+        code, stdout, errors, _publish, lane, _repo = self._real_lane(worker)
+        self.assertEqual(code, 0, errors)
+        summary = _only_summary(stdout)
+        self.assertTrue(summary["delivered"])
+        self.assertEqual(summary["report_only_unexpected_paths"], [])
+        self.assertTrue((lane.worktree / screenshot).exists())

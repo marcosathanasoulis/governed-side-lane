@@ -437,6 +437,33 @@ def git_status(run: WorktreeRun, runner: Runner = subprocess.run) -> str:
     return _git(run.worktree, ["status", "--short", "--branch"], runner)
 
 
+#: Porcelain status code for a path git tracks nothing at. Every other code —
+#: `` M``, ``M ``, ``A ``, `` D``, ``R ``, ``UU`` — describes a change to a
+#: path git *does* track, which is a different fact about a lane than an
+#: untracked file that happens to share its directory.
+UNTRACKED_STATUS = "??"
+
+
+@dataclass(frozen=True)
+class ChangedPath:
+    """One path in a lane's git status, with git's own two-character code.
+
+    Path alone is not enough to judge a lane: an untracked scratch artifact
+    and a *tracked* file under the same prefix are one identical string to a
+    path-only API while being opposite facts. The status is the half that
+    tells them apart, so it is carried here rather than discarded at parse
+    time and re-guessed from the path.
+    """
+
+    status: str
+    path: str
+
+    @property
+    def untracked(self) -> bool:
+        """True when git tracks nothing at this path (porcelain ``??``)."""
+        return self.status == UNTRACKED_STATUS
+
+
 @dataclass(frozen=True)
 class LaneDelivery:
     """Whether a lane's work actually reached git.
@@ -445,10 +472,17 @@ class LaneDelivery:
     run then reports success for work that disappears with the worktree —
     observed three times in one session (2026-09-17). Exit status cannot see
     this; only the tree can.
+
+    ``uncommitted`` stays the path list every existing caller reads; ``changed``
+    carries the same paths with their statuses for the callers that must tell a
+    tracked change from an untracked addition. It is empty on a hand-built
+    instance, which is not the same as "every path is untracked" — a caller
+    that needs the status must fail closed when it is missing.
     """
 
     committed: bool
     uncommitted: tuple[str, ...]
+    changed: tuple[ChangedPath, ...] = ()
 
     @property
     def delivered(self) -> bool:
@@ -485,7 +519,7 @@ class LaneDelivery:
         )
 
 
-def _changed_paths(worktree: Path, runner: Runner) -> tuple[str, ...]:
+def changed_paths(worktree: Path, runner: Runner) -> tuple[ChangedPath, ...]:
     """Every path with uncommitted work, from NUL-delimited porcelain.
 
     `-z` rather than parsing text, for two reasons learned the hard way:
@@ -500,7 +534,8 @@ def _changed_paths(worktree: Path, runner: Runner) -> tuple[str, ...]:
       by a separate NUL-terminated field holding the ORIGINAL path — so it is
       consumed by position, never by pattern.
 
-    Paths are reported as git spells them, relative to the worktree root.
+    Paths are reported as git spells them, relative to the worktree root, each
+    with the status git reported for it.
     """
     result = runner(
         ["git", "-C", str(worktree), "status", "--porcelain", "-z"],
@@ -514,7 +549,7 @@ def _changed_paths(worktree: Path, runner: Runner) -> tuple[str, ...]:
             (result.stderr or result.stdout).strip() or "git status failed"
         )
     fields = [f for f in (result.stdout or "").split("\0") if f]
-    paths: list[str] = []
+    entries: list[ChangedPath] = []
     index = 0
     while index < len(fields):
         entry = fields[index]
@@ -522,17 +557,26 @@ def _changed_paths(worktree: Path, runner: Runner) -> tuple[str, ...]:
         if len(entry) < 4:
             continue
         status, path = entry[:2], entry[3:]
-        paths.append(path)
+        entries.append(ChangedPath(status, path))
         if "R" in status or "C" in status:
             index += 1  # the original path rides in its own field; skip it
-    return tuple(paths)
+    return tuple(entries)
+
+
+def _changed_paths(worktree: Path, runner: Runner) -> tuple[str, ...]:
+    """Every path with uncommitted work, as bare lane-relative paths."""
+    return tuple(entry.path for entry in changed_paths(worktree, runner))
 
 
 def lane_delivery(run: WorktreeRun, runner: Runner = subprocess.run) -> LaneDelivery:
     """Inspect the lane worktree for work that actually landed in git."""
     head = _git(run.worktree, ["rev-parse", "HEAD"], runner)
-    changed = _changed_paths(run.worktree, runner)
-    return LaneDelivery(committed=head != run.starting_commit, uncommitted=changed)
+    changed = changed_paths(run.worktree, runner)
+    return LaneDelivery(
+        committed=head != run.starting_commit,
+        uncommitted=tuple(entry.path for entry in changed),
+        changed=changed,
+    )
 
 
 def snapshot_source(repo: Path, runner: Runner = subprocess.run) -> frozenset[str]:

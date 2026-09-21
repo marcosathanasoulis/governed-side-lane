@@ -90,7 +90,6 @@ a transcript is not an artifact, so `--report-only` makes
 ```bash
 side-lane run --host claude --mode execute --provider <p> --model <m> \
   --lane-name <lane> --prompt-file <task> --report-only \
-  --allow-no-commit --no-publish \
   --capability shell
 ```
 
@@ -100,10 +99,58 @@ same command; no catalog or global budget change is involved). The `max_budget_u
 value is a client-side estimate guard, not proof that the upstream server or
 account enforces the same cap; verify provider-side and account limits separately.
 Add `shell` or `workspace-write` capabilities when the report generation/read
-tool needs to write artifacts, and use `--allow-no-commit` and `--no-publish` so
-a report-only outcome is not treated as a source commit or push. Ordinary execute
-and review lanes are untouched, and the flag is rejected before a worktree,
-credential, or host executable is touched anywhere else.
+tool needs to write artifacts. Ordinary execute and review lanes are untouched,
+and the flag is rejected before a worktree, credential, or host executable is
+touched anywhere else.
+
+**A report-only lane is judged on its report, not on implementation delivery.**
+Its worker is told to change no source and make no git change, so the execute
+rule — a commit plus a clean tree — would reject the very outcome this flag
+exists to accept, and `--allow-no-commit` could not repair it: the report file
+is itself one of the uncommitted paths that flag's condition excludes. The
+acceptance is therefore the report artifact plus the absence of source work:
+
+- the report at the fixed path must be this run's own (`current`, below);
+- the lane must hold **no commit** — a report-only lane that committed is
+  refused, and is never published automatically, with or without
+  `--no-publish` (a report is not a source deliverable and its branch has
+  nothing to make remote-contained);
+- the only lane files it may leave changed are the report itself — untracked
+  where the repository does not track `SIDE_LANE_REPORT.md`, modified where it
+  does — and **untracked** files under the lane's git-excluded
+  `.side-lane-scratch/` directory, the documented home for throwaway output and
+  screenshots. The exemption is read off real `git status` output, per path,
+  not off the path prefix: a *tracked* path under scratch that was modified,
+  staged, added, deleted, or renamed is source work and is refused like any
+  other. Any other path is implementation work too: the run exits `3`, names
+  the paths, and points at the scratch directory instead of accepting them
+  silently, because nothing uncommitted outside the report survives the
+  worktree. A path whose status cannot be read fails closed rather than being
+  exempted on its name;
+- the coordinator checkout is still compared against its pre-dispatch
+  baseline (exit `6`), an unreadable lane tree still fails closed (exit `4`),
+  and a non-zero worker exit is still retained. `--verify` runs only when the
+  run has not already failed — never after a non-zero worker exit, a
+  coordinator-checkout change, or a refused report — and never implies a
+  commit;
+- a verification may not change what the run judged. The runner re-reads the
+  lane, the report identity, and the coordinator checkout after `--verify`
+  runs; a verification command that commits on the lane branch, leaves or
+  removes a lane file, rewrites the report artifact, or writes into the
+  coordinator checkout refuses the lane (exit `3`, with the checkout case also
+  recorded as a source mutation). Nothing is reverted or deleted to hide it —
+  the change is reported and the lane is refused.
+
+The verdict above is the whole run's, not the report artifact's alone: for a
+report-only lane, `summary["delivered"]` is true only when the report verdict
+holds **and** the worker exited 0 **and** the source check found nothing **and**
+the checkout is unchanged **and** any `--verify` both passed and changed
+nothing. Exit codes alone do not carry that — a consuming model qualification
+step reads `summary["delivered"]` — so the flag is false on every one of those
+failures.
+
+`--allow-no-commit` and `--no-publish` are accepted and harmless here, but a
+report-only lane no longer needs either to be accepted or to avoid a push.
 
 Two checks enforce one run-bound freshness rule on one path. `SIDE_LANE_REPORT.md`
 counts only when it differs from what the runner recorded at that path before
@@ -143,7 +190,12 @@ summary names the reason (`report_state`: `current`, `stale`, `unusable`, or
 `unverified`) alongside `report_preexisting` and any `report_preserved` copy, so
 completion prose can never be recorded as an accepted delivery. A run that
 rewrites the inherited file, or writes any report when the lane started without
-one, is unaffected.
+one, is unaffected. `delivered` folds that report verdict together with the rest
+of the run for a report-only lane — with `report_only_committed`,
+`report_only_unexpected_paths`, and `report_only_verification_changes` recording
+the ways a lane can still be refused — rather than following the execute lane's
+`committed`/`uncommitted` pair, which continues to describe the lane tree
+exactly as it did.
 
 Scope of the claim: the hook is a quality gate on the lane's own artifact, not
 a sandbox — the same-user harness is not an OS boundary, and the run's existing

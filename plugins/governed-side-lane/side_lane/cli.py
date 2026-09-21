@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import os
@@ -39,7 +40,9 @@ from side_lane.adapters.devin import DevinAdapterError
 from side_lane.worktrees import (
     ASSIGNMENT_SCHEMA_VERSION,
     SCRATCH_DIR_NAME,
+    UNTRACKED_STATUS,
     AssignmentRecord,
+    LaneDelivery,
     WorktreeError,
     create_worktree,
     dispose_clean_worktree,
@@ -414,15 +417,23 @@ def make_parser() -> argparse.ArgumentParser:
         "same Claude Code invocation blocks one stop — feeding the same worker "
         "the reason to write the real findings report — and the runner itself "
         "refuses to accept the lane if the report is still missing, empty, or a "
-        "symlink when the worker exits. Requires a finite positive "
+        "symlink when the worker exits. The lane is then judged on that report "
+        "artifact rather than on implementation delivery, so no commit is "
+        "required — a report-only lane that commits is refused instead, as is "
+        "one leaving any file outside the report and the lane's git-excluded, "
+        "untracked .side-lane-scratch/ scratch tree (editing, staging, or "
+        "deleting a *tracked* path there is source work and is refused too). "
+        "delivered for such a lane follows the whole run: the worker's exit "
+        "status, the coordinator-checkout comparison, and the report verdict "
+        "all have to hold. The branch is never published, the coordinator "
+        "checkout is still checked for outside-lane writes, and an unreadable "
+        "lane still fails closed. Requires a finite positive "
         "max_budget_usd on the route, which is a client-side estimate guard, "
         "not proof that the upstream server or account enforces the same cap. "
         "The report file is an output exception to ordinary execute rules; the "
         "lane still runs in execute mode and is not a sandbox. Add shell or "
         "workspace-write capabilities when the report generation/read tool needs "
-        "to write artifacts, and use --allow-no-commit and --no-publish so a "
-        "report-only outcome is not treated as a source commit or push. "
-        "Ordinary execute and review lanes are unchanged",
+        "to write artifacts. Ordinary execute and review lanes are unchanged",
     )
     run.add_argument(
         "--allow-no-commit",
@@ -1261,6 +1272,248 @@ REPORT_STATE_DETAIL = {
     "unverified": "no run baseline was captured, so nothing can be claimed about it",
 }
 
+#: Lane-relative prefix a report-only lane may leave uncommitted besides the
+#: report artifact itself: the lane's git-excluded scratch tree, the
+#: governance-documented home for throwaway scripts, notes, intermediate
+#: output, and the screenshots a browser lane saves. Git normally never
+#: reports it, so this is a guard for the case where that exclusion is missing
+#: — the alternative is failing a lane over a path the rules told it to use.
+#: The prefix is only half the rule: see the status requirement below.
+REPORT_ONLY_SCRATCH_PREFIX = f"{SCRATCH_DIR_NAME}/"
+
+
+def _report_only_lane_artifacts(
+    worktree: Path, report_path: Path
+) -> "frozenset[str] | None":
+    """The lane path a report-only run's own artifact must occupy.
+
+    Exactly one path is accepted — the fixed report name directly inside the
+    lane worktree — and ``None`` means the report path this run recorded is not
+    that path. There is no second guess available in that state: the run cannot
+    tell which of the lane's changed files is the report it was dispatched to
+    collect, so it fails closed rather than judge a lane whose artifact it
+    cannot identify.
+    """
+
+    relative = os.path.relpath(os.fspath(report_path), os.fspath(worktree))
+    if os.path.isabs(relative) or os.sep in relative:
+        return None
+    if relative != report_stop_hook.REPORT_NAME:
+        return None
+    return frozenset({relative})
+
+
+def _report_only_unexpected_paths(
+    delivery: LaneDelivery, report_artifacts: "frozenset[str]"
+) -> tuple[str, ...]:
+    """Lane-relative paths a report-only lane left that are not its report.
+
+    Two entries are permitted, and each for its own reason:
+
+    * the report artifact itself, untracked where the repository does not
+      track it or modified where it does; rename/copy statuses are refused
+      because they can conceal a different source path;
+    * a path under the lane's scratch tree that git reports as *untracked*,
+      which is the throwaway artifact the governance told the lane to write
+      there and which the runner's own exclusion normally hides entirely.
+
+    The scratch exemption is deliberately not a prefix match on its own. A
+    repository may track a file under that directory, and git reports a
+    modification, deletion, staged addition, or rename of a tracked path with
+    one of those codes rather than ``??`` — that is source work by any other
+    name, and reading the prefix as permission would let a worker edit a
+    tracked file under a documented throwaway directory and still be accepted.
+    A path whose status the inspection did not carry is refused too: an
+    unknown state is not evidence of an untracked artifact, and the one thing
+    this rule must never do is guess in the worker's favour.
+    """
+
+    statuses = {entry.path: entry.status for entry in delivery.changed}
+    unexpected: list[str] = []
+    for path in delivery.uncommitted:
+        status = statuses.get(path)
+        if path in report_artifacts and not (
+            status is not None and ("R" in status or "C" in status)
+        ):
+            continue
+        if (
+            status is not None
+            and status == UNTRACKED_STATUS
+            and path.startswith(REPORT_ONLY_SCRATCH_PREFIX)
+        ):
+            continue
+        unexpected.append(path)
+    return tuple(unexpected)
+
+
+def _report_only_blocker(
+    *,
+    report_state: str | None,
+    report_path: Path,
+    report_artifacts: "frozenset[str] | None",
+    committed: bool,
+    unexpected: Sequence[str],
+) -> str | None:
+    """Why a report-only lane is not a delivery, or None when it is.
+
+    Report delivery is decided here, on the report artifact and the absence of
+    source work, and never on the commit state an execute lane is judged by.
+    The two are genuinely different deliverables: the worker is instructed to
+    change no source and make no git change, so requiring a commit plus a clean
+    tree would reject the very lane this flag exists to accept — and
+    ``--allow-no-commit`` could not repair that, because the report file is
+    itself one of the uncommitted paths that flag's condition excludes.
+
+    Nothing is relaxed by the split. Source-checkout changes still fail the run
+    (``LANE_SOURCE_MUTATED``), an unreadable lane still fails it
+    (``LANE_DELIVERY_UNVERIFIED``), and a worker that commits, or that leaves
+    any file outside the report and scratch exceptions, is not delivered.
+    """
+
+    if report_state != "current":
+        return (
+            f"--report-only lane produced no usable "
+            f"{report_stop_hook.REPORT_NAME} at {report_path}: "
+            f"{REPORT_STATE_DETAIL.get(report_state, 'the report could not be judged')}. "
+            "The worker's completion prose is not the report. The lane's "
+            "worktree, any commit, and the audit are intact."
+        )
+    if report_artifacts is None:
+        return (
+            f"--report-only lane's report path {report_path} is not "
+            f"{report_stop_hook.REPORT_NAME} at the lane worktree root, so this "
+            "run cannot tell the report apart from implementation work. Nothing "
+            "was removed. The lane's worktree and audit are intact."
+        )
+    if committed:
+        return (
+            "--report-only lane committed work, so it is not a report-only "
+            "outcome: the worker was told to make no git change, and a commit "
+            "also means a branch this run must not publish. Nothing was removed; "
+            "inspect the lane's commit on its branch before accepting it."
+        )
+    if unexpected:
+        listed = "\n  ".join(unexpected[:20])
+        more = (
+            ""
+            if len(unexpected) <= 20
+            else f"\n  ... and {len(unexpected) - 20} more"
+        )
+        return (
+            "report-only lane left changes that are not its report and are not "
+            f"untracked files in the lane's {SCRATCH_DIR_NAME}/ scratch tree:"
+            f"\n  {listed}{more}\n"
+            "Screenshots and intermediate output belong in the lane's "
+            f"git-excluded {SCRATCH_DIR_NAME}/ directory as new, untracked "
+            "files; editing or removing a *tracked* path is source work, and "
+            "source work needs an execute lane, not a report-only one. Nothing "
+            "was removed. The lane's worktree and audit are intact."
+        )
+    return None
+
+
+@dataclass(frozen=True)
+class _ReportOnlyState:
+    """The four facts a report-only verdict is made of, read from the tree.
+
+    Taken twice in a run that verifies: once from the verdict's own inputs,
+    and once immediately after the verification command, so that a command
+    which wrote into the lane or the coordinator checkout is a fact the run
+    reports rather than a change it silently absorbs into the delivery.
+    """
+
+    committed: bool
+    unexpected: tuple[str, ...]
+    source_changes: tuple[str, ...]
+    report_identity: "str | None"
+    #: Why the lane, or the coordinator checkout, could not be inspected at
+    #: all. A failed look is a fact about the run, not an exception to raise
+    #: past the verdict that has to report it.
+    lane_error: "str | None" = None
+    source_error: "str | None" = None
+
+
+def _report_only_state(
+    lane,
+    report_path: Path,
+    report_artifacts: "frozenset[str]",
+    repo: Path,
+    source_baseline: "frozenset[str]",
+) -> _ReportOnlyState:
+    """Read the report-only contract's inputs fresh from the real tree.
+
+    Never raises: an inspection that fails is one of the facts the caller has
+    to map onto a contract, and swallowing it into a delivery is exactly the
+    failure this state exists to prevent.
+    """
+
+    lane_error = None
+    committed = False
+    unexpected: tuple[str, ...] = ()
+    try:
+        delivery = lane_delivery(lane)
+    except WorktreeError as exc:
+        lane_error = str(exc)
+    else:
+        committed = delivery.committed
+        unexpected = _report_only_unexpected_paths(delivery, report_artifacts)
+    source_error = None
+    source_changes: tuple[str, ...] = ()
+    try:
+        source_changes = source_mutations(repo, source_baseline)
+    except WorktreeError as exc:
+        source_error = str(exc)
+    try:
+        identity = report_stop_hook.report_identity(report_path)
+    except report_stop_hook.UnsafeReportPath:
+        # Something the freshness gate would refuse now sits at the path; that
+        # is a change to the artifact from whatever was there before.
+        identity = None
+    return _ReportOnlyState(
+        committed=committed,
+        unexpected=unexpected,
+        source_changes=source_changes,
+        report_identity=identity,
+        lane_error=lane_error,
+        source_error=source_error,
+    )
+
+
+def _report_only_verification_changes(
+    before: _ReportOnlyState, after: _ReportOnlyState, *, report_path: Path
+) -> tuple[str, ...]:
+    """What the verification command itself introduced, in the operator's words.
+
+    ``--verify`` runs an arbitrary shell command inside the lane, so it can
+    commit, leave files, rewrite the report the verdict was just reached on, or
+    write into the coordinator checkout. None of that is the worker's report
+    delivery, and accepting the lane after it would report a state the run
+    never judged. Every difference found here makes the lane not delivered,
+    and nothing is removed to make the difference go away.
+    """
+
+    changes: list[str] = []
+    if after.report_identity != before.report_identity:
+        changes.append(f"it changed the run's report artifact at {report_path}")
+    if after.committed and not before.committed:
+        changes.append("it committed work on the lane branch")
+    for path in after.unexpected:
+        if path not in before.unexpected:
+            changes.append(f"it left {path} in the lane")
+    for path in after.source_changes:
+        if path not in before.source_changes:
+            changes.append(f"it changed the coordinator checkout at {path}")
+    if after.lane_error is not None:
+        changes.append(
+            f"the lane could not be inspected afterwards: {after.lane_error}"
+        )
+    if after.source_error is not None:
+        changes.append(
+            "the coordinator checkout could not be compared afterwards: "
+            f"{after.source_error}"
+        )
+    return tuple(changes)
+
 
 def _launch(
     args: argparse.Namespace, config: Mapping[str, Any], repo: Path, prompt: str,
@@ -1655,12 +1908,13 @@ def _launch(
     # same baseline — the in-loop Stop hook applied. A report is only this
     # run's artifact when it differs from what the worktree already held at
     # lane start: non-emptiness and a recent mtime cannot distinguish a real
-    # delivery from a report the repository carried at HEAD. A report-only lane
-    # is not delivered until this acceptance precondition passes; this decision
-    # must precede both publication and the summary so a committed branch
-    # cannot be mistaken for an accepted lane.
+    # delivery from a report the repository carried at HEAD. For a report-only
+    # lane this is the delivery verdict itself, and it must be reached before
+    # both publication and the summary, so neither a committed branch nor a
+    # stale report can be mistaken for an accepted lane.
     report_present: bool | None = None
     report_state: str | None = None
+    report_only_blocker: str | None = None
     report_path = lane.worktree / report_stop_hook.REPORT_NAME
     if report_only:
         if report_baseline is not None:
@@ -1678,29 +1932,127 @@ def _launch(
             if report_baseline is None or report_baseline.preserved_path is None
             else str(report_baseline.preserved_path)
         )
-    summary["delivered"] = delivery.delivered and (
-        not report_only or report_present is True
-    )
+        # This lane's deliverable is the report, so this — not the execute
+        # lane's commit-plus-clean-tree rule — is its delivery verdict. The
+        # lane tree verdict above is still wanted and still authoritative for
+        # what it says: whether the worker committed, and every path it left
+        # uncommitted, both of which this decision reads.
+        report_artifacts = _report_only_lane_artifacts(lane.worktree, report_path)
+        unexpected = (
+            ()
+            if report_artifacts is None
+            else _report_only_unexpected_paths(delivery, report_artifacts)
+        )
+        summary["report_only_unexpected_paths"] = list(unexpected)
+        summary["report_only_committed"] = delivery.committed
+        report_only_blocker = _report_only_blocker(
+            report_state=report_state,
+            report_path=report_path,
+            report_artifacts=report_artifacts,
+            committed=delivery.committed,
+            unexpected=unexpected,
+        )
     # 2026-09-17: a lane told to run the test suite ran it 18 times, saw
     # JSONDecodeError nine times, committed the failing tests anyway, and
     # exited 0 — caught only because a human re-ran the suite by hand. A
     # lane's claim about tests is prose in a transcript; the runner must
-    # check. Verification runs only for a delivered lane (an undelivered one
-    # already fails), and it runs BEFORE publication on purpose: publication
-    # must still happen either way, because preserving the branch is what
-    # stops work being stranded on one machine, and failing work is exactly
-    # the work someone needs to be able to look at.
+    # check. Verification runs BEFORE publication on purpose: publication must
+    # still happen either way, because preserving the branch is what stops
+    # work being stranded on one machine, and failing work is exactly the work
+    # someone needs to be able to look at.
+    #
+    # Whether a verification may be attempted at all. For an execute lane this
+    # is unchanged — a delivered lane and nothing else. A report-only lane
+    # adds this run's other outcomes to the gate, because the worker's exit
+    # status and the coordinator checkout are already decided by the time a
+    # verification would run: spending a shell command on a run that has
+    # failed for either reason changes nothing about the verdict, and that
+    # command is itself free to write into the lane, the report, or the
+    # checkout. The verdict, not the lane's git state, is what a report-only
+    # lane is gated on — gating it on `delivery.delivered` made --verify a
+    # silent no-op for that lane, which is exactly the "the operator believes
+    # a check ran" failure this runner refuses elsewhere.
+    if report_only:
+        verify_eligible = (
+            report_only_blocker is None
+            and not result.returncode
+            and source_check_error is None
+            and not source_changes
+        )
+    else:
+        verify_eligible = delivery.delivered
     verify = None
-    if getattr(args, "verify", None) and delivery.delivered:
+    verification_changes: tuple[str, ...] = ()
+    if report_only:
+        summary["report_only_verification_changes"] = []
+    if getattr(args, "verify", None) and verify_eligible:
+        before = None
+        if report_only:
+            try:
+                report_identity = report_stop_hook.report_identity(report_path)
+            except report_stop_hook.UnsafeReportPath:
+                report_identity = None
+            before = _ReportOnlyState(
+                committed=delivery.committed,
+                unexpected=unexpected,
+                source_changes=tuple(source_changes or ()),
+                report_identity=report_identity,
+            )
         verify = verify_lane(lane, args.verify)
         summary["verified"] = verify.passed
         summary["verify_command"] = verify.command
         summary["verify_exit"] = verify.exit_code
         summary["verify_output"] = verify.output
+        if report_only:
+            # The command may have committed, left files, rewritten the report
+            # the verdict was just reached on, or written into the coordinator
+            # checkout. Re-read the tree instead of assuming it did not: the
+            # lane that gets accepted must be the lane that was judged.
+            after = _report_only_state(
+                lane, report_path, report_artifacts or frozenset(), repo,
+                source_baseline,
+            )
+            verification_changes = _report_only_verification_changes(
+                before, after, report_path=report_path
+            )
+            summary["report_only_verification_changes"] = list(verification_changes)
+            if after.source_changes:
+                # A checkout change is reported through the same channel and
+                # the same exit code whether a worker or --verify made it, so
+                # extend the recorded delta rather than hide it behind the
+                # lane-level refusal below.
+                merged = list(source_changes or ())
+                merged.extend(
+                    path for path in after.source_changes if path not in merged
+                )
+                source_changes = tuple(merged)
+                summary["source_changes"] = list(source_changes)
+                summary["source_mutated"] = True
     else:
         # None, not False: nobody rendered a verdict, and the summary must
         # not imply one was reached and lost.
         summary["verified"] = None
+    # The report-only verdict is reached here, after verification, so the
+    # machine-readable `delivered` a downstream consumer (a model
+    # qualification, for one) reads can never claim a lane this run has
+    # already failed: a non-zero worker exit, an unverifiable or changed
+    # coordinator checkout, a failed verification, and a verification that
+    # dirtied the lane are all part of the same verdict as the report itself.
+    # Exit codes alone would not be enough — a consumer that reads the summary
+    # never sees them. An execute lane's `delivered` stays exactly what it
+    # was: the lane tree's own commit-plus-clean-tree answer.
+    if report_only:
+        delivered = (
+            report_only_blocker is None
+            and not result.returncode
+            and source_check_error is None
+            and not source_changes
+            and (verify is None or verify.passed)
+            and not verification_changes
+        )
+    else:
+        delivered = delivery.delivered
+    summary["delivered"] = delivered
     publish_warning = None
     if not result.returncode and summary["delivered"]:
         # A delivered lane's commits live on one machine until they are pushed:
@@ -1710,7 +2062,15 @@ def _launch(
         # reclaim the worktree later with its guards intact. A failed push is
         # reported, never fatal: the work is committed with or without the
         # remote, and failing here would be worse than today's behavior.
-        if getattr(args, "no_publish", False):
+        if report_only:
+            # Never published, with or without --no-publish: a report-only
+            # lane's deliverable is the report artifact in its worktree, and an
+            # accepted one has no commit on its branch to make remote-contained
+            # (one that did commit is rejected above, so this cannot hide an
+            # unpublished commit). Recorded explicitly, as --no-publish does,
+            # so "not pushed" is never confused with "publishing was skipped".
+            summary["published"] = None
+        elif getattr(args, "no_publish", False):
             summary["published"] = None
         else:
             try:
@@ -1733,24 +2093,29 @@ def _launch(
             f"for command: {verify.command}\n{verify.output}",
             file=sys.stderr,
         )
-    if result.returncode:
-        return result.returncode
-    if report_only and not report_present:
-        # One feedback round was already spent inside the invocation; the
-        # report is still not this run's. A lane that wrote its work but no
-        # report is not an accepted delivery, and the exit code says so rather
-        # than leaving an operator to read the prose. Nothing was removed: the
-        # lane's commit, worktree, and audit are all intact. The outer GCF
-        # consumer's own report collection stays authoritative for source
-        # changes, containment, sizes, and scrubbing.
+    if verification_changes:
+        # Not a warning: `delivered` is false because of it, and the operator
+        # has to know the difference between "the worker left this" and "the
+        # verification command left this" before touching the lane.
         print(
-            f"side-lane: --report-only lane produced no usable "
-            f"{report_stop_hook.REPORT_NAME} at {report_path}: "
-            f"{REPORT_STATE_DETAIL.get(report_state, 'the report could not be judged')}. "
-            "The worker's completion prose is not the report. The lane's commit "
-            "and audit are intact.",
+            "side-lane: --verify changed what this report-only run had judged: "
+            + "; ".join(verification_changes)
+            + ". Nothing was removed, but this run judged the lane as it stood "
+            "before the command ran, so the lane is not a delivery.",
             file=sys.stderr,
         )
+    if result.returncode:
+        return result.returncode
+    if report_only and report_only_blocker is not None:
+        # One feedback round was already spent inside the invocation; the lane
+        # is still not an accepted report-only delivery — no report this run
+        # wrote, a commit it was told not to make, or changes that are neither
+        # the report nor its scratch tree — and the exit code says so rather
+        # than leaving an operator to read the prose. Nothing was removed: the
+        # lane's worktree, any commit, and the audit are all intact. The outer
+        # GCF consumer's own report collection stays authoritative for source
+        # changes, containment, sizes, and scrubbing.
+        print(f"side-lane: {report_only_blocker}", file=sys.stderr)
         return LANE_NOT_DELIVERED
     if verify is not None and not verify.passed:
         return LANE_VERIFY_FAILED
@@ -1783,11 +2148,20 @@ def _launch(
             file=sys.stderr,
         )
         return LANE_SOURCE_MUTATED
-    if delivery.delivered:
+    if verification_changes:
+        # The message above already names what the command changed. Last of the
+        # failure guards on purpose: a verification that dirtied the
+        # coordinator checkout is a source mutation (exit 6, above), and one
+        # that failed is an exit 5 — this is the remaining case, where the
+        # command exited 0 and the lane is still not the state that was judged.
+        return LANE_NOT_DELIVERED
+    if delivered:
         return 0
     # --allow-no-commit covers a lane whose intended outcome is no commit. It
     # does NOT excuse a lane that committed and then abandoned the rest: that
-    # is partial delivery, and the abandoned half is lost either way.
+    # is partial delivery, and the abandoned half is lost either way. It is
+    # also what a report-only lane no longer needs: that outcome is judged on
+    # the report, not on a commit the worker was told not to make.
     if getattr(args, "allow_no_commit", False) and not delivery.uncommitted:
         return 0
     print(f"side-lane: {delivery.failure_reason()}", file=sys.stderr)
