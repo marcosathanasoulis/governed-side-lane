@@ -15,7 +15,6 @@ import tempfile
 from typing import Any, Callable, Mapping, Sequence
 
 from side_lane import devin_command_policy
-from side_lane.capabilities import RUN_CONFIG_CAPABILITIES, USER_SCOPE_MCP_CAPABILITIES
 from side_lane.credentials import scrub_backend_environment
 from side_lane.governance import known_capabilities, lane_system_prompt, tool_policy
 from side_lane.mcp_run_config import (
@@ -28,9 +27,7 @@ from side_lane.mcp_run_config import (
 )
 from side_lane.read_roots import read_rule, scope_note
 from side_lane.results import LaneResult
-from side_lane.web_domains import devin_rules, scope_note as web_scope_note
 from side_lane.worktrees import (
-    SCRATCH_DIR_NAME,
     WorktreeError,
     ensure_devin_local_mcp_exclusion,
     ensure_devin_local_mcp_untracked,
@@ -74,26 +71,6 @@ _PYTHON_INTERPRETER_NAME = re.compile(r"python(?:\d+(?:\.\d+)*)?")
 #: pregrant.  It has no path or shell-expansion semantics and is paired
 #: exactly with an already-granted Python interpreter.
 _NATIVE_ENV_PREGRANT = "PYTHONDONTWRITEBYTECODE=1"
-
-#: Exact heading of the generated shell-output-path note. It doubles as the
-#: marker a test (or a reader) uses to tell this note apart from the task text.
-NATIVE_EXEC_NOTE_HEADING = "## Lane shell output paths"
-
-
-def _native_exec_note(worktree: Path) -> str:
-    """Use the in-lane spelling verified with native redirect permissions."""
-
-    scratch = worktree / SCRATCH_DIR_NAME
-    target = shlex.quote(str(scratch / "out.txt"))
-    return "\n".join([
-        NATIVE_EXEC_NOTE_HEADING,
-        "Use an absolute path inside your lane worktree for shell output redirects,",
-        f"for example: python3 -c '...' > {target} 2>&1",
-        f"Use `{scratch}/` for temporary output and logs; never write outside the lane worktree.",
-        "Especially with `exec.workdir`, native Devin may request confirmation for",
-        "an equivalent relative target. Do not use relative `../` targets; spell",
-        "the absolute in-lane target instead. Existing tool grants and task scope still apply.",
-    ])
 
 
 def _nonempty(value: object, label: str) -> str:
@@ -189,7 +166,6 @@ def build_command(
     prompt: str, export_path: str | Path, config_path: str | Path,
     mode: str = "execute", capabilities: Sequence[str] = (),
     read_roots: Sequence[Path] = (),
-    web_domains: Sequence[str] = (),
     run_mcp_servers: "Mapping[str, McpRunServer] | None" = None,
 ) -> tuple[str, ...]:
     program = _nonempty(executable, "Devin executable")
@@ -203,18 +179,11 @@ def build_command(
         raise DevinAdapterError(f"unknown capability: {', '.join(unknown)}")
     task = _nonempty(prompt, "prompt")
     note = scope_note(read_roots)
-    web_note = web_scope_note(web_domains)
-    if web_note:
-        note = f"{note}\n\n{web_note}" if note else web_note
     if run_mcp_servers:
         # The registrations themselves are delivered through the lane
         # worktree's local-scope MCP file (see `launch`); the task text only
         # tells the worker they exist and that presence is not authentication.
         note = (note or "") + startup_note(run_mcp_servers)
-    # Shared across native Devin models; text only, with no permission changes.
-    if "shell" in set(capabilities):
-        exec_note = _native_exec_note(worktree_path)
-        note = f"{note}\n\n{exec_note}" if note else exec_note
     governed = (lane_system_prompt(mode, repo_path)
                 + (f"\n\n{note}" if note else "")
                 + "\n\n# Approved task\n\n" + task)
@@ -407,8 +376,7 @@ def _runtime_config(model: str, capabilities: Sequence[str],
                     user_config: Mapping[str, Any] | None = None,
                     policy_hook_command: str | None = None,
                     worktree: Path | None = None,
-                    read_roots: Sequence[Path] = (),
-                    web_domains: Sequence[str] = ()) -> dict[str, Any]:
+                    read_roots: Sequence[Path] = ()) -> dict[str, Any]:
     """Build Devin's runtime config from the canonical tool policy.
 
     File tools are scoped to real directories: the lane worktree, plus any
@@ -422,16 +390,6 @@ def _runtime_config(model: str, capabilities: Sequence[str],
     still normalises `-C` before matching deny rules.
     """
     allow = _file_tool_rules(worktree, read_roots)
-    # One `Fetch(https://<host>/*)` rule per coordinator-granted documentation
-    # domain, and nothing else: no capability unlocks a web rule, so shell or
-    # workspace authority never widens into network reach, and a bare `Fetch`
-    # (every host) is never emitted. `devin_rules` re-validates each host, so
-    # a synthetic direct call fails closed instead of rendering a wider rule.
-    # The PreToolUse hook does not cover fetch: the rule above is the whole
-    # control on this host, and it matches permissions, not network traffic.
-    for rule in devin_rules(web_domains):
-        if rule not in allow:
-            allow.append(rule)
     policy = tool_policy()
     for capability in sorted(set(capabilities) & {"shell", "workspace-write", "git-push"}):
         for rule in policy.allowed.get(capability, ()):
@@ -462,8 +420,6 @@ def _runtime_config(model: str, capabilities: Sequence[str],
     # the canonical hook still enforces the underlying grant, deny rules,
     # and read/write bounds.
     if "shell" in capabilities:
-        if "Exec(env)" not in allow:
-            allow.append("Exec(env)")
         extra_pregrants: list[str] = []
         for rule in allow:
             if not (rule.startswith("Exec(") and rule.endswith(")")):
@@ -489,18 +445,12 @@ def _runtime_config(model: str, capabilities: Sequence[str],
     # read as capability evidence — no connector-name registration and no
     # permission-ID documentation substitutes for a successful call. A missing
     # grant makes Devin prompt, and a prompt ends a non-interactive run.
-    # Every cm-services-family capability — asana, drive, gcloud, database,
-    # algolia, contentful, and Gateway — shares the fixed user-global
-    # ``cm-services`` registration the coordinator provisions into the worker
-    # host's Devin user config; each capability admits only its own exact
+    # ``asana-read``/``drive-read`` share the fixed user-global ``cm-services``
+    # registration the coordinator provisions into the worker host's Devin
+    # user config; each capability admits only its own exact
     # ``mcp__cm-services__<tool>`` rules from the canonical policy — the shared
-    # server never widens one grant into another's tools. The granted set is
-    # the canonical ``side_lane.capabilities`` partition rather than a second
-    # hand-maintained list here, so a newly added capability cannot be granted
-    # on Claude but silently dropped on Devin.
-    for capability in sorted(
-        set(capabilities) & (USER_SCOPE_MCP_CAPABILITIES | RUN_CONFIG_CAPABILITIES)
-    ):
+    # server never widens one grant into the other's tools.
+    for capability in sorted(set(capabilities) & {"playwright", "gitnexus", "codegraph", "slack-read", "aws-read", "asana-read", "drive-read", "gcloud-read", "database-read", "algolia-read", "contentful-read", "contentful-master-read"}):
         for rule in policy.allowed.get(capability, ()):
             if rule.startswith("mcp__") and rule not in allow:
                 allow.append(rule)
@@ -665,7 +615,6 @@ def launch(
     prompt: str, mode: str = "execute", capabilities: Sequence[str] = (),
     env: Mapping[str, str] | None = None, popen: PopenFactory = subprocess.Popen,
     user_config_path: Path | None = None, read_roots: Sequence[Path] = (),
-    web_domains: Sequence[str] = (),
     run_mcp_servers: "Mapping[str, McpRunServer] | None" = None,
 ) -> LaneResult:
     repo_path = _worktree(repo)
@@ -702,15 +651,14 @@ def launch(
                                           str(policy_path)))
     config_path.write_text(json.dumps(_runtime_config(
         model, capabilities, _load_user_config(user_config_path), policy_hook_command,
-        worktree=worktree_path, read_roots=read_roots, web_domains=web_domains
+        worktree=worktree_path, read_roots=read_roots
     ), indent=2) + "\n",
                            encoding="utf-8")
     command = build_command(executable=executable, repo=repo_path, worktree=worktree_path,
         provider=provider, model=model, provider_config=provider_config,
         model_config=model_config, prompt=prompt, export_path=export_path,
         config_path=config_path, mode=mode, capabilities=capabilities,
-        read_roots=read_roots, web_domains=web_domains,
-        run_mcp_servers=run_mcp_servers)
+        read_roots=read_roots, run_mcp_servers=run_mcp_servers)
     child_env = build_environment(os.environ if env is None else env)
     # Per-run MCP delivery (execute only — this adapter supports no other
     # mode): validate env references against the environment the worker child

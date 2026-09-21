@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
 import json
-import shlex
 import shutil
 import subprocess
 import sys
@@ -9,19 +8,11 @@ import tempfile
 import unittest
 from unittest import mock
 
-from side_lane import cli, report_stop_hook
+from side_lane import cli
 from side_lane.adapters import claude
-
-SUPPORTS_STRICT_MCP = mock.Mock(
-    return_value=subprocess.CompletedProcess([], 0, "--strict-mcp-config", "")
-)
 
 
 class ClaudeAdapterTests(unittest.TestCase):
-    def setUp(self):
-        claude._strict_mcp_executable_cache["claude"] = True
-
-
     native = {"gateway": "native-claude", "auth_method": "oauth", "billable": False}
     glm = {"gateway": "direct-zai", "auth_method": "provider-key", "billable": True, "base_url": "https://api.z.ai/api/anthropic"}
 
@@ -38,9 +29,7 @@ class ClaudeAdapterTests(unittest.TestCase):
                     claude.launch(executable="claude", repo=self.repo(root, "repo"),
                         worktree=self.repo(root, "lane"), provider="claude", model="claude-sonnet-5",
                         provider_config=self.native, model_config=config, prompt="task",
-                        mode=mode, env={"PATH": "/bin"}, runner=worker,
-                            readiness_runner=SUPPORTS_STRICT_MCP,
-                        )
+                        mode=mode, env={"PATH": "/bin"}, runner=worker)
                     self.assertEqual(worker.call_args.kwargs["timeout"], expected)
 
     def test_bounded_process_accepts_subprocess_run_capture_kwargs(self) -> None:
@@ -85,34 +74,6 @@ class ClaudeAdapterTests(unittest.TestCase):
         self.assertIn("user,project,local", execute)
         self.assertIn("Injected canonical side-lane governance", execute[-1])
 
-    def test_execute_prompt_closes_planning_gate_without_overriding_blockers(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-            read_root = root / "shared-instructions"
-            read_root.mkdir()
-            execute = claude.build_command(
-                executable="claude", repo=repo, worktree=lane,
-                provider="claude", model="claude-sonnet-5", provider_config=self.native,
-                model_config={"runtime_model": "claude-sonnet-5", "protocol": "native-claude"},
-                prompt="implement the approved change",
-                read_roots=(read_root,),
-            )
-            review = claude.build_command(
-                executable="claude", repo=repo, worktree=lane,
-                provider="claude", model="claude-sonnet-5", provider_config=self.native,
-                model_config={"runtime_model": "claude-sonnet-5", "protocol": "native-claude-readonly"},
-                prompt="review the change", mode="review",
-            )
-
-        execute_prompt = execute[execute.index("--append-system-prompt") + 1]
-        review_prompt = review[review.index("--append-system-prompt") + 1]
-        self.assertIn("already-approved delegated execute task", execute_prompt)
-        self.assertIn("do not invoke coordinator planning or routing approval gates", execute_prompt)
-        self.assertIn("genuine authority, credential, or scope blockers", execute_prompt)
-        self.assertTrue(execute_prompt.endswith("approval.\n"))
-        self.assertNotIn("already-approved delegated execute task", review_prompt)
-
     def test_routed_execute_sets_supported_context_budget_controls(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -145,13 +106,7 @@ class ClaudeAdapterTests(unittest.TestCase):
             config_path.write_bytes(original)
             settings_dir = home / ".claude"
             settings_dir.mkdir()
-            settings = (
-                b'{"permissions":{"allow":["Bash(git status)"]},'
-                b'"enabledPlugins":{"superpowers@claude-plugins-official":true,'
-                b'"other@marketplace":true,"disabled@marketplace":false},'
-                b'"hooks":{"PostToolUse":[{"matcher":"Bash",'
-                b'"hooks":[{"type":"command","command":"keep-hook"}]}]}}\n'
-            )
+            settings = b'{"permissions":{"allow":["Bash(git status)"]}}\n'
             (settings_dir / "settings.json").write_bytes(settings)
             (settings_dir / "CLAUDE.md").write_text("global context", encoding="utf-8")
             (settings_dir / "skills").mkdir()
@@ -166,10 +121,7 @@ class ClaudeAdapterTests(unittest.TestCase):
                 trusted = json.loads((child_config / ".claude.json").read_text())
                 observed["child_config"] = child_config
                 observed["config"] = trusted
-                observed["settings"] = json.loads(
-                    (child_config / "settings.json").read_text())
-                observed["hook_config"] = json.loads(
-                    (child_config / "routed-read-pagination.json").read_text())
+                observed["settings"] = (child_config / "settings.json").read_bytes()
                 observed["context_symlink"] = (child_config / "CLAUDE.md").is_symlink()
                 observed["skill"] = (child_config / "skills" / "probe.md").read_text()
                 observed["plugins_symlink"] = (child_config / "plugins").is_symlink()
@@ -195,7 +147,6 @@ class ClaudeAdapterTests(unittest.TestCase):
                               }},
                 prompt="task", env={"HOME": str(home), "PATH": "/bin"},
                 secret="router-secret", runner=runner,
-                readiness_runner=SUPPORTS_STRICT_MCP,
             )
             self.assertEqual(result.returncode, 0)
             child_config = observed["child_config"]
@@ -206,240 +157,13 @@ class ClaudeAdapterTests(unittest.TestCase):
             self.assertNotIn("other", observed["config"])
             self.assertEqual(observed["config"]["projects"][str(repo.resolve())]["hasTrustDialogAccepted"], True)
             self.assertEqual(observed["config"]["projects"][str(lane.resolve())]["hasTrustDialogAccepted"], True)
-            self.assertEqual(observed["settings"]["permissions"],
-                             {"allow": ["Bash(git status)"]})
-            self.assertEqual(observed["settings"]["enabledPlugins"], {
-                "superpowers@claude-plugins-official": False,
-                "other@marketplace": True,
-                "disabled@marketplace": False,
-            })
-            self.assertEqual(observed["settings"]["hooks"]["PostToolUse"], [{
-                "matcher": "Bash",
-                "hooks": [{"type": "command", "command": "keep-hook"}],
-            }])
-            entries = observed["settings"]["hooks"]["PreToolUse"]
-            self.assertEqual(len(entries), 1)
-            self.assertEqual(entries[0]["matcher"], "Read")
-            hook_command = entries[0]["hooks"][0]["command"]
-            self.assertIn("routed_read_pagination.py", hook_command)
-            self.assertEqual(observed["hook_config"], {"limit": 200})
+            self.assertEqual(observed["settings"], settings)
             self.assertTrue(observed["context_symlink"])
             self.assertTrue(observed["plugins_symlink"])
             self.assertEqual(observed["skill"], "skill")
             self.assertEqual(observed["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "16384")
             self.assertEqual(config_path.read_bytes(), original)
             self.assertEqual((settings_dir / "settings.json").read_bytes(), settings)
-
-    def routed_model_config(self) -> dict:
-        return {"runtime_model": "routed-selector",
-                "protocol": "anthropic-compatible",
-                "qualification": {"verified": True, "verified_on": "2026-09-19",
-                                  "source": "receipt"},
-                "routing_policy_contract": {
-                    "requested_selector": "routed-selector",
-                    "allowed_upstream_models": ["deepseek-flash"],
-                    "settings_precedence": "verified",
-                }}
-
-    def routed_provider_config(self) -> dict:
-        return {"gateway": "omniroute-router", "auth_method": "provider-key",
-                "billable": True, "base_url": "https://omniroute.example"}
-
-    def test_routed_execute_preserves_inherited_pre_tool_use_hooks(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-            home = root / "home"
-            settings_dir = home / ".claude"
-            settings_dir.mkdir(parents=True)
-            inherited_hook = {"matcher": "^Bash$",
-                              "hooks": [{"type": "command", "command": "check"}]}
-            (settings_dir / "settings.json").write_text(json.dumps({
-                "permissions": {"allow": ["Bash(git status)"]},
-                "hooks": {"PreToolUse": [inherited_hook],
-                          "PostToolUse": [{"matcher": "x", "hooks": []}]},
-            }), encoding="utf-8")
-            observed: dict[str, object] = {}
-
-            def runner(command, **kwargs):
-                child_config = Path(kwargs["env"]["CLAUDE_CONFIG_DIR"])
-                observed["settings"] = json.loads(
-                    (child_config / "settings.json").read_text())
-                return subprocess.CompletedProcess(
-                    command, 0,
-                    '{"type":"result","subtype":"success","model":"deepseek-flash",'
-                    '"usage":{"input_tokens":1,"output_tokens":1}}\n',
-                    "",
-                )
-
-            result = claude.launch(
-                executable="claude", repo=repo, worktree=lane,
-                provider="omniroute", model="routed-selector",
-                provider_config=self.routed_provider_config(),
-                model_config=self.routed_model_config(),
-                prompt="task", env={"HOME": str(home), "PATH": "/bin"},
-                secret="router-secret", runner=runner,
-                readiness_runner=SUPPORTS_STRICT_MCP,
-            )
-            self.assertEqual(result.returncode, 0)
-            settings = observed["settings"]
-            self.assertEqual(settings["permissions"],
-                             {"allow": ["Bash(git status)"]})
-            self.assertEqual(settings["hooks"]["PostToolUse"],
-                             [{"matcher": "x", "hooks": []}])
-            entries = settings["hooks"]["PreToolUse"]
-            self.assertEqual(entries[0], inherited_hook)
-            self.assertEqual(len(entries), 2)
-            self.assertEqual(entries[1]["matcher"], "Read")
-            self.assertIn("routed_read_pagination.py",
-                          entries[1]["hooks"][0]["command"])
-
-    def test_routed_execute_rejects_non_array_pre_tool_use_hooks(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-            home = root / "home"
-            settings_dir = home / ".claude"
-            settings_dir.mkdir(parents=True)
-            (settings_dir / "settings.json").write_text(
-                '{"hooks":{"PreToolUse":"not-an-array"}}', encoding="utf-8")
-            worker = mock.Mock(
-                return_value=subprocess.CompletedProcess([], 0, "", ""))
-            with self.assertRaisesRegex(claude.ClaudeAdapterError,
-                                        "hooks.PreToolUse must be an array"):
-                claude.launch(
-                    executable="claude", repo=repo, worktree=lane,
-                    provider="omniroute", model="routed-selector",
-                    provider_config=self.routed_provider_config(),
-                    model_config=self.routed_model_config(),
-                    prompt="task", env={"HOME": str(home), "PATH": "/bin"},
-                    secret="router-secret", runner=worker,
-                    readiness_runner=SUPPORTS_STRICT_MCP,
-                )
-            worker.assert_not_called()
-
-    def test_routed_execute_rejects_malformed_inherited_settings(self) -> None:
-        # Every malformed shape fails closed at launch preparation rather
-        # than silently dropping the inherited settings or the hook.
-        for label, settings_text, message in (
-                ("hooks_not_a_mapping",
-                 '{"hooks":["not-a-mapping"]}',
-                 "Claude settings hooks must be a JSON object"),
-                ("settings_not_an_object",
-                 '["not-an-object"]',
-                 "Claude settings must be a JSON object"),
-                ("settings_not_json",
-                 '{"hooks": ',
-                 "Claude settings are invalid JSON"),
-                ("enabled_plugins_not_a_mapping",
-                 '{"enabledPlugins":[]}',
-                 "Claude settings enabledPlugins must be a JSON object"),
-                ("enabled_plugins_null",
-                 '{"enabledPlugins":null}',
-                 "Claude settings enabledPlugins must be a JSON object"),
-                ("enabled_plugin_not_boolean",
-                 '{"enabledPlugins":{"superpowers@claude-plugins-official":"yes"}}',
-                 "Claude settings enabledPlugins entries must map plugin names to booleans"),
-        ):
-            with self.subTest(label), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-                home = root / "home"
-                settings_dir = home / ".claude"
-                settings_dir.mkdir(parents=True)
-                (settings_dir / "settings.json").write_text(
-                    settings_text, encoding="utf-8")
-                worker = mock.Mock(
-                    return_value=subprocess.CompletedProcess([], 0, "", ""))
-                with self.assertRaisesRegex(claude.ClaudeAdapterError, message):
-                    claude.launch(
-                        executable="claude", repo=repo, worktree=lane,
-                        provider="omniroute", model="routed-selector",
-                        provider_config=self.routed_provider_config(),
-                        model_config=self.routed_model_config(),
-                        prompt="task", env={"HOME": str(home), "PATH": "/bin"},
-                        secret="router-secret", runner=worker,
-                        readiness_runner=SUPPORTS_STRICT_MCP,
-                    )
-                worker.assert_not_called()
-
-    def test_pagination_hook_entry_carries_timeout_and_resolved_path(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-            home = root / "home"
-            home.mkdir()
-            observed: dict[str, object] = {}
-
-            def runner(command, **kwargs):
-                child_config = Path(kwargs["env"]["CLAUDE_CONFIG_DIR"])
-                observed["settings"] = json.loads(
-                    (child_config / "settings.json").read_text())
-                return subprocess.CompletedProcess(
-                    command, 0,
-                    '{"type":"result","subtype":"success","model":"deepseek-flash",'
-                    '"usage":{"input_tokens":1,"output_tokens":1}}\n',
-                    "",
-                )
-
-            claude.launch(
-                executable="claude", repo=repo, worktree=lane,
-                provider="omniroute", model="routed-selector",
-                provider_config=self.routed_provider_config(),
-                model_config=self.routed_model_config(),
-                prompt="task", env={"HOME": str(home), "PATH": "/bin"},
-                secret="router-secret", runner=runner,
-                readiness_runner=SUPPORTS_STRICT_MCP,
-            )
-            entry = observed["settings"]["hooks"]["PreToolUse"][0]["hooks"][0]
-            self.assertNotIn("enabledPlugins", observed["settings"])
-            self.assertEqual(entry["type"], "command")
-            self.assertEqual(entry["timeout"], 5)
-            # An unresolved or relative module path would make the
-            # interpreter exit 2, and a non-zero hook exit blocks the Read.
-            module_argument = shlex.split(entry["command"])[1]
-            self.assertTrue(Path(module_argument).is_absolute())
-            self.assertEqual(module_argument,
-                             str(Path(module_argument).resolve()))
-            self.assertTrue(Path(module_argument).is_file())
-
-    def test_native_execute_and_review_install_no_pagination_hook(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-            for mode, protocol in (("execute", "native-claude"),
-                                   ("review", "native-claude-readonly")):
-                with self.subTest(mode=mode):
-                    observed: dict[str, object] = {}
-
-                    def runner(command, **kwargs):
-                        observed["env"] = kwargs["env"]
-                        return subprocess.CompletedProcess(command, 0, "done", "")
-
-                    claude.launch(
-                        executable="claude", repo=repo, worktree=lane,
-                        provider="claude", model="claude-sonnet-5",
-                        provider_config=self.native,
-                        model_config={"runtime_model": "claude-sonnet-5",
-                                      "protocol": protocol},
-                        prompt="task", mode=mode, env={"PATH": "/bin"},
-                        runner=runner,
-                        readiness_runner=SUPPORTS_STRICT_MCP,
-                    )
-                    self.assertNotIn("CLAUDE_CONFIG_DIR", observed["env"])
-            # Routed providers are unqualified for review lanes and fail
-            # closed before the routed config home is ever prepared.
-            with self.assertRaises(claude.ClaudeAdapterError):
-                claude.launch(
-                    executable="claude", repo=repo, worktree=lane,
-                    provider="omniroute", model="routed-selector",
-                    provider_config=self.routed_provider_config(),
-                    model_config=self.routed_model_config(),
-                    prompt="review", mode="review",
-                    env={"PATH": "/bin"}, secret="router-secret",
-                    runner=mock.Mock(),
-                    readiness_runner=SUPPORTS_STRICT_MCP,
-                )
 
     def test_routed_launch_cleans_isolated_home_when_validation_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -465,7 +189,6 @@ class ClaudeAdapterTests(unittest.TestCase):
                                   }},
                     prompt="task", env={"HOME": str(home), "PATH": "/bin"},
                     secret="router-secret", runner=mock.Mock(),
-                    readiness_runner=SUPPORTS_STRICT_MCP,
                 )
             self.assertEqual(list(root.glob(".side-lane-claude-config-*")), [])
 
@@ -493,7 +216,6 @@ class ClaudeAdapterTests(unittest.TestCase):
                                   }},
                     prompt="task", env={"HOME": str(home), "PATH": "/bin"},
                     secret="router-secret", runner=worker,
-                    readiness_runner=SUPPORTS_STRICT_MCP,
                 )
             worker.assert_not_called()
             self.assertEqual(list(root.glob(".side-lane-claude-config-*")), [])
@@ -541,134 +263,6 @@ class ClaudeAdapterTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("demo@local", result.stdout)
-
-    def test_strict_command_uses_parser_safe_mcp_config_form(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-            command = claude.build_command(
-                executable="claude", repo=repo, worktree=lane, provider="omniroute",
-                model="kimi-k2.6", provider_config={"gateway": "omniroute-router", "auth_method": "provider-key", "billable": True, "base_url": "https://omniroute.example"},
-                model_config={"runtime_model": "kimi-k2.6", "protocol": "anthropic-compatible", "qualification": {"verified": True, "verified_on": "2026-09-21", "source": "test"}, "routing_policy_contract": {"requested_selector": "kimi-k2.6", "allowed_upstream_models": ["kimi-k2.6"], "settings_precedence": "verified"}},
-                prompt="task", capabilities=("gateway-read",),
-                strict_mcp_config_path=root / "strict.json", strict_mcp_support=True,
-            )
-        index = command.index("--strict-mcp-config")
-        self.assertEqual(command[index + 1], f"--mcp-config={root / 'strict.json'}")
-
-    def test_strict_readiness_cleans_temp_registry_when_bundle_install_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            bundle = root / "broken.json"
-            bundle.write_text("{}", encoding="utf-8")
-            probe_dir = root / "probe"
-            with mock.patch.object(claude.tempfile, "mkdtemp", return_value=str(probe_dir)), \
-                 mock.patch.object(claude, "_install_strict_readiness_config", side_effect=claude.ClaudeAdapterError("broken bundle")), \
-                 mock.patch.object(claude.shutil, "rmtree") as cleanup:
-                with self.assertRaisesRegex(claude.ClaudeAdapterError, "broken bundle"):
-                    claude._require_mcp_readiness(
-                        executable="claude", cwd=root, capabilities=("gateway-read",),
-                        env={}, runner=SUPPORTS_STRICT_MCP, strict_mcp_config_path=bundle,
-                    )
-            cleanup.assert_called_once_with(probe_dir, ignore_errors=True)
-
-    def test_strict_readiness_fake_cli_rejects_invalid_bundle_despite_global_server(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            config_dir = root / "config"
-            config_dir.mkdir()
-            (config_dir / ".claude.json").write_text(
-                json.dumps({"mcpServers": {"cm-services": {"command": "global-server"}}}),
-                encoding="utf-8",
-            )
-            fake = root / "fake-claude"
-            fake.write_text(
-                "#!/usr/bin/env python3\n"
-                "import json, os, sys\n"
-                "if sys.argv[1:] == ['--help']:\n"
-                " print('--strict-mcp-config')\n"
-                " raise SystemExit(0)\n"
-                "cfg = json.load(open(os.path.join(os.environ['CLAUDE_CONFIG_DIR'], '.claude.json')))\n"
-                "servers = cfg.get('mcpServers', {})\n"
-                "if len(sys.argv) >= 4 and sys.argv[1:4] == ['mcp', 'get', 'cm-services'] and 'cm-services' in servers:\n"
-                " print('cm-services:')\n"
-                " print('  Status: Connected')\n"
-                "else:\n"
-                " print('cm-services:')\n"
-                " print('  Status: Failed')\n",
-                encoding="utf-8",
-            )
-            fake.chmod(0o700)
-            empty_bundle = root / "empty.json"
-            empty_bundle.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
-            claude._install_strict_readiness_config(config_dir, empty_bundle)
-            claude._strict_mcp_executable_cache.pop(str(fake), None)
-            with self.assertRaisesRegex(claude.ClaudeAdapterError, "not ready before worker launch"):
-                claude._require_mcp_readiness(
-                    executable=str(fake), cwd=root, capabilities=("gateway-read",),
-                    env={"CLAUDE_CONFIG_DIR": str(config_dir)}, runner=claude._bounded_process,
-                    strict_mcp_config_path=empty_bundle,
-                )
-
-    def test_strict_readiness_fake_cli_accepts_valid_exact_bundle(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            config_dir = root / "config"
-            config_dir.mkdir()
-            (config_dir / ".claude.json").write_text(
-                json.dumps({"mcpServers": {"cm-services": {"command": "global-server"}}}),
-                encoding="utf-8",
-            )
-            fake = root / "fake-claude"
-            fake.write_text(
-                "#!/usr/bin/env python3\n"
-                "import json, os, sys\n"
-                "if sys.argv[1:] == ['--help']:\n"
-                " print('--strict-mcp-config')\n"
-                " raise SystemExit(0)\n"
-                "cfg = json.load(open(os.path.join(os.environ['CLAUDE_CONFIG_DIR'], '.claude.json')))\n"
-                "servers = cfg.get('mcpServers', {})\n"
-                "if sys.argv[1:4] == ['mcp', 'get', 'cm-services'] and servers.get('cm-services', {}).get('command') == 'exact-server':\n"
-                " print('cm-services:')\n"
-                " print('  Status: Connected')\n"
-                "else:\n"
-                " print('cm-services:')\n"
-                " print('  Status: Failed')\n",
-                encoding="utf-8",
-            )
-            fake.chmod(0o700)
-            bundle = root / "exact.json"
-            bundle.write_text(json.dumps({"mcpServers": {"cm-services": {"command": "exact-server"}}}), encoding="utf-8")
-            claude._install_strict_readiness_config(config_dir, bundle)
-            claude._strict_mcp_executable_cache.pop(str(fake), None)
-            claude._require_mcp_readiness(
-                executable=str(fake), cwd=root, capabilities=("gateway-read",),
-                env={"CLAUDE_CONFIG_DIR": str(config_dir)}, runner=claude._bounded_process,
-                strict_mcp_config_path=bundle,
-            )
-
-    def test_strict_readiness_uses_exact_disposable_bundle_registry(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            config_dir = root / "config"
-            config_dir.mkdir()
-            (config_dir / ".claude.json").write_text(
-                json.dumps({"mcpServers": {"cm-services": {"command": "global-server"}}}),
-                encoding="utf-8",
-            )
-            bundle_path = root / "strict.json"
-            exact = {"mcpServers": {"cm-services": {"command": "exact-server"}}}
-            bundle_path.write_text(json.dumps(exact), encoding="utf-8")
-            claude._install_strict_readiness_config(config_dir, bundle_path)
-            self.assertEqual(json.loads((config_dir / ".claude.json").read_text())["mcpServers"], exact["mcpServers"])
-            probe = mock.Mock(return_value=subprocess.CompletedProcess(
-                [], 0, "cm-services:\n  Status: ✔ Connected\n", ""))
-            claude._require_mcp_readiness(
-                executable="claude", cwd=root, capabilities=("gateway-read",),
-                env={"CLAUDE_CONFIG_DIR": str(config_dir)}, runner=probe,
-                strict_mcp_config_path=bundle_path,
-            )
-            self.assertEqual(probe.call_args.args[0], ["claude", "mcp", "get", "cm-services"])
 
     def test_playwright_execute_approves_only_the_requested_project_server(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -735,8 +329,7 @@ class ClaudeAdapterTests(unittest.TestCase):
             "OPENAI_API_KEY": "y", "SIDE_LANE_CREDENTIAL_OTHER": "other-secret",
             "SIDE_LANE_CREDENTIALS_DIR": "/private/credentials"},
             provider="claude", model="claude-sonnet-5", provider_config=self.native, model_config=config, mode="execute")
-        self.assertEqual(child, {"PATH": "/bin",
-                                 claude.AUTO_MEMORY_DISABLE_ENV: claude.AUTO_MEMORY_DISABLED_VALUE})
+        self.assertEqual(child, {"PATH": "/bin"})
         with self.assertRaisesRegex(claude.ClaudeAdapterError, "must not receive"):
             claude.build_transport_environment({}, provider="claude", model="claude-sonnet-5",
                 provider_config=self.native, model_config=config, mode="execute", secret="never")
@@ -780,9 +373,7 @@ class ClaudeAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(claude.ClaudeAdapterError, "transport qualification"):
             claude.launch(executable="claude", repo="/not-used", worktree="/not-used", provider="kimi",
                 model="k3-256k", provider_config=direct, model_config=config, prompt="task",
-                secret="selected", runner=runner,
-                    readiness_runner=SUPPORTS_STRICT_MCP,
-                )
+                secret="selected", runner=runner)
         runner.assert_not_called()
 
     def test_glm_requires_explicit_secret_and_uses_direct_gateway(self) -> None:
@@ -807,9 +398,7 @@ class ClaudeAdapterTests(unittest.TestCase):
             result = claude.launch(executable="claude", repo=repo, worktree=lane, provider="glm",
                 model="glm-5.3", provider_config=self.glm,
                 model_config={"runtime_model": "glm-5.3", "protocol": "anthropic-compatible"},
-                prompt="task", secret="selected", runner=runner,
-                    readiness_runner=SUPPORTS_STRICT_MCP,
-                )
+                prompt="task", secret="selected", runner=runner)
         self.assertEqual(result.gateway, "direct-zai")
         self.assertTrue(result.billable)
         self.assertNotIn("selected", result.stdout + result.stderr)
@@ -831,9 +420,7 @@ class ClaudeAdapterTests(unittest.TestCase):
             result = claude.launch(executable="claude", repo=repo, worktree=lane,
                 provider="kimi", model=model, provider_config=provider, model_config=config,
                 prompt="task", secret="selected",
-                runner=mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout, "")),
-                    readiness_runner=SUPPORTS_STRICT_MCP,
-                )
+                runner=mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout, "")))
         self.assertEqual(result.resolved_model, model)
         self.assertEqual(result.usage, {"input_tokens": 9})
         self.assertIn("stream-json", result.argv)
@@ -861,9 +448,7 @@ class ClaudeAdapterTests(unittest.TestCase):
                 result = claude.launch(executable="claude", repo=repo, worktree=lane,
                     provider="kimi", model=model, provider_config=provider, model_config=config,
                     prompt="task", secret="selected",
-                    runner=mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout, "")),
-                        readiness_runner=SUPPORTS_STRICT_MCP,
-                    )
+                    runner=mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout, "")))
                 self.assertEqual(result.returncode, 65)
                 self.assertIn(error, result.stderr)
 
@@ -875,9 +460,7 @@ class ClaudeAdapterTests(unittest.TestCase):
                 provider="claude", model="claude-sonnet-5", provider_config=self.native,
                 model_config={"runtime_model": "claude-sonnet-5", "protocol": "native-claude-readonly"},
                 prompt="review", mode="review",
-                runner=mock.Mock(return_value=subprocess.CompletedProcess([], 0, "review complete", "")),
-                    readiness_runner=SUPPORTS_STRICT_MCP,
-                )
+                runner=mock.Mock(return_value=subprocess.CompletedProcess([], 0, "review complete", "")))
         self.assertEqual(result.returncode, 0)
         self.assertIsNone(result.resolved_model)
 
@@ -904,9 +487,7 @@ class ClaudeAdapterTests(unittest.TestCase):
             result = claude.launch(executable="claude", repo=repo, worktree=lane,
                 provider="glm", model="glm-5.3", provider_config=self.glm,
                 model_config={"runtime_model": "glm-5.3", "protocol": "anthropic-compatible"},
-                prompt="task", secret="selected", runner=runner,
-                    readiness_runner=SUPPORTS_STRICT_MCP,
-                )
+                prompt="task", secret="selected", runner=runner)
         self.assertEqual(result.availability, "temporarily-unavailable")
         runner.assert_called_once()
 
@@ -925,10 +506,6 @@ class ClaudeAdapterTests(unittest.TestCase):
 
 
 class FirstPartyAnthropicKeyRouteTests(unittest.TestCase):
-    def setUp(self):
-        claude._strict_mcp_executable_cache["claude"] = True
-
-
     provider = {"gateway": "direct-anthropic", "auth_method": "provider-key", "billable": True,
                 "base_url": "https://api.anthropic.com"}
 
@@ -994,9 +571,7 @@ class FirstPartyAnthropicKeyRouteTests(unittest.TestCase):
                 provider="anthropic", model=model, provider_config=self.provider,
                 model_config=config, prompt="task", secret="selected",
                 runner=mock.Mock(return_value=subprocess.CompletedProcess(
-                    [], 7, "leak selected", "leak selected")),
-                        readiness_runner=SUPPORTS_STRICT_MCP,
-                    )
+                    [], 7, "leak selected", "leak selected")))
         self.assertNotIn("selected", result.stdout + result.stderr)
 
     def test_shipped_qualification_gate_admits_verified_models_and_rejects_unverified(self) -> None:
@@ -1021,9 +596,7 @@ class FirstPartyAnthropicKeyRouteTests(unittest.TestCase):
                     result = claude.launch(executable="claude", repo=repo, worktree=lane,
                         provider="anthropic", model=model, provider_config=provider_config,
                         model_config=model_config, prompt="task", secret="selected",
-                        env={"PATH": "/bin"}, runner=runner,
-                            readiness_runner=SUPPORTS_STRICT_MCP,
-                        )
+                        env={"PATH": "/bin"}, runner=runner)
                 runner.assert_called_once()
                 self.assertEqual(result.returncode, 0)
                 self.assertEqual(result.resolved_model, model)
@@ -1037,9 +610,7 @@ class FirstPartyAnthropicKeyRouteTests(unittest.TestCase):
                                     "external route lacks verified model transport qualification"):
             claude.launch(executable="claude", repo="/not-used", worktree="/not-used",
                 provider="anthropic", model="claude-fable-5-1", provider_config=provider_config,
-                model_config=unverified, prompt="task", secret="selected", runner=runner,
-                    readiness_runner=SUPPORTS_STRICT_MCP,
-                )
+                model_config=unverified, prompt="task", secret="selected", runner=runner)
         runner.assert_not_called()
 
 
@@ -1137,7 +708,7 @@ class ProjectMcpServerApprovalTests(unittest.TestCase):
         # asana-read/drive-read map to the fixed user-global cm-services
         # registration, which is not a project .mcp.json entry — so no
         # enabledMcpjsonServers approval is emitted for it.
-        for capabilities in (("asana-read",), ("drive-read",), ("gcloud-read",), ("database-read",), ("algolia-read",), ("gateway-read",), ("asana-read", "drive-read", "gcloud-read", "database-read", "algolia-read", "gateway-read")):
+        for capabilities in (("asana-read",), ("drive-read",), ("gcloud-read",), ("database-read",), ("algolia-read",), ("asana-read", "drive-read", "gcloud-read", "database-read", "algolia-read")):
             with self.subTest(capabilities=capabilities):
                 settings = self.settings_of(self.command("execute", capabilities))
                 self.assertNotIn("cm-services", settings.get("enabledMcpjsonServers", []))
@@ -1212,31 +783,6 @@ class ProjectMcpServerApprovalTests(unittest.TestCase):
         self.assertIn('servers: ["slack"]', prompt)
         self.assertIn("presence evidence only", prompt)
         self.assertIn("never\nproof of authentication", prompt)
-
-    def test_cm_services_startup_instruction_is_absent_for_other_user_scope_grants(self) -> None:
-        """A non-cm-services user-scope grant gets no cm-services instruction.
-
-        ``gitnexus``/``codegraph``/``playwright``/``slack-read`` share
-        ``USER_SCOPE_MCP_CAPABILITIES`` membership with the cm-services family,
-        so the granted set is intersected with ``CM_SERVICES_CAPABILITIES``
-        exactly. Before that narrowing, a gitnexus-only lane was handed an
-        instruction naming an empty tool list and telling the worker to wait
-        on a server it had never been granted.
-        """
-        for capability in ("gitnexus", "codegraph", "playwright", "slack-read", "shell"):
-            with self.subTest(capability=capability):
-                self.assertEqual(claude._cm_services_startup_instruction((capability,)), "")
-                self.assertNotIn(
-                    "cm-services startup",
-                    self.system_prompt_of(self.command("execute", (capability,))),
-                )
-        # The cm-services family still gets exactly one instruction.
-        self.assertEqual(
-            self.system_prompt_of(
-                self.command("execute", ("gateway-read", "contentful-read"))
-            ).count("cm-services startup"),
-            1,
-        )
 
     def test_review_mode_stays_isolated_from_project_server_approval(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1352,8 +898,7 @@ class AllowedToolsTests(unittest.TestCase):
         drive = tuple(f"mcp__cm-services__{name}" for name in (
             "drive_file_info", "drive_sheet_tabs", "drive_sheet_get", "drive_doc_get"))
         gcp = tuple(f"mcp__cm-services__{name}" for name in (
-            "gcp_logs", "gcp_run_services", "gcp_run_jobs", "gcp_run_job",
-            "gcp_scheduler_jobs",
+            "gcp_logs", "gcp_run_services", "gcp_run_jobs", "gcp_scheduler_jobs",
             "gcp_functions", "gcp_billing_mtd", "gcp_billing_daily", "gcp_menu"))
         database = ("mcp__cm-services__postgres_select",)
         algolia = ("mcp__cm-services__algolia_get_settings",)
@@ -1387,44 +932,6 @@ class AllowedToolsTests(unittest.TestCase):
         self.assertIn("cm-services startup", prompt)
         self.assertIn("mcp__cm-services__asana_get_task", prompt)
         self.assertNotIn("mcp__cm-services__drive_doc_get", prompt)
-
-    def test_gcloud_run_job_grant_is_exact_and_never_widens(self) -> None:
-        """The singular Cloud Run job-metadata read is granted by gcloud-read only.
-
-        ``mcp__cm-services__gcp_run_job`` is a strict prefix of its plural
-        sibling ``mcp__cm-services__gcp_run_jobs``, so every assertion here is
-        exact-element or token-exact. A substring test would pass on the plural
-        alone and prove nothing about the singular grant.
-        """
-        from side_lane.governance import tool_policy
-
-        singular = "mcp__cm-services__gcp_run_job"
-        plural = "mcp__cm-services__gcp_run_jobs"
-        base = claude.allowed_tools("execute", ())
-        granted = claude.allowed_tools("execute", ("gcloud-read",))
-        # The rendered grant is exactly the canonical allowlist for the
-        # capability (order included), so the singular tool cannot arrive
-        # through any other rule.
-        self.assertEqual(granted, base + tool_policy().allowed["gcloud-read"])
-        self.assertIn(singular, granted)
-        self.assertIn(plural, granted)
-        self.assertFalse(any(tool.endswith("*") for tool in granted))
-        self.assertFalse(any(tool.startswith("mcp__cm-services__") for tool in base))
-        # No unrelated capability's grant carries it, and it is not a wildcard.
-        for capability in ("asana-read", "drive-read", "database-read", "algolia-read",
-                           "contentful-read", "contentful-master-read", "gateway-read",
-                           "gitnexus", "codegraph", "shell", "workspace-write", "git-push"):
-            self.assertNotIn(singular, claude.allowed_tools("execute", (capability,)))
-        # Review mode never receives it, granted or not.
-        self.assertEqual(claude.allowed_tools("review", ("gcloud-read",)), ())
-        self.assertEqual(claude.disallowed_tools("review", ("gcloud-read",)), ())
-        # The startup instruction names it as its own backtick-delimited tool,
-        # which the plural's longer name cannot satisfy.
-        prompt = self.command("execute", ("gcloud-read",))[
-            self.command("execute", ("gcloud-read",)).index("--append-system-prompt") + 1]
-        self.assertIn("cm-services startup", prompt)
-        self.assertIn(f"`{singular}`", prompt)
-        self.assertIn(f"`{plural}`", prompt)
 
     def test_shell_or_workspace_write_adds_ordinary_dev_commands_not_push(self) -> None:
         for capability in ("shell", "workspace-write"):
@@ -1473,594 +980,10 @@ class AllowedToolsTests(unittest.TestCase):
             result = claude.launch(executable="claude", repo=repo, worktree=lane, provider="claude",
                 model="claude-sonnet-5", provider_config=self.native,
                 model_config={"runtime_model": "claude-sonnet-5", "protocol": "native-claude"},
-                prompt="task", mode="execute", capabilities=("shell",), env={"PATH": "/bin"}, runner=runner,
-                    readiness_runner=SUPPORTS_STRICT_MCP,
-                )
+                prompt="task", mode="execute", capabilities=("shell",), env={"PATH": "/bin"}, runner=runner)
         self.assertIn("Bash(pnpm *)", result.argv)
         self.assertEqual(result.allowed_tools, claude.allowed_tools("execute", ("shell",)))
         self.assertIn("allowed_tools", result.as_dict())
-
-
-class ReportOnlyModeTests(unittest.TestCase):
-    def setUp(self):
-        claude._strict_mcp_executable_cache["claude"] = True
-
-
-    """`--report-only` adds a same-invocation Stop hook and nothing else.
-
-    The opt-in exists because a cloud worker navigated, saved its screenshot,
-    ended its turn with exit 0, and reported a report it never wrote. Prose
-    was the only artifact. The repair is a deterministic Stop hook inside the
-    same Claude Code invocation: it blocks one stop and feeds the same model
-    loop a reason to write the report, then allows the stop.
-    """
-
-    native = {"gateway": "native-claude", "auth_method": "oauth", "billable": False}
-    REPORT_NAME = "SIDE_LANE_REPORT.md"
-
-    def repo(self, root: Path, name: str) -> Path:
-        path = root / name
-        path.mkdir()
-        (path / ".git").write_text("gitdir: /tmp/example\n", encoding="utf-8")
-        return path
-
-    def routed_provider_config(self) -> dict:
-        return {"gateway": "omniroute-router", "auth_method": "provider-key",
-                "billable": True, "base_url": "https://omniroute.example"}
-
-    def routed_model_config(self, **overrides) -> dict:
-        config = {"runtime_model": "routed-selector",
-                  "protocol": "anthropic-compatible",
-                  "qualification": {"verified": True, "verified_on": "2026-09-19",
-                                    "source": "receipt"},
-                  "routing_policy_contract": {
-                      "requested_selector": "routed-selector",
-                      "allowed_upstream_models": ["deepseek-flash"],
-                      "settings_precedence": "verified",
-                  }}
-        config.update(overrides)
-        return config
-
-    def native_model_config(self, **overrides) -> dict:
-        config = {"runtime_model": "claude-sonnet-5", "protocol": "native-claude"}
-        config.update(overrides)
-        return config
-
-    def command(self, repo: Path, lane: Path, *, model_config=None, **kwargs) -> list[str]:
-        return claude.build_command(
-            executable="claude", repo=repo, worktree=lane, provider="claude",
-            model="claude-sonnet-5", provider_config=self.native,
-            model_config=model_config or self.native_model_config(max_budget_usd=2.5),
-            prompt="task", mode="execute", **kwargs,
-        )
-
-    def launch_settings(self, command: list[str]) -> dict:
-        settings = json.loads(command[command.index("--settings") + 1])
-        self.assertIsInstance(settings, dict)
-        return settings
-
-    def stop_hook_entry(self, command: list[str]) -> dict:
-        settings = self.launch_settings(command)
-        stop = settings.get("hooks", {}).get("Stop")
-        self.assertIsInstance(stop, list)
-        self.assertEqual(len(stop), 1)
-        return stop[0]["hooks"][0]
-
-    def hook_argv(self, command: list[str]) -> list[str]:
-        return shlex.split(self.stop_hook_entry(command)["command"])
-
-    # --- the hook is present exactly when opted in ---------------------------
-
-    def test_opt_in_installs_one_stop_hook_with_the_fixed_report_path(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-            command = self.command(repo, lane, report_only=True)
-        entry = self.stop_hook_entry(command)
-        self.assertEqual(entry["type"], "command")
-        self.assertEqual(entry["timeout"], claude.REPORT_ONLY_HOOK_TIMEOUT_SECONDS)
-        argv = self.hook_argv(command)
-        # An unresolved relative module path would make the interpreter exit 2
-        # and a non-zero hook exit blocks every stop.
-        self.assertEqual(argv[0], sys.executable)
-        self.assertTrue(Path(argv[1]).is_absolute())
-        self.assertEqual(argv[1], str(Path(argv[1]).resolve()))
-        self.assertEqual(argv[2], "--settings")
-        self.assertEqual(json.loads(argv[3])["report_path"],
-                         str((lane / self.REPORT_NAME).resolve()))
-
-    def test_default_commands_carry_no_stop_hook(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-            for provider_config, model_config, extra in (
-                (self.native, self.native_model_config(), {}),
-                (self.routed_provider_config(),
-                 self.routed_model_config(max_budget_usd=2.5), {}),
-                (self.native, {"runtime_model": "claude-sonnet-5",
-                               "protocol": "native-claude-readonly"}, {"mode": "review"}),
-            ):
-                with self.subTest(extra=extra, routed=provider_config is not self.native):
-                    command = claude.build_command(
-                        executable="claude", repo=repo, worktree=lane,
-                        provider="omniroute" if provider_config is not self.native else "claude",
-                        model="routed-selector" if provider_config is not self.native else "claude-sonnet-5",
-                        provider_config=provider_config, model_config=model_config,
-                        prompt="task", **extra,
-                    )
-                    self.assertFalse(any("report_stop_hook" in part for part in command))
-                    if "--settings" in command:
-                        self.assertNotIn("hooks", self.launch_settings(command))
-
-    def test_routed_opt_in_hook_survives_the_isolated_config_home(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-            home = root / "home"
-            home.mkdir()
-            observed: dict[str, object] = {}
-
-            def runner(command, **kwargs):
-                child_config = Path(kwargs["env"]["CLAUDE_CONFIG_DIR"])
-                observed["command"] = list(command)
-                observed["settings"] = json.loads((child_config / "settings.json").read_text())
-                return subprocess.CompletedProcess(
-                    command, 0,
-                    '{"type":"result","subtype":"success","model":"deepseek-flash",'
-                    '"usage":{"input_tokens":1,"output_tokens":1}}\n', "")
-
-            claude.launch(
-                executable="claude", repo=repo, worktree=lane, provider="omniroute",
-                model="routed-selector", provider_config=self.routed_provider_config(),
-                model_config=self.routed_model_config(max_budget_usd=1.0),
-                prompt="task", env={"HOME": str(home), "PATH": "/bin"},
-                secret="router-secret", runner=runner, report_only=True,
-                readiness_runner=SUPPORTS_STRICT_MCP,
-            )
-        # The Stop hook is process-local: it rides the run's own --settings
-        # payload, never the disposable config home's files.
-        command = observed["command"]
-        settings = json.loads(command[command.index("--settings") + 1])
-        self.assertEqual(settings["hooks"]["Stop"][0]["hooks"][0]["type"], "command")
-        self.assertNotIn("Stop", observed["settings"].get("hooks", {}))
-        self.assertIn("--max-budget-usd", command)
-
-    def test_opt_in_preserves_every_other_execute_control(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-            plain = self.command(repo, lane, capabilities=("shell",))
-            opted = self.command(repo, lane, capabilities=("shell",), report_only=True)
-        # Same argv but for the settings payload: the opt-in must not widen
-        # tools, permission mode, MCP handling, or the model selector.
-        def without_settings(argv: list[str]) -> list[str]:
-            index = argv.index("--settings")
-            return argv[:index] + argv[index + 2:]
-
-        self.assertEqual(without_settings(plain), without_settings(opted))
-        allowed = [part for part in opted if part.startswith("Bash(")]
-        self.assertIn("Bash(git commit *)", allowed)
-        self.assertNotIn("Bash(git push *)", allowed)
-
-    # --- fail closed before any model launch ---------------------------------
-
-    def test_opt_in_requires_a_finite_positive_budget(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-            for label, value in (("missing", None), ("zero", 0), ("negative", -1),
-                                 ("infinite", float("inf")), ("nan", float("nan")),
-                                 ("text", "much"), ("true", True)):
-                with self.subTest(label=label):
-                    model_config = self.native_model_config()
-                    if value is not None:
-                        model_config["max_budget_usd"] = value
-                    with self.assertRaises(claude.ClaudeAdapterError):
-                        self.command(repo, lane, model_config=model_config,
-                                     report_only=True)
-
-    def test_opt_in_budget_is_forwarded_as_the_usd_cap(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-            command = self.command(repo, lane, report_only=True)
-        self.assertEqual(command[command.index("--max-budget-usd") + 1], "2.5")
-
-    def test_opt_in_is_rejected_outside_execute_mode(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-            config = {"runtime_model": "claude-sonnet-5",
-                      "protocol": "native-claude-readonly", "max_budget_usd": 2.5}
-            for mode in ("review", "plan"):
-                with self.subTest(mode=mode):
-                    with self.assertRaises(claude.ClaudeAdapterError):
-                        claude.build_command(
-                            executable="claude", repo=repo, worktree=lane,
-                            provider="claude", model="claude-sonnet-5",
-                            provider_config=self.native, model_config=config,
-                            prompt="task", mode=mode, report_only=True,
-                        )
-
-    def test_launch_fails_before_the_model_when_the_budget_is_missing(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-            runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "done", ""))
-            with self.assertRaises(claude.ClaudeAdapterError):
-                claude.launch(
-                    executable="claude", repo=repo, worktree=lane, provider="claude",
-                    model="claude-sonnet-5", provider_config=self.native,
-                    model_config=self.native_model_config(), prompt="task",
-                    mode="execute", env={"PATH": "/bin"}, runner=runner,
-                    report_only=True,
-                    readiness_runner=SUPPORTS_STRICT_MCP,
-                )
-        runner.assert_not_called()
-
-    def test_opt_in_runs_the_model_exactly_once(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-            runner = mock.Mock(
-                return_value=subprocess.CompletedProcess([], 0, "done", ""))
-            claude.launch(
-                executable="claude", repo=repo, worktree=lane, provider="claude",
-                model="claude-sonnet-5", provider_config=self.native,
-                model_config=self.native_model_config(max_budget_usd=2.5),
-                prompt="task", mode="execute", env={"PATH": "/bin"}, runner=runner,
-                report_only=True,
-                readiness_runner=SUPPORTS_STRICT_MCP,
-            )
-        self.assertEqual(runner.call_count, 1)
-        # One subprocess, one timeout: the opt-in adds no estimate, no second
-        # invocation, and no resume/continue of the same worker.
-        self.assertEqual(runner.call_args.kwargs["timeout"], 1800)
-        command = runner.call_args.args[0]
-        self.assertEqual(command.count("-p"), 1)
-
-    # --- the installed hook actually protects the run -------------------------
-
-    def _run_installed_hook(self, command: list[str], stdin: dict) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.run(
-            self.hook_argv(command), input=json.dumps(stdin).encode("utf-8"),
-            capture_output=True, timeout=10,
-        )
-
-    def test_installed_hook_blocks_the_stop_when_the_report_is_missing(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-            command = self.command(repo, lane, report_only=True)
-            result = self._run_installed_hook(command, {
-                "hook_event_name": "Stop", "cwd": str(repo), "stop_hook_active": False})
-            self.assertEqual(result.returncode, 0)
-            decision = json.loads(result.stdout.decode("utf-8"))
-            self.assertEqual(decision["decision"], "block")
-            self.assertIn("report", decision["reason"].lower())
-            # A first block feeds the same loop; the second round is bounded.
-            second = self._run_installed_hook(command, {
-                "hook_event_name": "Stop", "cwd": str(repo), "stop_hook_active": True})
-            self.assertEqual(second.returncode, 0)
-            self.assertEqual(second.stdout.strip(), b"")
-
-    def test_installed_hook_allows_the_stop_once_the_report_is_written(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-            command = self.command(repo, lane, report_only=True)
-            (lane / self.REPORT_NAME).write_text("# Findings\n- item\n", encoding="utf-8")
-            result = self._run_installed_hook(command, {
-                "hook_event_name": "Stop", "cwd": str(repo), "stop_hook_active": False})
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout.strip(), b"")
-
-    # --- the hook is armed with this run's baseline ---------------------------
-
-    def test_opt_in_hook_carries_the_baseline_of_a_preexisting_report(self) -> None:
-        """A lane added from HEAD inherits whatever HEAD tracked at that path."""
-        inherited = "# Inherited from a prior task\n\nFindings: plausible.\n"
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-            (lane / self.REPORT_NAME).write_text(inherited, encoding="utf-8")
-            command = self.command(repo, lane, report_only=True)
-            settings = json.loads(self.hook_argv(command)[3])
-            self.assertEqual(
-                settings[report_stop_hook.FRESHNESS_KEY][
-                    report_stop_hook.BASELINE_IDENTITY_KEY],
-                report_stop_hook.report_identity(
-                    (lane / self.REPORT_NAME).resolve()),
-            )
-            # The inherited file is preserved in the lane's ignored scratch
-            # before any worker can overwrite it.
-            preserved = (
-                lane / report_stop_hook.SCRATCH_DIR_NAME
-                / report_stop_hook.PRESERVED_DIR_NAME / self.REPORT_NAME
-            )
-            self.assertEqual(preserved.read_text(encoding="utf-8"), inherited)
-            self.assertEqual(
-                (lane / self.REPORT_NAME).read_text(encoding="utf-8"), inherited)
-
-            # Armed with that baseline, the untouched inherited report satisfies
-            # nothing: the hook asks for this run's own report.
-            result = self._run_installed_hook(command, {
-                "hook_event_name": "Stop", "cwd": str(repo), "stop_hook_active": False})
-
-            # Rewriting it does.
-            (lane / self.REPORT_NAME).write_text(
-                "# Findings\n- this run's own finding\n", encoding="utf-8")
-            rewritten = self._run_installed_hook(command, {
-                "hook_event_name": "Stop", "cwd": str(repo), "stop_hook_active": False})
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(
-            json.loads(result.stdout.decode("utf-8"))["decision"], "block")
-        self.assertEqual(rewritten.returncode, 0)
-        self.assertEqual(rewritten.stdout.strip(), b"")
-
-    def test_explicit_run_baseline_is_what_the_hook_judges(self) -> None:
-        """The runner's captured state wins over a fresh look at the lane."""
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-            report = lane / self.REPORT_NAME
-            # The run started before that file existed, which is the ordinary
-            # case: nothing was at the path, so any valid report is this run's.
-            baseline = report_stop_hook.capture_report_baseline(report)
-            self.assertIsNone(baseline.identity)
-            report.write_text("# Findings\n- item\n", encoding="utf-8")
-            command = self.command(repo, lane, report_only=True,
-                                   report_baseline=baseline)
-            settings = json.loads(self.hook_argv(command)[3])
-            self.assertIsNone(
-                settings[report_stop_hook.FRESHNESS_KEY][
-                    report_stop_hook.BASELINE_IDENTITY_KEY])
-            result = self._run_installed_hook(command, {
-                "hook_event_name": "Stop", "cwd": str(repo), "stop_hook_active": False})
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout.strip(), b"")
-
-    def test_unsafe_preexisting_report_path_is_refused_before_the_model(self) -> None:
-        for label in ("symlink", "directory"):
-            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-                report = lane / self.REPORT_NAME
-                if label == "symlink":
-                    (lane / "real.md").write_text("# Findings\n", encoding="utf-8")
-                    report.symlink_to(lane / "real.md")
-                else:
-                    report.mkdir()
-                runner = mock.Mock(
-                    return_value=subprocess.CompletedProcess([], 0, "done", ""))
-                with self.assertRaises(claude.ClaudeAdapterError) as caught:
-                    claude.launch(
-                        executable="claude", repo=repo, worktree=lane, provider="claude",
-                        model="claude-sonnet-5", provider_config=self.native,
-                        model_config=self.native_model_config(max_budget_usd=2.5),
-                        prompt="task", mode="execute", env={"PATH": "/bin"},
-                        runner=runner, report_only=True,
-                        readiness_runner=SUPPORTS_STRICT_MCP,
-                    )
-                self.assertIn(label, str(caught.exception))
-                runner.assert_not_called()
-                # Nothing was removed or replaced to make the lane launchable.
-                self.assertTrue(report.is_symlink() if label == "symlink"
-                                else report.is_dir())
-
-    def test_installed_hook_is_shell_safe_for_awkward_worktree_paths(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "lane with 'quotes' & $(spaces)"
-            root.mkdir()
-            repo = self.repo(Path(directory), "repo")
-            lane = root
-            (lane / ".git").write_text("gitdir: /tmp/example\n", encoding="utf-8")
-            command = self.command(repo, lane, report_only=True)
-            argv = self.hook_argv(command)
-            self.assertEqual(argv[1], str(Path(report_stop_hook.__file__).resolve()))
-            result = self._run_installed_hook(command, {
-                "hook_event_name": "Stop", "cwd": "/", "stop_hook_active": False})
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(json.loads(result.stdout.decode("utf-8"))["decision"], "block")
-
-
-class HostMemoryReadOnlyTests(unittest.TestCase):
-    """Host memory is read-only for every Claude worker, native or routed.
-
-    Two seams are proven here: the child-environment switch that turns Claude
-    Code's native auto-memory off for every provider and both modes, and the
-    prompt note that states the rule. Both are same-user controls — neither is
-    an operating-system sandbox — and neither changes a tool grant or the
-    review lane's strict argv.
-    """
-
-    native = {"gateway": "native-claude", "auth_method": "oauth", "billable": False}
-    glm = {"gateway": "direct-zai", "auth_method": "provider-key", "billable": True,
-           "base_url": "https://api.z.ai/api/anthropic"}
-    kimi = {"gateway": "direct-kimi", "auth_method": "provider-key", "billable": True,
-            "base_url": "https://api.moonshot.cn/anthropic"}
-    omniroute = {"gateway": "omniroute-router", "auth_method": "provider-key",
-                 "billable": True, "base_url": "https://omniroute.example.invalid"}
-    models = {"claude": "claude-sonnet-5", "glm": "glm-5.3",
-              "kimi": "k3-256k", "omniroute": "routed-selector"}
-
-    def setUp(self) -> None:
-        claude._strict_mcp_executable_cache["claude"] = True
-        self.providers = {"claude": self.native, "glm": self.glm,
-                          "kimi": self.kimi, "omniroute": self.omniroute}
-
-    def model_config(self, provider: str, mode: str) -> dict:
-        """The minimum verified config each route needs for this mode."""
-        model = self.models[provider]
-        if provider == "claude":
-            protocol = "native-claude-readonly" if mode == "review" else "native-claude"
-        else:
-            protocol = "anthropic-compatible-readonly" if mode == "review" else "anthropic-compatible"
-        config: dict = {"runtime_model": model, "protocol": protocol}
-        if provider == "kimi":
-            config["identity_contract"] = {"requested_model": model, "resolved_model": model,
-                                           "settings_precedence": "verified"}
-        if provider == "omniroute":
-            config["qualification"] = {"verified": True, "verified_on": "2026-09-19",
-                                       "source": "mocked transport report"}
-            config["routing_policy_contract"] = {
-                "requested_selector": model, "allowed_upstream_models": ["deepseek-flash"],
-                "settings_precedence": "verified"}
-        return config
-
-    def routes(self) -> tuple:
-        """Every provider path, with the secret its route needs."""
-        return (("native", "claude", self.native, None),
-                ("glm", "glm", self.glm, "selected"),
-                ("direct", "kimi", self.kimi, "selected"),
-                ("routed", "omniroute", self.omniroute, "selected"))
-
-    def build(self, root: Path, mode: str, provider: str = "claude", **overrides: object) -> list[str]:
-        repo, lane = root / "repo", root / "lane"
-        for path in (repo, lane):
-            path.mkdir(exist_ok=True)
-            (path / ".git").write_text("gitdir: /tmp/example\n", encoding="utf-8")
-        return claude.build_command(
-            executable="claude", repo=repo, worktree=lane, provider=provider,
-            model=self.models[provider], provider_config=self.providers[provider],
-            model_config=self.model_config(provider, mode), prompt="task",
-            mode=mode, **overrides)
-
-    def command(self, mode: str, provider: str = "claude", **overrides: object) -> list[str]:
-        with tempfile.TemporaryDirectory() as directory:
-            return self.build(Path(directory), mode, provider, **overrides)
-
-    def prompt_of(self, command: list[str]) -> str:
-        return command[command.index("--append-system-prompt") + 1]
-
-    def test_every_provider_and_mode_forces_the_switch_over_an_inherited_false(self) -> None:
-        # The exact documented spelling is part of the contract: a renamed or
-        # respelled variable would silently stop disabling the feature.
-        self.assertEqual(claude.AUTO_MEMORY_DISABLE_ENV, "CLAUDE_CODE_DISABLE_AUTO_MEMORY")
-        self.assertEqual(claude.AUTO_MEMORY_DISABLED_VALUE, "1")
-        inherited = {"PATH": "/bin", "HOME": "/home/worker",
-                     claude.AUTO_MEMORY_DISABLE_ENV: "0"}
-        for label, provider, provider_config, secret in self.routes():
-            for mode in ("execute", "review"):
-                if mode == "review" and provider not in ("claude", "glm"):
-                    continue  # new direct providers and routed lanes are execute-only
-                with self.subTest(route=label, mode=mode):
-                    child = claude.build_transport_environment(
-                        inherited, provider=provider, model=self.models[provider],
-                        provider_config=provider_config,
-                        model_config=self.model_config(provider, mode),
-                        mode=mode, secret=secret)
-                    self.assertEqual(child[claude.AUTO_MEMORY_DISABLE_ENV],
-                                     claude.AUTO_MEMORY_DISABLED_VALUE)
-
-    def test_the_switch_is_additive_and_never_mutates_the_callers_environment(self) -> None:
-        inherited = {"PATH": "/bin", "HOME": "/home/worker", "LANG": "en_US.UTF-8",
-                     "TMPDIR": "/tmp/worker", "GIT_AUTHOR_NAME": "Worker",
-                     "ANTHROPIC_API_KEY": "inherited-secret", "OPENAI_API_KEY": "inherited"}
-        caller_copy = dict(inherited)
-        child = claude.build_transport_environment(
-            inherited, provider="claude", model=self.models["claude"],
-            provider_config=self.native,
-            model_config=self.model_config("claude", "execute"), mode="execute")
-        # The caller's mapping is untouched; the child is a new mapping.
-        self.assertEqual(inherited, caller_copy)
-        self.assertIsNot(child, inherited)
-        # Runtime environment the transport did not scrub is retained...
-        for name in ("PATH", "HOME", "LANG", "TMPDIR", "GIT_AUTHOR_NAME"):
-            self.assertEqual(child[name], caller_copy[name])
-        # ...inherited secrets are still scrubbed...
-        self.assertNotIn("ANTHROPIC_API_KEY", child)
-        self.assertNotIn("OPENAI_API_KEY", child)
-        # ...and the one addition is the forced auto-memory switch.
-        self.assertEqual(sorted(set(child) - set(caller_copy)),
-                         [claude.AUTO_MEMORY_DISABLE_ENV])
-        self.assertEqual(child[claude.AUTO_MEMORY_DISABLE_ENV], "1")
-        # A caller that already carries the switch keeps the key and only its
-        # value is forced, so the override is a value change, never a re-add.
-        falsified = {**inherited, claude.AUTO_MEMORY_DISABLE_ENV: "0"}
-        forced = claude.build_transport_environment(
-            falsified, provider="claude", model=self.models["claude"],
-            provider_config=self.native,
-            model_config=self.model_config("claude", "execute"), mode="execute")
-        self.assertEqual(forced[claude.AUTO_MEMORY_DISABLE_ENV], "1")
-        self.assertEqual(falsified[claude.AUTO_MEMORY_DISABLE_ENV], "0")
-        self.assertEqual(forced["PATH"], "/bin")
-
-    def test_the_launch_seam_hands_the_switch_to_both_child_paths(self) -> None:
-        """The native and the routed launch path both pass through one seam."""
-
-        for provider in ("claude", "omniroute"):
-            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                repo, lane = root / "repo", root / "lane"
-                for path in (repo, lane):
-                    path.mkdir()
-                    (path / ".git").write_text("gitdir: /tmp/example\n", encoding="utf-8")
-                worker = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
-                claude.launch(
-                    executable="claude", repo=repo, worktree=lane, provider=provider,
-                    model=self.models[provider],
-                    provider_config=self.native if provider == "claude" else self.omniroute,
-                    model_config=self.model_config(provider, "execute"), prompt="task",
-                    secret=None if provider == "claude" else "selected",
-                    runner=worker, readiness_runner=SUPPORTS_STRICT_MCP,
-                    env={"PATH": "/bin", "HOME": str(root),
-                         claude.AUTO_MEMORY_DISABLE_ENV: "0"})
-                child = worker.call_args.kwargs["env"]
-                self.assertEqual(child[claude.AUTO_MEMORY_DISABLE_ENV], "1")
-                # The launch path's own environment work is retained.
-                self.assertEqual(child["PATH"], "/bin")
-                if provider == "omniroute":
-                    self.assertEqual(child["CLAUDE_CODE_MAX_OUTPUT_TOKENS"],
-                                     claude.ROUTED_MAX_OUTPUT_TOKENS)
-                    self.assertIn("CLAUDE_CONFIG_DIR", child)
-                else:
-                    self.assertNotIn("CLAUDE_CONFIG_DIR", child)
-
-    def test_the_prompt_note_states_the_rule_for_both_modes(self) -> None:
-        for mode in ("execute", "review"):
-            with self.subTest(mode=mode):
-                prompt = self.prompt_of(self.command(mode))
-                self.assertIn(claude.HOST_MEMORY_READONLY_NOTE, prompt)
-                normalized = " ".join(prompt.split())
-                self.assertIn("Host memory is read-only", normalized)
-                self.assertIn("Never create, update, or delete host memory", normalized)
-                self.assertIn("not an operating-system sandbox", normalized)
-                self.assertIn("reviewed repository artifact", normalized)
-
-    def test_the_note_reaches_a_routed_worker_byte_identically(self) -> None:
-        # One root, so the two prompts differ only if the note itself branches
-        # on the provider.
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            native = self.build(root, "execute")
-            routed = self.build(root, "execute", "omniroute")
-        self.assertEqual(self.prompt_of(native), self.prompt_of(routed))
-
-    def test_the_note_changes_no_grant_and_keeps_the_curated_context(self) -> None:
-        execute = self.command("execute", capabilities=("shell", "git-push"))
-        review = self.command("review")
-        execute_prompt, review_prompt = self.prompt_of(execute), self.prompt_of(review)
-        # Curated context survives for both modes.
-        for prompt in (execute_prompt, review_prompt):
-            self.assertIn("Injected canonical side-lane governance", prompt)
-            self.assertIn("## Host memory is read-only", prompt)
-        # The note sits above the execute role instruction, which stays last.
-        self.assertLess(execute_prompt.index("## Host memory is read-only"),
-                        execute_prompt.index("# Delegated execute role"))
-        self.assertTrue(execute_prompt.endswith("approval.\n"))
-        # Every granted rule still reaches the argv, unchanged.
-        for rule in claude.allowed_tools("execute", ("shell", "git-push")):
-            self.assertIn(rule, execute)
-        # The review lane's strict read-only argv is unchanged: the note adds
-        # no flag and no tool.
-        self.assertIn("--safe-mode", review)
-        self.assertNotIn("--bare", review)
-        self.assertNotIn("--allowedTools", review)
-        self.assertEqual(review[review.index("--tools") + 1], "Read,Glob,Grep")
-        self.assertEqual(review[review.index("--mcp-config") + 1], '{"mcpServers":{}}')
-        self.assertNotIn("--bare", execute)
-        self.assertNotIn("--safe-mode", execute)
 
 
 if __name__ == "__main__":

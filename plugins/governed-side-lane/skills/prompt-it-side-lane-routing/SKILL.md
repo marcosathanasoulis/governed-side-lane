@@ -108,9 +108,7 @@ reference. Include each task-fitting configured provider in the comparison,
 including economical variants, without presuming its flagship is preferable.
 Separate product/region/endpoint and local harness identity from model capability.
 Report unfinished setup as a dependency, not as a reason to purchase another
-account or silently use a different provider. For optional pooled routing, read
-the [OmniRoute add-on guide](../../docs/omniroute-guide.md); it is not required
-and native/direct routes remain fully usable without it.
+account or silently use a different provider.
 
 ## Build the task profile from evidence
 
@@ -178,10 +176,8 @@ excludes a candidate; it does not invite a guess. Missing or stale cost evidence
 excludes a candidate from `cost-optimized` and is reported as unknown in
 `best-fit`. For `best-fit`, rank only after the hard gates using reviewed
 task-fit evidence. For `cost-optimized`, choose the lowest estimated cost only
-among the same eligible candidates that meet the quality floor. Native OAuth
-routes the host reports as included have a known `$0` additional usage cost, as
-does available prepaid GLM; OAuth is not automatically free, since some native
-OAuth models are metered or on extra usage. If one native host
+among the same eligible candidates that meet the quality floor. Included native
+OAuth and available prepaid GLM have zero incremental cost. If one native host
 is on extra usage and the other is included, prefer the included host only when
 it passes the same capability/quality gates. For ordinary work, use a
 provider-neutral economical choice: among eligible candidates that satisfy the
@@ -195,13 +191,7 @@ assumptions, catalog/evidence timestamps, and the exact route in the brief.
 Estimate economics for the complete session: task tokens, known tool charges,
 dispatch/setup, retries and coordinator repair, and any independent review.
 Keep prepaid usage separate from marginal provider-key cost; unknown rates or
-overhead remain unknown and are never treated as zero. A route verified as
-covered by a subscription the user already pays has a known `$0` additional
-usage cost, which is neither an unknown price nor a zero-cost provider key, and
-is not a claim that every OAuth or hosted route is free. A missing median for an
-otherwise authorized task is measurement absence, not an unknown current price:
-report the history as unavailable without rewriting it to zero or alerting
-solely because it is missing. Prefer the least-cost
+overhead remain unknown and are never treated as zero. Prefer the least-cost
 sufficiently evidenced eligible fit for ordinary work. A frontier assignment
 requires task-specific evidence that an eligible economical route cannot meet
 the quality or capability requirement.
@@ -217,33 +207,19 @@ replaces task-relative local validation.
 
 Prompt it may use its own native read-only helpers under its research contract;
 those helpers are not Side Lane routes. Keep the coordinator responsible for
-the research question, scope-shaping research, architecture, evidence
-evaluation, and final synthesis.
+scope-shaping research, architecture, evidence evaluation, and synthesis.
 
-An authorized bounded source-research task may use an external `execute` harness
-with an exact route, capabilities, read roots, and a brief or report-only output
-scope, when existing explicit execution, delegation, and spend authority covers
-it and the task performs no implementation or external writes. Read-only scope
-does not mean strict review-mode-only. Preserve the strict review
-no-secret/no-MCP contract where the task explicitly requires it, and never
-relabel an execute lane as a sandbox. Generic Prompt it planning consent alone
-grants no new external dispatch, costs, execute authority, or arbitrary worktree
-writes. The coordinator may delegate evidence gathering or analysis to an
-economical qualified route under existing authority; no forced expensive
-coordinator research is required when such a route qualifies. This authority does
-not introduce per-node approval.
+An external Side Lane research helper uses `review` mode only. It may gather a
+bounded source set, investigate a bounded subsystem, or answer a targeted
+second-opinion question. Review mode has no MCP/connectors, secret access, or
+write authority, so connector-backed research stays with an authorized
+coordinator or qualified native helper. Never change a research task to
+`execute` merely to obtain a connector.
 
-An external Side Lane research helper otherwise uses `review` mode only. It may
-gather a bounded source set, investigate a bounded subsystem, or answer a
-targeted second-opinion question. Review mode has no MCP/connectors, secret
-access, or write authority, so connector-backed research stays with an authorized
-coordinator, qualified native helper, or the authorized execute harness above.
-Never change a research task to `execute` merely to obtain a connector.
-
-An external `execute` lane for implementation is proposed only after the
+An external `execute` lane is an implementation worker proposed for after the
 execution brief is approved. GLM remains execute-only and keeps its separate
-explicit enablement and run authorization gates; research-team authorization does
-not enable GLM, provider-key use, new spend, or execute mode.
+explicit enablement and run authorization gates; research-team authorization
+does not enable GLM, provider-key use, new spend, or execute mode.
 
 ## Build the complete task graph
 

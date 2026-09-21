@@ -72,11 +72,6 @@ class GovernanceParityTests(unittest.TestCase):
         self.assertNotIn("Bash(", skill)
         self.assertIn("Execute tool allowlist", skill)
 
-    def test_execute_prompt_guides_native_env_assignment_form(self) -> None:
-        prompt = lane_system_prompt("execute", Path("/repo"))
-        self.assertIn("env NAME=value <already-granted-command>", prompt)
-        self.assertIn("underlying command", prompt)
-
     def test_direct_session_entrypoint_marks_private_memory_non_authoritative(self) -> None:
         text = (ROOT / "config/agent-context.md").read_text(encoding="utf-8")
         for item in ("AGENTS.md", "CLAUDE.md", "open pull requests", "Codex product memory", "Claude Code auto-memory", "not authoritative"):
@@ -256,7 +251,6 @@ class ToolPolicyTests(unittest.TestCase):
             | set(policy.allowed["algolia-read"])
             | set(policy.allowed["contentful-read"])
             | set(policy.allowed["contentful-master-read"])
-            | set(policy.allowed["gateway-read"])
         )
         for rules in list(policy.allowed.values()) + list(policy.denied.values()) + [policy.always]:
             for rule in rules:
@@ -272,7 +266,6 @@ class ToolPolicyTests(unittest.TestCase):
                 "mcp__cm-services__gcp_logs",
                 "mcp__cm-services__gcp_run_services",
                 "mcp__cm-services__gcp_run_jobs",
-                "mcp__cm-services__gcp_run_job",
                 "mcp__cm-services__gcp_scheduler_jobs",
                 "mcp__cm-services__gcp_functions",
                 "mcp__cm-services__gcp_billing_mtd",
@@ -304,62 +297,6 @@ class ToolPolicyTests(unittest.TestCase):
                 "mcp__cm-services__contentful_master_search_entries",
             ),
         )
-        self.assertEqual(
-            policy.allowed["gateway-read"],
-            (
-                "WaitForMcpServers",
-                "mcp__cm-services__gateway_run_status",
-                "mcp__cm-services__gateway_run_report",
-            ),
-        )
-
-    def test_gcloud_run_job_is_distinct_from_the_plural_execution_listing(self) -> None:
-        """The canonical record separates the two Cloud Run job reads.
-
-        ``gcp_run_job`` (singular) is job metadata for one named job; the
-        plural ``gcp_run_jobs`` stays the execution listing. The document must
-        state the read/argument shape and the exclusions, and both tool IDs
-        must remain exactly enumerated — the singular name is a prefix of the
-        plural, so the allowlist entries are compared as exact elements.
-        """
-        from side_lane.governance import tool_policy
-
-        rules = tool_policy().allowed["gcloud-read"]
-        self.assertIn("mcp__cm-services__gcp_run_job", rules)
-        self.assertIn("mcp__cm-services__gcp_run_jobs", rules)
-        self.assertFalse(any(rule.endswith("*") for rule in rules))
-        # The source wraps prose at a column, so compare on collapsed
-        # whitespace rather than against a line break in the document.
-        prompt = " ".join(lane_system_prompt("execute", Path("/tmp/repo")).split())
-        for phrase in (
-            "`gcp_run_job` reads the metadata of one Cloud Run job",
-            "job shortname",
-            "container images",
-            "condition state and reason",
-            "latest execution",
-            "execution count",
-            "never returns the full job spec",
-            "environment variables",
-            "free-text condition messages",
-            "`gcp_run_jobs`, which remains the execution listing",
-        ):
-            self.assertIn(phrase, prompt)
-
-    def test_gateway_read_names_no_deployment_url_or_credential(self) -> None:
-        """The Gateway grant is a capability boundary, not a deployment handle.
-
-        The server-side ``gateway_run_ids`` allowlist and the GET-only
-        status/report endpoints belong to the coordinator-provisioned server;
-        the public core records only exact tool IDs, so no endpoint URL,
-        account name, or credential argument may appear in the rule set.
-        """
-        from side_lane.governance import tool_policy
-        rules = tool_policy().allowed["gateway-read"]
-        for rule in rules:
-            for forbidden in ("://", "http", "Bearer", "token", "gateway_run_ids="):
-                self.assertNotIn(forbidden, rule)
-        self.assertFalse(any(rule.endswith("*") for rule in rules))
-        self.assertIn("gateway_run_ids", lane_system_prompt("execute", Path("/tmp/repo")))
 
     def test_malformed_allowlist_fails_closed(self) -> None:
         from side_lane.governance import tool_policy

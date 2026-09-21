@@ -214,27 +214,12 @@ def build_codex_command(
     *,
     mode: str = "execute",
     read_roots: "Sequence[Path]" = (),
-    web_domains: "Sequence[str]" = (),
     run_mcp_servers: "Mapping[str, McpRunServer] | None" = None,
 ) -> tuple[str, ...]:
     if not isinstance(executable, str) or not executable:
         raise CodexAdapterError("Codex executable is required")
     if mode not in {"review", "execute"}:
         raise CodexAdapterError("mode must be review or execute")
-    if web_domains:
-        # Refused, not silently accepted. The Codex host's execute sandbox is
-        # `danger-full-access`, so this lane already reaches every destination
-        # and Codex CLI exposes no per-destination network control to narrow
-        # it with. Naming an approved origin in the task text would describe a
-        # scope nothing enforces, and recording it in the audit would misstate
-        # the lane's real network reach as a granted, bounded list. Fail closed
-        # and say so instead of pretending the host implements the grant.
-        raise CodexAdapterError(
-            "web domains are not supported on the Codex host: an execute lane "
-            "runs with danger-full-access and Codex CLI has no per-destination "
-            "web-fetch permission rule, so --web-domain cannot be enforced or "
-            "honestly recorded there"
-        )
     if not isinstance(prompt, str) or not prompt.strip():
         raise CodexAdapterError("task prompt must be non-empty")
     if read_roots and mode != "execute":
@@ -308,7 +293,6 @@ def run_codex(
     secret: str | None = None,
     runner: Runner = subprocess.run,
     read_roots: "Sequence[Path]" = (),
-    web_domains: "Sequence[str]" = (),
     run_mcp_servers: "Mapping[str, McpRunServer] | None" = None,
 ) -> LaneResult:
     repo_path = _validate_worktree(repo)
@@ -331,7 +315,6 @@ def run_codex(
         prompt,
         mode=mode,
         read_roots=read_roots,
-        web_domains=web_domains,
         run_mcp_servers=run_mcp_servers,
     )
     child_env = with_support_dir(

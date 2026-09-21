@@ -66,31 +66,27 @@ from __future__ import annotations
 
 import json
 import os
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 import re
-import tempfile
 from typing import Mapping
 from urllib.parse import urlsplit
 
 from side_lane.connector_metadata import json_mcp_name_scopes, toml_mcp_names
-from side_lane.capabilities import (
-    CAPABILITY_MCP_SERVERS,
-    CM_SERVICES_CAPABILITIES,
-    RUN_CONFIG_CAPABILITIES,
-    USER_SCOPE_MCP_CAPABILITIES,
-)
 
 
 class McpRunConfigError(RuntimeError):
     """A coordinator-supplied per-run MCP config is unusable or unsafe."""
 
 
-#: Canonical ``USER_SCOPE_MCP_CAPABILITIES`` and ``RUN_CONFIG_CAPABILITIES`` are
-#: defined in :data:`side_lane.capabilities` and re-exported here for callers
-#: that import from this module.  ``CAPABILITY_MCP_SERVERS`` is likewise imported
-#: from that module.
+#: Capability -> the ONE exact MCP server name that capability's run config may
+#: register. Additive only: a capability without an entry here can never
+#: receive a per-run server, and a config declaring any other name is
+#: rejected. Generic names, no private URLs — the URL arrives per run in the
+#: coordinator-supplied file, never in this package's config.
+CAPABILITY_MCP_SERVERS = {
+    "aws-read": "aws",
+}
 
 #: Transport is fixed to remote streamable-HTTP MCP servers. stdio entries
 #: (``command``/``args``/``env``) are rejected: a per-run config is a remote
@@ -236,8 +232,7 @@ def validate_against_capabilities(
     """
 
     allowed = {server for capability, server in CAPABILITY_MCP_SERVERS.items()
-               if capability in set(capabilities)
-               and capability not in CM_SERVICES_CAPABILITIES}
+               if capability in set(capabilities)}
     offenders = sorted(set(servers) - allowed)
     if offenders:
         mapping = ", ".join(f"{capability}={server}" for capability, server
@@ -471,236 +466,15 @@ def devin_local_payload(servers: Mapping[str, McpRunServer]) -> dict[str, object
     }}
 
 
-def _server_names_from_config(path: Path) -> set[str]:
-    """Extract server names from a JSON MCP config without reading values."""
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError:
-        return set()
-    try:
-        config = json.loads(raw)
-    except json.JSONDecodeError:
-        return set()
-    if not isinstance(config, dict):
-        return set()
-    names: set[str] = set()
-    # Top-level mcpServers
-    if "mcpServers" in config:
-        servers = config["mcpServers"]
-        if isinstance(servers, dict):
-            for name in servers:
-                if isinstance(name, str):
-                    names.add(name)
-    # Claude projects entry: {"projects": {"/path": {"mcpServers": {...}}}}
-    if "projects" in config:
-        projects = config["projects"]
-        if isinstance(projects, dict):
-            for project_entry in projects.values():
-                if isinstance(project_entry, dict) and "mcpServers" in project_entry:
-                    servers = project_entry["mcpServers"]
-                    if isinstance(servers, dict):
-                        for name in servers:
-                            if isinstance(name, str):
-                                names.add(name)
-    return names
-
-
-def _matching_project_servers(
-    path: Path, worktree: Path
-) -> dict[str, dict[str, object]]:
-    """Extract mcpServers from a Claude projects entry matching the worktree path.
-
-    Returns an empty dict if the path does not exist, is not valid JSON, or has
-    no entry for the given worktree.
-    """
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError:
-        return {}
-    try:
-        config = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    if not isinstance(config, dict):
-        return {}
-    projects = config.get("projects")
-    if not isinstance(projects, dict):
-        return {}
-    entry = projects.get(str(worktree))
-    if not isinstance(entry, dict):
-        return {}
-    servers = entry.get("mcpServers")
-    if isinstance(servers, dict):
-        return servers
-    return {}
-
-
-def build_strict_mcp_bundle(
-    host: str,
-    repo: Path,
-    worktree: Path,
-    home: Path,
-    run_servers: "Mapping[str, McpRunServer] | None" = None,
-    granted_capabilities: "frozenset[str] | set[str] | tuple[str, ...] | list[str]" = (),
-) -> dict[str, object]:
-    """Assemble the narrow MCP bundle for a routed execute lane.
-
-    Combines registrations from:
-      1. Per-run servers (aws-read via validated --mcp-config file)
-      2. User-global config (USER_SCOPE_MCP_CAPABILITIES servers: cm-services, gitnexus,
-         codegraph, playwright, slack — loaded from ~/.claude.json)
-      3. Project entry in user config (matching repo path)
-      4. Lane worktree .mcp.json
-
-    Only server names mapped from granted capabilities are included. No other
-    host-registered servers appear in the bundle. This is used with
-    ``--strict-mcp-config`` to prevent loading of any inherited registrations.
-
-    Raises ``ClaudeAdapterError`` via ``_effective_mcp_registrations`` if the same
-    server name has different definitions across scopes.
-
-    Args:
-        host: "claude" | "codex" | "devin"
-        repo: The canonical repo checkout (for project-entry matching)
-        worktree: The lane worktree path (for worktree-scope .mcp.json)
-        home: The worker's controlled HOME (for user-scope configs)
-        run_servers: Per-run validated servers (from coordinator's run config)
-        granted_capabilities: Set of granted capability names
-
-    Returns:
-        A dict with a "mcpServers" key suitable for ``--mcp-config``
-    """
-    servers: dict[str, dict[str, object]] = {}
-    capabilities_set = set(granted_capabilities)
-
-    # 1. Per-run servers (aws-read)
-    if run_servers:
-        for server in run_servers.values():
-            servers[server.name] = {
-                "type": REQUIRED_TYPE,
-                "url": server.url,
-                "headers": {
-                    name: (f"{scheme} ${{{env}}}" if scheme else f"${{{env}}}")
-                    for name, scheme, env in server.headers
-                },
-            }
-
-    # 2-4. User-scope registrations via _effective_mcp_registrations
-    # (claude adapter handles all scopes + conflict detection; non-claude hosts skip)
-    if host == "claude":
-        from side_lane.adapters.claude import _effective_mcp_registrations
-
-        regs = _effective_mcp_registrations(
-            host=host,
-            repo=repo,
-            worktree=worktree,
-            home=home,
-            granted_capabilities=capabilities_set,
-        )
-        # regs are (server_name, scope, path, definition) tuples
-        for name, _scope, _path, definition in regs:
-            servers[name] = definition
-
-    return {"mcpServers": servers}
-
-
-def _secure_runtime_directory(target: "str | Path") -> Path:
-    """Ensure a real, private 0700 runtime directory exists.
-
-    Refuses any symlink or non-directory component in the path to prevent
-    writes outside the intended runtime.  Pre-existing directories are forced
-    to 0700 so a 0755 directory left by a prior run or a permissive umask
-    cannot leak bundle contents.
-    """
-    target = Path(target).expanduser().absolute()
-    # Refuse a symlink or non-directory in the immediate parent or the target
-    # itself.  Deeper ancestors are trusted system directories (e.g. macOS
-    # /var) and are not checked.  The intended runtime directory itself is
-    # forced to 0700, replacing any preexisting 0755 mode.
-    parent = target.parent
-    if parent.exists() or parent.is_symlink():
-        if parent.is_symlink() or not parent.is_dir():
-            raise McpRunConfigError(
-                f"runtime path contains a symlink or non-directory: {parent}"
-            )
-    if target.exists() or target.is_symlink():
-        if target.is_symlink() or not target.is_dir():
-            raise McpRunConfigError(
-                f"runtime path contains a symlink or non-directory: {target}"
-            )
-    # Any missing parents are created with 0o700; umask may still widen the
-    # mode, so the final chmod below is the authoritative private bit.
-    target.mkdir(mode=0o700, parents=True, exist_ok=True)
-    try:
-        os.chmod(target, 0o700)
-    except OSError as exc:
-        raise McpRunConfigError(
-            f"cannot set 0700 mode on runtime directory {target}: {exc}"
-        ) from exc
-    return target
-
-
-def write_strict_mcp_bundle(
-    runtime_dir: Path, worktree_name: str, bundle: dict[str, object]
-) -> Path:
-    """Atomically write the strict MCP bundle as 0600 outside the worktree.
-
-    The file is written to ``runtime_dir / "<worktree-name>-mcp-strict.json"``.
-    Permissions are set to 0600 to prevent group/other access.
-
-    The runtime directory is created with mode 0700 so that only the owning user
-    can inspect the bundle contents. The file is written via ``tempfile.mkstemp``
-    (mode 0600, O_EXCL to prevent symlink attacks) and renamed into place
-    atomically. On any failure the temp file is removed.
-
-    Args:
-        runtime_dir: The run-local runtime directory (outside the worktree)
-        worktree_name: The worktree directory name (used in the filename)
-        bundle: The mcpServers dict from ``build_strict_mcp_bundle``
-
-    Returns:
-        Path to the written file
-    """
-    runtime_dir = _secure_runtime_directory(runtime_dir)
-    # Sanitize worktree name for use in a filename
-    safe_name = "".join(c if c.isalnum() or c in ".-_" else "_" for c in worktree_name)
-    path = runtime_dir / f"{safe_name}-mcp-strict.json"
-    # Atomic write: mkstemp gives mode 0600 and O_EXCL (no symlink race).
-    fd, tmp_path_str = tempfile.mkstemp(dir=str(runtime_dir), prefix=f".{safe_name}-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(bundle, indent=2) + "\n")
-        os.rename(tmp_path_str, str(path))
-    except BaseException:
-        with suppress(OSError):
-            os.unlink(tmp_path_str)
-        raise
-    os.chmod(str(path), 0o600)
-    return path
-
-
 def write_ephemeral(directory: str | Path, filename: str,
                     payload: Mapping[str, object]) -> Path:
-    """Write one runtime config artifact (0600) under a run-local directory.
+    """Write one runtime config artifact (0600) under a run-local directory."""
 
-    The directory is created with mode 0700. The file is written via
-    ``tempfile.mkstemp`` (mode 0600, O_EXCL) and renamed into place atomically.
-    On any failure the temp file is removed.
-    """
-
-    target = _secure_runtime_directory(directory)
+    target = Path(directory)
+    target.mkdir(parents=True, exist_ok=True)
     path = target / filename
-    # mkstemp gives mode 0600 and O_EXCL (no symlink race).
-    fd, tmp_path_str = tempfile.mkstemp(dir=str(target), prefix=".", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, indent=2) + "\n")
-        os.rename(tmp_path_str, str(path))
-    except BaseException:
-        with suppress(OSError):
-            os.unlink(tmp_path_str)
-        raise
-    os.chmod(str(path), 0o600)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    path.chmod(0o600)
     return path
 
 

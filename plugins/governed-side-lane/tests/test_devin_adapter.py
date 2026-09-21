@@ -5,21 +5,11 @@ import shlex
 import subprocess
 import tempfile
 import unittest
-import shlex
 from unittest import mock
 
 from side_lane import devin_command_policy
-from side_lane import read_roots
-from side_lane import web_domains
 from side_lane.adapters import devin
 from side_lane.mcp_run_config import McpRunServer
-
-
-def exec_note_block(prompt: str) -> str:
-    """The generated shell-output note, from its heading to the approved task."""
-
-    start = prompt.index(devin.NATIVE_EXEC_NOTE_HEADING)
-    return prompt[start:prompt.index("# Approved task", start)]
 
 
 class DevinAdapterTests(unittest.TestCase):
@@ -115,8 +105,6 @@ class DevinAdapterTests(unittest.TestCase):
         for interpreter in ("python", "python3", "python3.11"):
             self.assertIn(f"Exec(.venv/bin/{interpreter})", config["permissions"]["allow"])
         self.assertIn("Exec(git status)", config["permissions"]["allow"])
-        self.assertIn("Exec(git branch -a)", config["permissions"]["allow"])
-        self.assertIn("Exec(env)", config["permissions"]["allow"])
         self.assertIn("Exec(git commit)", config["permissions"]["allow"])
         self.assertNotIn("Exec(git)", config["permissions"]["allow"])
         self.assertFalse(any("*" in rule for rule in config["permissions"]["allow"]
@@ -190,23 +178,6 @@ class DevinAdapterTests(unittest.TestCase):
         self.assertNotIn("mcp__cm-services__*", both)
         self.assertEqual(
             len([rule for rule in both if rule.startswith("mcp__cm-services__")]), 7)
-        # gateway-read follows the family: exact Gateway run tools only.
-        gateway = devin._runtime_config("swe-2-medium", ("gateway-read",))["permissions"]["allow"]
-        self.assertEqual(
-            {rule for rule in gateway if rule.startswith("mcp__cm-services__")},
-            {"mcp__cm-services__gateway_run_status",
-             "mcp__cm-services__gateway_run_report"},
-        )
-        self.assertFalse(any("asana_" in rule for rule in gateway))
-        # The granted set is the canonical capability partition, not a second
-        # hand-maintained list: no non-cm-services grant is silently dropped.
-        for capability in ("playwright", "gitnexus", "codegraph", "slack-read", "aws-read"):
-            with self.subTest(capability=capability):
-                rules = devin._runtime_config("swe-2-medium", (capability,))["permissions"]["allow"]
-                self.assertTrue(
-                    any(rule.startswith("mcp__") for rule in rules),
-                    f"{capability} grants no mcp rule on Devin",
-                )
 
     def test_runtime_config_preserves_git_push_denies_and_inherited_hooks(self) -> None:
         inherited_hook = {"matcher": "^edit$", "hooks": [{"type": "command", "command": "check"}]}
@@ -505,132 +476,6 @@ class DevinAdapterTests(unittest.TestCase):
             popen=mock.Mock(return_value=process))
         self.assertEqual((code, stdout, stderr), (124, "partial", "timed out"))
         killpg.assert_called_once_with(42, devin.signal.SIGTERM)
-
-    def test_command_names_the_resolved_lane_scratch_directory_for_every_configured_model(self) -> None:
-        # Two configured Devin models from different vendors: the lane's
-        # shell-output spelling is a property of the lane, not of the model, so
-        # the same note — naming the same resolved scratch directory — must
-        # reach both, and nothing may branch on the model name.
-        notes = {}
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, lane = self.repo(root, "repo"), self.repo(root, "lane with spaces")
-            scratch = lane.resolve() / devin.SCRATCH_DIR_NAME
-            for model in ("swe-2-medium", "gemini-3-8-flash-medium"):
-                with self.subTest(model=model):
-                    provider, route = self.config(model)
-                    command = devin.build_command(executable="devin", repo=repo, worktree=lane,
-                        provider="devin", model=model, provider_config=provider,
-                        model_config=route, prompt="Implement it",
-                        export_path=root / "receipt.json", config_path=root / "config.json",
-                        capabilities=("shell",))
-                    self.assertEqual(command[command.index("--model") + 1], model)
-                    note = exec_note_block(command[-1])
-                    self.assertIn(f"{scratch}/", note)
-                    self.assertIn(f"python3 -c '...' > {shlex.quote(str(scratch / 'out.txt'))} 2>&1", note)
-                    self.assertIn("absolute path", note)
-                    self.assertIn("never write outside the lane worktree", note)
-                    self.assertIn("Do not use relative `../`", note)
-                    # The note is text only: it carries no rule spelling, so it
-                    # cannot be read as a grant of anything.
-                    for rule_opening in ("Exec(", "Write(", "Read(", "Fetch("):
-                        self.assertNotIn(rule_opening, note)
-                    notes[model] = note
-        # Byte-identical, so the note provably does not branch on the model.
-        self.assertEqual(notes["swe-2-medium"], notes["gemini-3-8-flash-medium"])
-
-    def test_command_adds_the_shell_output_note_only_with_a_command_capability(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-            provider, route = self.config()
-            def prompt(capabilities):
-                return devin.build_command(executable="devin", repo=repo, worktree=lane,
-                    provider="devin", model="swe-2-medium", provider_config=provider,
-                    model_config=route, prompt="Implement it", export_path=root / "receipt.json",
-                    config_path=root / "config.json", capabilities=capabilities)[-1]
-            # `shell` (and only a command capability) makes `exec` reachable, so
-            # that is where the guidance belongs.
-            self.assertIn(devin.NATIVE_EXEC_NOTE_HEADING, prompt(("shell",)))
-            for capabilities in ((), ("playwright",), ("drive-read", "gitnexus")):
-                with self.subTest(capabilities=capabilities):
-                    self.assertNotIn(devin.NATIVE_EXEC_NOTE_HEADING, prompt(capabilities))
-            self.assertIn(devin.NATIVE_EXEC_NOTE_HEADING,
-                          prompt(("shell", "playwright")))
-
-    def test_shell_output_note_preserves_task_and_the_other_scope_notes(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-            provider, route = self.config()
-            command = devin.build_command(executable="devin", repo=repo, worktree=lane,
-                provider="devin", model="swe-2-medium", provider_config=provider,
-                model_config=route, prompt="Implement the exact approved task",
-                export_path=root / "receipt.json", config_path=root / "config.json",
-                capabilities=("shell",), read_roots=(root,),
-                web_domains=("cloud.google.com",))
-            prompt = command[-1]
-        self.assertIn(read_roots.scope_note((root,)), prompt)
-        self.assertIn(web_domains.SCOPE_HEADING, prompt)
-        self.assertIn(devin.NATIVE_EXEC_NOTE_HEADING, prompt)
-        # The approved task is appended last and unaltered, exactly once.
-        self.assertTrue(prompt.endswith("\n\n# Approved task\n\nImplement the exact approved task"))
-        self.assertEqual(prompt.count("# Approved task"), 1)
-        self.assertEqual(prompt.count("Implement the exact approved task"), 1)
-        # Every note sits above the task, which stays last.
-        self.assertLess(prompt.index(devin.NATIVE_EXEC_NOTE_HEADING),
-                        prompt.index("# Approved task"))
-        self.assertLess(prompt.index(web_domains.SCOPE_HEADING),
-                        prompt.index("# Approved task"))
-
-    def test_shell_output_note_does_not_mutate_tool_permissions_or_review_guard(self) -> None:
-        model = "swe-2-medium"
-        provider, route = self.config(model)
-        process = mock.Mock(pid=41, returncode=0)
-        captured: dict = {}
-        def popen(command, **_kwargs):
-            captured["prompt"] = command[-1]
-            captured["config"] = json.loads(Path(command[command.index("--config") + 1]).read_text())
-            Path(command[command.index("--export") + 1]).write_text(
-                json.dumps({"steps": [{"model_name": model}]}))
-            process.communicate.return_value = ("done", "")
-            return process
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
-            user_config = root / "config.json"
-            user_config.write_text(json.dumps(
-                {"permissions": {"deny": ["Exec(rm -rf /)"], "ask": ["Exec(curl)"]}}))
-            result = devin.launch(executable="devin", repo=repo,
-                worktree=lane, provider="devin", model=model, provider_config=provider,
-                model_config=route, prompt="Implement it", popen=popen,
-                capabilities=("shell", "git-push"), user_config_path=user_config)
-            self.assertEqual(result.returncode, 0)
-            # The permission set is exactly what the adapter's own config
-            # builder produces: the note reaches only the prompt text.
-            expected = devin._runtime_config(
-                model, ("shell", "git-push"), devin._load_user_config(user_config),
-                worktree=lane.resolve())
-            # The execute-only mode guard is untouched by the note.
-            with self.assertRaisesRegex(devin.DevinAdapterError, "execute mode only"):
-                devin.build_command(executable="devin", repo=repo, worktree=lane,
-                    provider="devin", model=model, provider_config=provider,
-                    model_config=route, prompt="Review it", export_path="receipt.json",
-                    config_path="config.json", mode="review", capabilities=("shell",))
-        permissions = captured["config"]["permissions"]
-        self.assertIn(devin.NATIVE_EXEC_NOTE_HEADING, captured["prompt"])
-        self.assertEqual(permissions, expected["permissions"])
-        # No rule grew or moved: the note is not a permission, and it neither
-        # widens nor rewrites the grant set it ships beside.
-        for kind in ("allow", "deny", "ask"):
-            self.assertFalse(any(devin.SCRATCH_DIR_NAME in rule for rule in permissions[kind]))
-            self.assertFalse(any("out.txt" in rule for rule in permissions[kind]))
-        self.assertEqual(permissions["deny"][0], "Exec(rm -rf /)")
-        self.assertEqual(permissions["ask"], ["Exec(curl)"])
-        self.assertIn("Exec(git push --force)", permissions["deny"])
-        self.assertIn("Write(" + str(lane.resolve()) + "/**)", permissions["allow"])
-        self.assertFalse(any("*" in rule for rule in permissions["allow"]
-                             if rule.startswith("Exec(")))
 
     def test_unqualified_model_fails_before_process_creation(self) -> None:
         provider, route = self.config()

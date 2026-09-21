@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import os
@@ -11,7 +10,7 @@ import shutil
 import sys
 from typing import Any, Mapping, Sequence
 
-from side_lane import evaluation, report_stop_hook, routing, selector_policy
+from side_lane import evaluation, routing, selector_policy
 from side_lane.auth import AuthError, auth_status, require_native_oauth
 from side_lane.credentials import CredentialError, credential_present, read_credential
 from side_lane.connector_metadata import json_mcp_name_scopes, toml_mcp_names
@@ -32,17 +31,11 @@ from side_lane.mcp_run_config import (
     validate_against_capabilities,
 )
 from side_lane.read_roots import ReadRootError, parse_read_roots
-from side_lane.web_domains import WebDomainError, parse_web_domains
 from side_lane.skill_bundle import SkillBundleError, catalog_note, deliver_skills
-from side_lane.adapters.claude import ClaudeAdapterError, require_report_only_budget
+from side_lane.adapters.claude import ClaudeAdapterError
 from side_lane.adapters.codex import CodexAdapterError
 from side_lane.adapters.devin import DevinAdapterError
 from side_lane.worktrees import (
-    ASSIGNMENT_SCHEMA_VERSION,
-    SCRATCH_DIR_NAME,
-    UNTRACKED_STATUS,
-    AssignmentRecord,
-    LaneDelivery,
     WorktreeError,
     create_worktree,
     dispose_clean_worktree,
@@ -52,7 +45,6 @@ from side_lane.worktrees import (
     snapshot_source,
     source_mutations,
     verify_lane,
-    write_assignment,
     write_audit,
 )
 
@@ -60,30 +52,6 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = PACKAGE_ROOT / "config" / "models.json"
 MAX_PROMPT_CHARS = 100_000
 MAX_PROFILE_CHARS = 100_000
-MAX_MEASUREMENT_CHARS = 8_192
-# The vocabulary below is the measurement ledger's, not a new one: an
-# assignment captured here must be liftable into that ledger unchanged
-# (docs/automatic-side-lane/ledger-schema.json).
-MEASUREMENT_HOST_FAMILIES = frozenset({"local-codex", "slack-claude-tag"})
-MEASUREMENT_WEIGHTS = frozenset({1, 3, 8})
-MEASUREMENT_PLANNING_DISPOSITIONS = frozenset(
-    {"small-plan-and-run", "substantial-plan-approved"}
-)
-# The ledger's own task_id pattern, with an explicit length bound so the sidecar
-# stays small and its name-safe key stays name-safe.
-MEASUREMENT_TASK_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
-MEASUREMENT_REQUIRED_FIELDS = frozenset(
-    {
-        "schema_version",
-        "task_id",
-        "host_family",
-        "preassigned_weight",
-        "planning_disposition",
-        "rework",
-    }
-)
-MEASUREMENT_OPTIONAL_FIELDS = frozenset({"parent_task_id"})
-MEASUREMENT_FIELDS = MEASUREMENT_REQUIRED_FIELDS | MEASUREMENT_OPTIONAL_FIELDS
 REVIEW_UNSAFE = tuple(
     re.compile(p, re.I)
     for p in (
@@ -374,27 +342,6 @@ def make_parser() -> argparse.ArgumentParser:
         "writes stay confined to the lane worktree",
     )
     run.add_argument(
-        "--web-domain",
-        action="append",
-        default=[],
-        metavar="HOST",
-        help="repeatable. Grant the worker fetch access to one more public "
-        "documentation origin, named as an exact lowercase hostname (for "
-        "example --web-domain cloud.google.com). The value must be a bare "
-        "hostname: a scheme, port, path, query, userinfo prefix, glob, IP "
-        "literal, single-label name, dot-local/internal name or reserved "
-        "suffix is rejected before anything starts. One host renders one "
-        "host-scoped rule (Devin Fetch(https://<host>/*), Claude Code "
-        "WebFetch(domain:<host>)); a bare Fetch/WebFetch grant is never "
-        "emitted and no capability unlocks the reach. The canonical host list "
-        "is named in the worker's instructions and recorded in the run audit. "
-        "This is permission matching, not a network sandbox: neither "
-        "unlisted destinations nor an approved origin's own redirects are "
-        "covered. Execute mode only; the Codex host refuses it, because an "
-        "execute Codex lane runs danger-full-access and exposes no "
-        "per-destination rule",
-    )
-    run.add_argument(
         "--mcp-config",
         metavar="PATH",
         default=None,
@@ -409,32 +356,6 @@ def make_parser() -> argparse.ArgumentParser:
         "and credential values are not",
     )
     run.add_argument("--approve-billable-route", action="store_true")
-    run.add_argument(
-        "--report-only",
-        action="store_true",
-        help="Claude execute lanes only. Require SIDE_LANE_REPORT.md in the lane "
-        "worktree and enforce it twice: a deterministic Stop hook inside the "
-        "same Claude Code invocation blocks one stop — feeding the same worker "
-        "the reason to write the real findings report — and the runner itself "
-        "refuses to accept the lane if the report is still missing, empty, or a "
-        "symlink when the worker exits. The lane is then judged on that report "
-        "artifact rather than on implementation delivery, so no commit is "
-        "required — a report-only lane that commits is refused instead, as is "
-        "one leaving any file outside the report and the lane's git-excluded, "
-        "untracked .side-lane-scratch/ scratch tree (editing, staging, or "
-        "deleting a *tracked* path there is source work and is refused too). "
-        "delivered for such a lane follows the whole run: the worker's exit "
-        "status, the coordinator-checkout comparison, and the report verdict "
-        "all have to hold. The branch is never published, the coordinator "
-        "checkout is still checked for outside-lane writes, and an unreadable "
-        "lane still fails closed. Requires a finite positive "
-        "max_budget_usd on the route, which is a client-side estimate guard, "
-        "not proof that the upstream server or account enforces the same cap. "
-        "The report file is an output exception to ordinary execute rules; the "
-        "lane still runs in execute mode and is not a sandbox. Add shell or "
-        "workspace-write capabilities when the report generation/read tool needs "
-        "to write artifacts. Ordinary execute and review lanes are unchanged",
-    )
     run.add_argument(
         "--allow-no-commit",
         action="store_true",
@@ -458,126 +379,10 @@ def make_parser() -> argparse.ArgumentParser:
         "the normal publication attempt, which --no-publish and a failed push "
         "can still leave without a remote branch",
     )
-    run.add_argument(
-        "--measurement-file",
-        metavar="JSON",
-        help="capture this run's pre-assigned delegation measurement. The file is "
-        "a bounded, metadata-only JSON object (schema_version, task_id, "
-        "host_family, preassigned_weight, planning_disposition, rework, and "
-        "parent_task_id for a rework); it is validated before any worktree is "
-        "created and published as an immutable assignment sidecar beside this "
-        "run's audit before the worker starts, so an interrupted or failed lane "
-        "still records what it was assigned. Omit it and the run is explicitly "
-        "unmeasured. Execute mode only",
-    )
     prompt = run.add_mutually_exclusive_group(required=True)
     prompt.add_argument("--prompt")
     prompt.add_argument("--prompt-file")
     return parser
-
-
-def load_measurement(path_argument: str) -> dict[str, Any]:
-    """Read and validate one bounded, metadata-only assignment record.
-
-    The file supplies the preassignment a lane's measurement needs and nothing
-    else: a task id, its host family, the weight assigned before execution, the
-    planning disposition, and the rework lineage. It is deliberately not a
-    place to put a prompt, a credential, or an output path — the field set is
-    closed and every field is a scalar, so a file that carries anything else,
-    however plausible, is refused rather than partly honoured. Validation is
-    total and happens before the caller creates a worktree, so an unusable
-    record cannot leave a lane behind.
-
-    Returning a normalized record (not the caller's object) keeps the sidecar's
-    contents a property of this contract instead of of the file that was read.
-    """
-
-    path = Path(path_argument).expanduser()
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise SideLaneError(f"cannot read measurement file: {exc}") from exc
-    if len(raw) > MAX_MEASUREMENT_CHARS:
-        raise SideLaneError(
-            f"measurement file is too large (limit {MAX_MEASUREMENT_CHARS} characters)"
-        )
-    try:
-        record = json.loads(raw)
-    except ValueError as exc:
-        raise SideLaneError(f"measurement file is not valid JSON: {exc}") from exc
-    if not isinstance(record, dict):
-        raise SideLaneError("measurement file must contain a JSON object")
-    unknown = sorted(set(record) - MEASUREMENT_FIELDS)
-    if unknown:
-        raise SideLaneError(
-            "measurement file has unsupported fields: " + ", ".join(unknown)
-        )
-    missing = sorted(MEASUREMENT_REQUIRED_FIELDS - set(record))
-    if missing:
-        raise SideLaneError(
-            "measurement file is missing required fields: " + ", ".join(missing)
-        )
-    if record["schema_version"] != ASSIGNMENT_SCHEMA_VERSION:
-        raise SideLaneError(
-            f"measurement file schema_version must be {ASSIGNMENT_SCHEMA_VERSION}"
-        )
-
-    def text(field: str) -> str:
-        value = record[field]
-        if not isinstance(value, str) or not MEASUREMENT_TASK_ID.match(value):
-            raise SideLaneError(
-                f"measurement file {field} must be a non-empty id of letters, "
-                "digits, underscores and dashes (at most 128 characters)"
-            )
-        return value
-
-    task_id = text("task_id")
-    host_family = record["host_family"]
-    if not isinstance(host_family, str) or host_family not in MEASUREMENT_HOST_FAMILIES:
-        raise SideLaneError(
-            "measurement file host_family must be one of: "
-            + ", ".join(sorted(MEASUREMENT_HOST_FAMILIES))
-        )
-    weight = record["preassigned_weight"]
-    # bool is an int subclass; a JSON `true` is not weight 1.
-    if not isinstance(weight, int) or isinstance(weight, bool) or weight not in MEASUREMENT_WEIGHTS:
-        raise SideLaneError(
-            "measurement file preassigned_weight must be one of: "
-            + ", ".join(str(item) for item in sorted(MEASUREMENT_WEIGHTS))
-        )
-    disposition = record["planning_disposition"]
-    if not isinstance(disposition, str) or disposition not in MEASUREMENT_PLANNING_DISPOSITIONS:
-        raise SideLaneError(
-            "measurement file planning_disposition must be one of: "
-            + ", ".join(sorted(MEASUREMENT_PLANNING_DISPOSITIONS))
-        )
-    rework = record["rework"]
-    if not isinstance(rework, bool):
-        raise SideLaneError("measurement file rework must be a boolean")
-    parent = record.get("parent_task_id")
-    if rework:
-        if not isinstance(parent, str) or not MEASUREMENT_TASK_ID.match(parent):
-            raise SideLaneError(
-                "measurement file parent_task_id is required for a rework and "
-                "must be a non-empty id of letters, digits, underscores and "
-                "dashes (at most 128 characters)"
-            )
-        if parent == task_id:
-            raise SideLaneError(
-                "measurement file parent_task_id must differ from task_id"
-            )
-    elif parent is not None:
-        raise SideLaneError(
-            "measurement file parent_task_id is only meaningful for a rework"
-        )
-    return {
-        "task_id": task_id,
-        "host_family": host_family,
-        "preassigned_weight": weight,
-        "planning_disposition": disposition,
-        "rework": rework,
-        "parent_task_id": parent,
-    }
 
 
 def load_recommendation_profile(path_argument: str) -> dict[str, Any]:
@@ -787,38 +592,8 @@ def _recommend(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
             result["reason_codes"] = result["reason_codes"] + [
                 "routed-policy-collection-failed"
             ]
-    # Presence-only staffing eligibility must never read as verified scope, so
-    # the label ships with the output rather than only living in the snapshot
-    # that routing normalizes back down to names. It belongs to a task that
-    # actually requires the capability: a registered ``cm-services`` on an
-    # unrelated task must not carry a pending-verification label nobody asked
-    # for.
-    if (
-        "gateway-read" in normalized["required_capabilities"]
-        and any(
-            "gateway-read" in snapshot["available_capabilities"]
-            for snapshot in normalized["host_capabilities"].values()
-        )
-    ):
-        result["gateway_read_pending_verification"] = GATEWAY_READ_PENDING_VERIFICATION
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
-
-
-#: The one capability the printed recommendation labels as promoted on
-#: connector-registration presence alone. Registration is not authentication:
-#: this text travels beside ``presence_only`` in the recommendation output so a
-#: reader cannot mistake a registered ``cm-services`` server for verified
-#: access, and dispatch still runs the wrapper's own target preflight and the
-#: host's native readiness check before any gateway call. It is deliberately
-#: single-capability and not a general evidence framework; the longer-standing
-#: Playwright promotion is unchanged and keeps its own check-capabilities basis.
-GATEWAY_READ_PENDING_VERIFICATION = (
-    "gateway-read staffing availability is cm-services connector-registration "
-    "presence only; live authentication and the exact granted run-id scope "
-    "remain pending dispatch, and the wrapper target preflight and the host's "
-    "native readiness check remain mandatory"
-)
 
 
 def _recommendation_host_snapshot(
@@ -828,16 +603,9 @@ def _recommendation_host_snapshot(
 
     A configured Playwright server is enough for an execute recommendation
     because dispatch performs a live readiness check and the route catalog
-    still requires its own local evaluation and connector evidence. A
-    ``gateway-read`` grant is admitted the same way, but only when the exact
-    ``cm-services`` server is registered: the capability's own evidence is
-    ``present`` for that registration and never ``verified``, and neither the
-    recommendation nor ``check-capabilities`` claims authentication from it —
-    see :data:`GATEWAY_READ_PENDING_VERIFICATION` for the label that travels
-    with the printed recommendation. Other merely-present capabilities remain
-    unavailable because their authority or authentication has not been
-    verified. Review lanes expose no MCP servers, and review mode drops these
-    promoted names even if a future report shape ever marked one verified.
+    still requires its own local evaluation and connector evidence. Other
+    merely-present capabilities remain unavailable because their authority or
+    authentication has not been verified. Review lanes expose no MCP servers.
     """
 
     connectors = report.get("mcp_connectors", [])
@@ -847,9 +615,7 @@ def _recommendation_host_snapshot(
         raise SideLaneError("capability report is malformed")
     available = {name for name, state in capabilities.items() if state}
     if mode != "execute":
-        available.difference_update(
-            {"playwright", "gateway-read", "gitnexus", "codegraph"}
-        )
+        available.difference_update({"playwright", "gitnexus", "codegraph"})
     if (
         mode == "execute"
         and "playwright" in connectors
@@ -858,14 +624,6 @@ def _recommendation_host_snapshot(
         and evidence["playwright"].get("state") == "present"
     ):
         available.add("playwright")
-    if (
-        mode == "execute"
-        and "cm-services" in connectors
-        and isinstance(evidence, Mapping)
-        and isinstance(evidence.get("gateway-read"), Mapping)
-        and evidence["gateway-read"].get("state") == "present"
-    ):
-        available.add("gateway-read")
     return {
         "available_connectors": sorted(connectors) if mode == "execute" else [],
         "available_capabilities": sorted(available),
@@ -969,9 +727,6 @@ def _capability_report(
         ),
         "contentful-master-read": _cm_services_evidence(
             "contentful-master-read", mcp_names, host, out_of_scope
-        ),
-        "gateway-read": _cm_services_evidence(
-            "gateway-read", mcp_names, host, out_of_scope
         ),
         "codegraph": _graph_connector_evidence(
             "codegraph", mcp_names, host, out_of_scope
@@ -1081,14 +836,13 @@ def _cm_services_evidence(
 ) -> dict[str, str]:
     """Registration evidence for a ``cm-services`` read capability.
 
-    Every cm-services-family capability (asana, drive, gcloud, database,
-    algolia, contentful, Gateway) grants exact ``mcp__cm-services__<tool>``
-    IDs, so the tool IDs embed the server name ``cm-services`` exactly on
-    every host — like ``slack-read`` the check demands the exact name (a
-    near-miss is ``name-mismatch``). The server is a fixed local stdio
-    registration the coordinator provisions into the worker host's
-    user-global config under the same account the capability reads; a
-    ``present`` registration is presence evidence only — same-account
+    ``asana-read`` and ``drive-read`` both grant exact
+    ``mcp__cm-services__<tool>`` IDs, so the tool IDs embed the server name
+    ``cm-services`` exactly on every host — like ``slack-read`` the check
+    demands the exact name (a near-miss is ``name-mismatch``). The server is
+    a fixed local stdio registration the coordinator provisions into the
+    worker host's user-global config under the same account the capability
+    reads; a ``present`` registration is presence evidence only — same-account
     provisioning, service authentication, and a live read stay unproven until
     the worker observes the exact granted tool names.
     """
@@ -1309,296 +1063,15 @@ LANE_VERIFY_FAILED = 5
 #: source checkout for an accepted lane.
 LANE_SOURCE_MUTATED = 6
 
-# Operator wording for the report-only gate's outcome. ``report_freshness_state``
-# returns the key; "current" never reaches this table because it is the only
-# state that is delivered.
-REPORT_STATE_DETAIL = {
-    "unusable": (
-        "it is missing, empty, whitespace-only, or not a plain file"
-    ),
-    "stale": (
-        "the file there is unchanged from what the lane already contained when "
-        "it started, so this run did not write it"
-    ),
-    "unverified": "no run baseline was captured, so nothing can be claimed about it",
-}
-
-#: Lane-relative prefix a report-only lane may leave uncommitted besides the
-#: report artifact itself: the lane's git-excluded scratch tree, the
-#: governance-documented home for throwaway scripts, notes, intermediate
-#: output, and the screenshots a browser lane saves. Git normally never
-#: reports it, so this is a guard for the case where that exclusion is missing
-#: — the alternative is failing a lane over a path the rules told it to use.
-#: The prefix is only half the rule: see the status requirement below.
-REPORT_ONLY_SCRATCH_PREFIX = f"{SCRATCH_DIR_NAME}/"
-
-
-def _report_only_lane_artifacts(
-    worktree: Path, report_path: Path
-) -> "frozenset[str] | None":
-    """The lane path a report-only run's own artifact must occupy.
-
-    Exactly one path is accepted — the fixed report name directly inside the
-    lane worktree — and ``None`` means the report path this run recorded is not
-    that path. There is no second guess available in that state: the run cannot
-    tell which of the lane's changed files is the report it was dispatched to
-    collect, so it fails closed rather than judge a lane whose artifact it
-    cannot identify.
-    """
-
-    relative = os.path.relpath(os.fspath(report_path), os.fspath(worktree))
-    if os.path.isabs(relative) or os.sep in relative:
-        return None
-    if relative != report_stop_hook.REPORT_NAME:
-        return None
-    return frozenset({relative})
-
-
-def _report_only_unexpected_paths(
-    delivery: LaneDelivery, report_artifacts: "frozenset[str]"
-) -> tuple[str, ...]:
-    """Lane-relative paths a report-only lane left that are not its report.
-
-    Two entries are permitted, and each for its own reason:
-
-    * the report artifact itself, untracked where the repository does not
-      track it or modified where it does; rename/copy statuses are refused
-      because they can conceal a different source path;
-    * a path under the lane's scratch tree that git reports as *untracked*,
-      which is the throwaway artifact the governance told the lane to write
-      there and which the runner's own exclusion normally hides entirely.
-
-    The scratch exemption is deliberately not a prefix match on its own. A
-    repository may track a file under that directory, and git reports a
-    modification, deletion, staged addition, or rename of a tracked path with
-    one of those codes rather than ``??`` — that is source work by any other
-    name, and reading the prefix as permission would let a worker edit a
-    tracked file under a documented throwaway directory and still be accepted.
-    A path whose status the inspection did not carry is refused too: an
-    unknown state is not evidence of an untracked artifact, and the one thing
-    this rule must never do is guess in the worker's favour.
-    """
-
-    statuses = {entry.path: entry.status for entry in delivery.changed}
-    unexpected: list[str] = []
-    for path in delivery.uncommitted:
-        status = statuses.get(path)
-        if path in report_artifacts and not (
-            status is not None and ("R" in status or "C" in status)
-        ):
-            continue
-        if (
-            status is not None
-            and status == UNTRACKED_STATUS
-            and path.startswith(REPORT_ONLY_SCRATCH_PREFIX)
-        ):
-            continue
-        unexpected.append(path)
-    return tuple(unexpected)
-
-
-def _report_only_blocker(
-    *,
-    report_state: str | None,
-    report_path: Path,
-    report_artifacts: "frozenset[str] | None",
-    committed: bool,
-    unexpected: Sequence[str],
-) -> str | None:
-    """Why a report-only lane is not a delivery, or None when it is.
-
-    Report delivery is decided here, on the report artifact and the absence of
-    source work, and never on the commit state an execute lane is judged by.
-    The two are genuinely different deliverables: the worker is instructed to
-    change no source and make no git change, so requiring a commit plus a clean
-    tree would reject the very lane this flag exists to accept — and
-    ``--allow-no-commit`` could not repair that, because the report file is
-    itself one of the uncommitted paths that flag's condition excludes.
-
-    Nothing is relaxed by the split. Source-checkout changes still fail the run
-    (``LANE_SOURCE_MUTATED``), an unreadable lane still fails it
-    (``LANE_DELIVERY_UNVERIFIED``), and a worker that commits, or that leaves
-    any file outside the report and scratch exceptions, is not delivered.
-    """
-
-    if report_state != "current":
-        return (
-            f"--report-only lane produced no usable "
-            f"{report_stop_hook.REPORT_NAME} at {report_path}: "
-            f"{REPORT_STATE_DETAIL.get(report_state, 'the report could not be judged')}. "
-            "The worker's completion prose is not the report. The lane's "
-            "worktree, any commit, and the audit are intact."
-        )
-    if report_artifacts is None:
-        return (
-            f"--report-only lane's report path {report_path} is not "
-            f"{report_stop_hook.REPORT_NAME} at the lane worktree root, so this "
-            "run cannot tell the report apart from implementation work. Nothing "
-            "was removed. The lane's worktree and audit are intact."
-        )
-    if committed:
-        return (
-            "--report-only lane committed work, so it is not a report-only "
-            "outcome: the worker was told to make no git change, and a commit "
-            "also means a branch this run must not publish. Nothing was removed; "
-            "inspect the lane's commit on its branch before accepting it."
-        )
-    if unexpected:
-        listed = "\n  ".join(unexpected[:20])
-        more = (
-            ""
-            if len(unexpected) <= 20
-            else f"\n  ... and {len(unexpected) - 20} more"
-        )
-        return (
-            "report-only lane left changes that are not its report and are not "
-            f"untracked files in the lane's {SCRATCH_DIR_NAME}/ scratch tree:"
-            f"\n  {listed}{more}\n"
-            "Screenshots and intermediate output belong in the lane's "
-            f"git-excluded {SCRATCH_DIR_NAME}/ directory as new, untracked "
-            "files; editing or removing a *tracked* path is source work, and "
-            "source work needs an execute lane, not a report-only one. Nothing "
-            "was removed. The lane's worktree and audit are intact."
-        )
-    return None
-
-
-@dataclass(frozen=True)
-class _ReportOnlyState:
-    """The four facts a report-only verdict is made of, read from the tree.
-
-    Taken twice in a run that verifies: once from the verdict's own inputs,
-    and once immediately after the verification command, so that a command
-    which wrote into the lane or the coordinator checkout is a fact the run
-    reports rather than a change it silently absorbs into the delivery.
-    """
-
-    committed: bool
-    unexpected: tuple[str, ...]
-    source_changes: tuple[str, ...]
-    report_identity: "str | None"
-    #: Why the lane, or the coordinator checkout, could not be inspected at
-    #: all. A failed look is a fact about the run, not an exception to raise
-    #: past the verdict that has to report it.
-    lane_error: "str | None" = None
-    source_error: "str | None" = None
-
-
-def _report_only_state(
-    lane,
-    report_path: Path,
-    report_artifacts: "frozenset[str]",
-    repo: Path,
-    source_baseline: "frozenset[str]",
-) -> _ReportOnlyState:
-    """Read the report-only contract's inputs fresh from the real tree.
-
-    Never raises: an inspection that fails is one of the facts the caller has
-    to map onto a contract, and swallowing it into a delivery is exactly the
-    failure this state exists to prevent.
-    """
-
-    lane_error = None
-    committed = False
-    unexpected: tuple[str, ...] = ()
-    try:
-        delivery = lane_delivery(lane)
-    except WorktreeError as exc:
-        lane_error = str(exc)
-    else:
-        committed = delivery.committed
-        unexpected = _report_only_unexpected_paths(delivery, report_artifacts)
-    source_error = None
-    source_changes: tuple[str, ...] = ()
-    try:
-        source_changes = source_mutations(repo, source_baseline)
-    except WorktreeError as exc:
-        source_error = str(exc)
-    try:
-        identity = report_stop_hook.report_identity(report_path)
-    except report_stop_hook.UnsafeReportPath:
-        # Something the freshness gate would refuse now sits at the path; that
-        # is a change to the artifact from whatever was there before.
-        identity = None
-    return _ReportOnlyState(
-        committed=committed,
-        unexpected=unexpected,
-        source_changes=source_changes,
-        report_identity=identity,
-        lane_error=lane_error,
-        source_error=source_error,
-    )
-
-
-def _report_only_verification_changes(
-    before: _ReportOnlyState, after: _ReportOnlyState, *, report_path: Path
-) -> tuple[str, ...]:
-    """What the verification command itself introduced, in the operator's words.
-
-    ``--verify`` runs an arbitrary shell command inside the lane, so it can
-    commit, leave files, rewrite the report the verdict was just reached on, or
-    write into the coordinator checkout. None of that is the worker's report
-    delivery, and accepting the lane after it would report a state the run
-    never judged. Every difference found here makes the lane not delivered,
-    and nothing is removed to make the difference go away.
-    """
-
-    changes: list[str] = []
-    if after.report_identity != before.report_identity:
-        changes.append(f"it changed the run's report artifact at {report_path}")
-    if after.committed and not before.committed:
-        changes.append("it committed work on the lane branch")
-    for path in after.unexpected:
-        if path not in before.unexpected:
-            changes.append(f"it left {path} in the lane")
-    for path in after.source_changes:
-        if path not in before.source_changes:
-            changes.append(f"it changed the coordinator checkout at {path}")
-    if after.lane_error is not None:
-        changes.append(
-            f"the lane could not be inspected afterwards: {after.lane_error}"
-        )
-    if after.source_error is not None:
-        changes.append(
-            "the coordinator checkout could not be compared afterwards: "
-            f"{after.source_error}"
-        )
-    return tuple(changes)
-
 
 def _launch(
     args: argparse.Namespace, config: Mapping[str, Any], repo: Path, prompt: str,
-    *, read_roots: Sequence[Path] = (), web_domains: Sequence[str] = (),
+    *, read_roots: Sequence[Path] = (),
     run_mcp_servers: "Mapping[str, Any] | None" = None,
-    measurement: "Mapping[str, Any] | None" = None,
 ) -> int:
     provider_config, model_config = select_route(
         config, args.host, args.mode, args.provider, args.model
     )
-    # The report-only opt-in is the same-invocation repair for a worker that
-    # ended its turn with exit 0 and reported a report it never wrote. It is
-    # deliberately narrow: execute mode only, the Claude host only (the
-    # mechanism is a Claude Code Stop hook), and gated on an explicit spend cap
-    # so the cap and the hook are part of one command. Everything else about an
-    # execute lane — its argv, tools, permissions, MCP handling, timeout — is
-    # untouched by this flag, and review lanes never see it.
-    # Exact-boolean read: an argparse Namespace always carries the declared
-    # flag, and anything other than an explicit True means the opt-in was not
-    # given, so no lane can be steered into report-only mode by accident.
-    report_only = getattr(args, "report_only", False) is True
-    report_path: Path | None = None
-    if report_only:
-        if args.mode != "execute":
-            raise SideLaneError("--report-only is supported only in execute mode")
-        if args.host != "claude":
-            raise SideLaneError(
-                "--report-only is supported only on the claude host: the repair "
-                "is a Claude Code Stop hook inside the same invocation"
-            )
-        try:
-            require_report_only_budget(model_config)
-        except ClaudeAdapterError as exc:
-            raise SideLaneError(str(exc)) from exc
     if args.capability and args.mode != "execute":
         raise SideLaneError("--capability is supported only in execute mode")
     if run_mcp_servers and args.mode != "execute":
@@ -1629,12 +1102,6 @@ def _launch(
         # Skills materialize inside the execute lane's worktree; a review
         # lane has nowhere to put them and would silently drop the request.
         raise SideLaneError("--skill is supported only in execute mode")
-    if measurement is not None and args.mode != "execute":
-        # An assignment measures execution work handed to a worker. A review
-        # lane produces no deliverable to accept or reject, so recording it as
-        # an assignment would put work in the measurement denominator that the
-        # measurement cannot score. Fail closed rather than half-record it.
-        raise SideLaneError("--measurement-file is supported only in execute mode")
     unknown = sorted(set(args.capability) - set(config["capabilities"]))
     if unknown:
         raise SideLaneError(f"unknown capabilities: {', '.join(unknown)}")
@@ -1701,32 +1168,8 @@ def _launch(
     # under references; a private skill unavailable outside a dev-tools
     # checkout fails here, naming the flag to drop.
     skill_catalog: list[dict[str, object]] = []
-    assignment: AssignmentRecord | None = None
     secret: str | None = None
-    report_baseline: report_stop_hook.ReportBaseline | None = None
     try:
-        if report_only:
-            # Run-bound freshness, captured before anything can write it: what
-            # the fixed report path already holds. A lane worktree is added from
-            # HEAD, so a repository that tracks SIDE_LANE_REPORT.md hands every
-            # new lane a complete-looking report no worker wrote, and an
-            # unrelated commit or an empty session would then satisfy the gate.
-            # Captured here, rather than in the adapter, so the in-loop Stop
-            # hook and the acceptance below compare against one recorded state.
-            # The inherited file is copied into the lane's ignored scratch
-            # (never the coordinator checkout, never deleted) so a worker
-            # overwriting it erases no history.
-            try:
-                report_baseline = report_stop_hook.capture_report_baseline(
-                    lane.worktree / report_stop_hook.REPORT_NAME,
-                    preserve_dir=lane.worktree / SCRATCH_DIR_NAME,
-                )
-            except report_stop_hook.UnsafeReportPath as exc:
-                raise SideLaneError(
-                    f"--report-only cannot start: {exc}. No honest per-run "
-                    "baseline can be taken from it; remove or replace it before "
-                    "dispatching."
-                ) from exc
         if args.mode == "execute":
             # `--skill` is declared by the `run` subparser, like `--verify`
             # and `--no-publish` below, so read it the same tolerant way.
@@ -1748,27 +1191,6 @@ def _launch(
         source_baseline = (
             snapshot_source(repo) if args.mode == "execute" else frozenset()
         )
-        if measurement is not None:
-            # The assignment is published here — after every precondition that
-            # can still fail for free, and BEFORE the adapter is invoked — so
-            # the sidecar exists for exactly the runs a worker could have
-            # started. A conflict or an unpublishable sidecar raises out of
-            # this block, which disposes the lane without ever starting a
-            # worker: an assignment is never retrofitted onto a run that
-            # already executed. The instant is this runner's own UTC clock,
-            # recorded once and never revised; the identity is what the route
-            # was *configured* with, not what the provider later resolved to.
-            assignment = write_assignment(
-                lane,
-                measurement=measurement,
-                assigned_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                planned={
-                    "provider": args.provider,
-                    "model": args.model,
-                    "host": args.host,
-                    "gateway": provider_config["gateway"],
-                },
-            )
         if args.host == "codex":
             from side_lane.adapters.codex import run_codex
 
@@ -1786,7 +1208,6 @@ def _launch(
                 support_dir=host_support_dir(args.host, executable),
                 secret=secret,
                 read_roots=read_roots,
-                web_domains=web_domains,
                 run_mcp_servers=run_mcp_servers,
             )
         elif args.host == "claude":
@@ -1805,10 +1226,7 @@ def _launch(
                 capabilities=capabilities,
                 secret=secret,
                 read_roots=read_roots,
-                web_domains=web_domains,
                 run_mcp_servers=run_mcp_servers,
-                report_only=report_only,
-                report_baseline=report_baseline,
             )
         else:
             from side_lane.adapters.devin import launch
@@ -1825,7 +1243,6 @@ def _launch(
                 mode=args.mode,
                 capabilities=capabilities,
                 read_roots=read_roots,
-                web_domains=web_domains,
                 run_mcp_servers=run_mcp_servers,
             )
     except Exception:
@@ -1857,23 +1274,6 @@ def _launch(
     )
     summary["provider_exit_status"] = result.returncode
     summary["exit_status"] = source_exit_status
-    # The terminal audit links the assignment on every outcome that reaches it:
-    # a run that failed, or verified nothing, still points at what it was
-    # assigned. `None` is the explicit unmeasured case — no measurement was
-    # requested for this run. It never means "measurement was lost"; a sidecar
-    # that could not be published aborted the run before an adapter started,
-    # and nothing downstream could accept that worker's result either.
-    assignment_link = (
-        None
-        if assignment is None
-        else {
-            "path": str(assignment.path),
-            "sha256": assignment.sha256,
-            "task_id": measurement["task_id"] if measurement else None,
-            "schema_version": ASSIGNMENT_SCHEMA_VERSION,
-            "reused": assignment.reused,
-        }
-    )
     audit = write_audit(
         lane,
         host=result.host,
@@ -1893,7 +1293,6 @@ def _launch(
         usage=result.usage,
         provider_artifact=result.provider_artifact,
         read_roots=[str(root) for root in read_roots],
-        web_domains=list(web_domains),
         skill_catalog=skill_catalog,
         run_mcp_servers=(
             [
@@ -1904,18 +1303,15 @@ def _launch(
             else []
         ),
         source_changes=list(source_changes or ()),
-        assignment=assignment_link,
     )
     summary.update(
         {
-            "assignment": assignment_link,
             "branch": lane.branch,
             "worktree": str(lane.worktree),
             "git_status": status,
             "audit": str(audit),
             "result_artifact": str(audit),
             "skill_catalog": skill_catalog,
-            "web_domains": list(web_domains),
             "run_mcp_servers": list(audit_names(run_mcp_servers)) if run_mcp_servers else [],
             # None means the comparison itself failed — never report that as
             # a clean checkout, same contract as delivered/verified above.
@@ -1955,157 +1351,29 @@ def _launch(
 
     summary["committed"] = delivery.committed
     summary["uncommitted"] = list(delivery.uncommitted)
-    # The runner's own look at the report, on the same rule — and against the
-    # same baseline — the in-loop Stop hook applied. A report is only this
-    # run's artifact when it differs from what the worktree already held at
-    # lane start: non-emptiness and a recent mtime cannot distinguish a real
-    # delivery from a report the repository carried at HEAD. For a report-only
-    # lane this is the delivery verdict itself, and it must be reached before
-    # both publication and the summary, so neither a committed branch nor a
-    # stale report can be mistaken for an accepted lane.
-    report_present: bool | None = None
-    report_state: str | None = None
-    report_only_blocker: str | None = None
-    report_path = lane.worktree / report_stop_hook.REPORT_NAME
-    if report_only:
-        if report_baseline is not None:
-            report_path = report_baseline.report_path
-        report_state = report_stop_hook.report_freshness_state(report_baseline)
-        report_present = report_state == "current"
-        summary["report_present"] = report_present
-        summary["report_state"] = report_state
-        summary["report_path"] = str(report_path)
-        summary["report_preexisting"] = bool(
-            report_baseline is not None and report_baseline.preexisting
-        )
-        summary["report_preserved"] = (
-            None
-            if report_baseline is None or report_baseline.preserved_path is None
-            else str(report_baseline.preserved_path)
-        )
-        # This lane's deliverable is the report, so this — not the execute
-        # lane's commit-plus-clean-tree rule — is its delivery verdict. The
-        # lane tree verdict above is still wanted and still authoritative for
-        # what it says: whether the worker committed, and every path it left
-        # uncommitted, both of which this decision reads.
-        report_artifacts = _report_only_lane_artifacts(lane.worktree, report_path)
-        unexpected = (
-            ()
-            if report_artifacts is None
-            else _report_only_unexpected_paths(delivery, report_artifacts)
-        )
-        summary["report_only_unexpected_paths"] = list(unexpected)
-        summary["report_only_committed"] = delivery.committed
-        report_only_blocker = _report_only_blocker(
-            report_state=report_state,
-            report_path=report_path,
-            report_artifacts=report_artifacts,
-            committed=delivery.committed,
-            unexpected=unexpected,
-        )
+    summary["delivered"] = delivery.delivered
     # 2026-09-17: a lane told to run the test suite ran it 18 times, saw
     # JSONDecodeError nine times, committed the failing tests anyway, and
     # exited 0 — caught only because a human re-ran the suite by hand. A
     # lane's claim about tests is prose in a transcript; the runner must
-    # check. Verification runs BEFORE publication on purpose: publication must
-    # still happen either way, because preserving the branch is what stops
-    # work being stranded on one machine, and failing work is exactly the work
-    # someone needs to be able to look at.
-    #
-    # Whether a verification may be attempted at all. For an execute lane this
-    # is unchanged — a delivered lane and nothing else. A report-only lane
-    # adds this run's other outcomes to the gate, because the worker's exit
-    # status and the coordinator checkout are already decided by the time a
-    # verification would run: spending a shell command on a run that has
-    # failed for either reason changes nothing about the verdict, and that
-    # command is itself free to write into the lane, the report, or the
-    # checkout. The verdict, not the lane's git state, is what a report-only
-    # lane is gated on — gating it on `delivery.delivered` made --verify a
-    # silent no-op for that lane, which is exactly the "the operator believes
-    # a check ran" failure this runner refuses elsewhere.
-    if report_only:
-        verify_eligible = (
-            report_only_blocker is None
-            and not result.returncode
-            and source_check_error is None
-            and not source_changes
-        )
-    else:
-        verify_eligible = delivery.delivered
+    # check. Verification runs only for a delivered lane (an undelivered one
+    # already fails), and it runs BEFORE publication on purpose: publication
+    # must still happen either way, because preserving the branch is what
+    # stops work being stranded on one machine, and failing work is exactly
+    # the work someone needs to be able to look at.
     verify = None
-    verification_changes: tuple[str, ...] = ()
-    if report_only:
-        summary["report_only_verification_changes"] = []
-    if getattr(args, "verify", None) and verify_eligible:
-        before = None
-        if report_only:
-            try:
-                report_identity = report_stop_hook.report_identity(report_path)
-            except report_stop_hook.UnsafeReportPath:
-                report_identity = None
-            before = _ReportOnlyState(
-                committed=delivery.committed,
-                unexpected=unexpected,
-                source_changes=tuple(source_changes or ()),
-                report_identity=report_identity,
-            )
+    if getattr(args, "verify", None) and delivery.delivered:
         verify = verify_lane(lane, args.verify)
         summary["verified"] = verify.passed
         summary["verify_command"] = verify.command
         summary["verify_exit"] = verify.exit_code
         summary["verify_output"] = verify.output
-        if report_only:
-            # The command may have committed, left files, rewritten the report
-            # the verdict was just reached on, or written into the coordinator
-            # checkout. Re-read the tree instead of assuming it did not: the
-            # lane that gets accepted must be the lane that was judged.
-            after = _report_only_state(
-                lane, report_path, report_artifacts or frozenset(), repo,
-                source_baseline,
-            )
-            verification_changes = _report_only_verification_changes(
-                before, after, report_path=report_path
-            )
-            summary["report_only_verification_changes"] = list(verification_changes)
-            if after.source_changes:
-                # A checkout change is reported through the same channel and
-                # the same exit code whether a worker or --verify made it, so
-                # extend the recorded delta rather than hide it behind the
-                # lane-level refusal below.
-                merged = list(source_changes or ())
-                merged.extend(
-                    path for path in after.source_changes if path not in merged
-                )
-                source_changes = tuple(merged)
-                summary["source_changes"] = list(source_changes)
-                summary["source_mutated"] = True
     else:
         # None, not False: nobody rendered a verdict, and the summary must
         # not imply one was reached and lost.
         summary["verified"] = None
-    # The report-only verdict is reached here, after verification, so the
-    # machine-readable `delivered` a downstream consumer (a model
-    # qualification, for one) reads can never claim a lane this run has
-    # already failed: a non-zero worker exit, an unverifiable or changed
-    # coordinator checkout, a failed verification, and a verification that
-    # dirtied the lane are all part of the same verdict as the report itself.
-    # Exit codes alone would not be enough — a consumer that reads the summary
-    # never sees them. An execute lane's `delivered` stays exactly what it
-    # was: the lane tree's own commit-plus-clean-tree answer.
-    if report_only:
-        delivered = (
-            report_only_blocker is None
-            and not result.returncode
-            and source_check_error is None
-            and not source_changes
-            and (verify is None or verify.passed)
-            and not verification_changes
-        )
-    else:
-        delivered = delivery.delivered
-    summary["delivered"] = delivered
     publish_warning = None
-    if not result.returncode and summary["delivered"]:
+    if not result.returncode and delivery.delivered:
         # A delivered lane's commits live on one machine until they are pushed:
         # measured 2026-09-17, 40 commits across 36 worktrees were on no remote,
         # and nothing ever reclaimed the trees. Pushing makes the commits
@@ -2113,15 +1381,7 @@ def _launch(
         # reclaim the worktree later with its guards intact. A failed push is
         # reported, never fatal: the work is committed with or without the
         # remote, and failing here would be worse than today's behavior.
-        if report_only:
-            # Never published, with or without --no-publish: a report-only
-            # lane's deliverable is the report artifact in its worktree, and an
-            # accepted one has no commit on its branch to make remote-contained
-            # (one that did commit is rejected above, so this cannot hide an
-            # unpublished commit). Recorded explicitly, as --no-publish does,
-            # so "not pushed" is never confused with "publishing was skipped".
-            summary["published"] = None
-        elif getattr(args, "no_publish", False):
+        if getattr(args, "no_publish", False):
             summary["published"] = None
         else:
             try:
@@ -2144,30 +1404,8 @@ def _launch(
             f"for command: {verify.command}\n{verify.output}",
             file=sys.stderr,
         )
-    if verification_changes:
-        # Not a warning: `delivered` is false because of it, and the operator
-        # has to know the difference between "the worker left this" and "the
-        # verification command left this" before touching the lane.
-        print(
-            "side-lane: --verify changed what this report-only run had judged: "
-            + "; ".join(verification_changes)
-            + ". Nothing was removed, but this run judged the lane as it stood "
-            "before the command ran, so the lane is not a delivery.",
-            file=sys.stderr,
-        )
     if result.returncode:
         return result.returncode
-    if report_only and report_only_blocker is not None:
-        # One feedback round was already spent inside the invocation; the lane
-        # is still not an accepted report-only delivery — no report this run
-        # wrote, a commit it was told not to make, or changes that are neither
-        # the report nor its scratch tree — and the exit code says so rather
-        # than leaving an operator to read the prose. Nothing was removed: the
-        # lane's worktree, any commit, and the audit are all intact. The outer
-        # GCF consumer's own report collection stays authoritative for source
-        # changes, containment, sizes, and scrubbing.
-        print(f"side-lane: {report_only_blocker}", file=sys.stderr)
-        return LANE_NOT_DELIVERED
     if verify is not None and not verify.passed:
         return LANE_VERIFY_FAILED
     if source_check_error is not None:
@@ -2199,20 +1437,11 @@ def _launch(
             file=sys.stderr,
         )
         return LANE_SOURCE_MUTATED
-    if verification_changes:
-        # The message above already names what the command changed. Last of the
-        # failure guards on purpose: a verification that dirtied the
-        # coordinator checkout is a source mutation (exit 6, above), and one
-        # that failed is an exit 5 — this is the remaining case, where the
-        # command exited 0 and the lane is still not the state that was judged.
-        return LANE_NOT_DELIVERED
-    if delivered:
+    if delivery.delivered:
         return 0
     # --allow-no-commit covers a lane whose intended outcome is no commit. It
     # does NOT excuse a lane that committed and then abandoned the rest: that
-    # is partial delivery, and the abandoned half is lost either way. It is
-    # also what a report-only lane no longer needs: that outcome is judged on
-    # the report, not on a commit the worker was told not to make.
+    # is partial delivery, and the abandoned half is lost either way.
     if getattr(args, "allow_no_commit", False) and not delivery.uncommitted:
         return 0
     print(f"side-lane: {delivery.failure_reason()}", file=sys.stderr)
@@ -2300,48 +1529,14 @@ def run(argv: Sequence[str] | None = None) -> int:
     # lane behind. `--read-root` is declared by the `run` subparser, so it is
     # always present here.
     read_roots = parse_read_roots(args.read_root)
-    # Same fail-closed ordering for the documentation-domain grants: every
-    # hostname is validated here, so a malformed, wildcard, IP, private or
-    # reserved domain stops the run before a worktree, a credential or a host
-    # process exists.
-    web_domains = parse_web_domains(args.web_domain)
-    if web_domains and args.mode != "execute":
-        # Review mode is the strict read-only form and has no fetch tool on any
-        # host, so a documentation-domain grant there is authority the worker
-        # cannot be given. Refused here rather than in the adapters so the run
-        # stops before the prompt gate, a worktree, or any host process; each
-        # adapter carries its own guard for direct callers.
-        raise SideLaneError("--web-domain is supported only in execute mode")
-    if web_domains and args.host == "codex":
-        # The one host that cannot express the grant. An execute Codex lane
-        # runs `danger-full-access`, so it already reaches every destination
-        # and exposes no per-destination rule to narrow it with; accepting the
-        # flag would describe, and audit, a scope nothing enforces. The Codex
-        # adapter carries the same refusal as the authoritative guard for
-        # direct callers. Refused here, before any worktree, credential or
-        # host process exists.
-        raise SideLaneError(
-            "--web-domain is not supported on the Codex host: an execute Codex "
-            "lane runs with danger-full-access and Codex CLI has no "
-            "per-destination web-fetch permission rule, so the grant could be "
-            "neither enforced nor honestly recorded"
-        )
     # Same fail-closed ordering for the per-run MCP registration file: its
     # structure, capability narrowing and env references are all checked here
     # (side_lane.mcp_run_config) before anything is created or started.
     run_mcp_servers = load_run_mcp_config(args.mcp_config) if args.mcp_config else None
-    # And the same for the optional measurement file: its size, field set and
-    # vocabulary are all checked here, so a malformed or over-large record
-    # stops the run before a worktree, a credential, or a host process exists.
-    measurement = (
-        load_measurement(args.measurement_file) if args.measurement_file else None
-    )
     return _launch(
         args, config, repo, load_prompt(args.prompt, args.prompt_file, args.mode),
         read_roots=read_roots,
-        web_domains=web_domains,
         run_mcp_servers=run_mcp_servers,
-        measurement=measurement,
     )
 
 
@@ -2354,7 +1549,6 @@ def main() -> None:
         CredentialError,
         GovernanceError,
         ReadRootError,
-        WebDomainError,
         SkillBundleError,
         McpRunConfigError,
         WorktreeError,
