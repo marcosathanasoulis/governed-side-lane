@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.32 - 2026-09-21
+
+- Clarify that unknown empirical history or a missing median is measurement absence, not a hard gate, when existing explicit authority and a verified included subscription or current tariff with bounded expected usage cover the dispatch. Unknown costs are not reported as zero and do not prove a route is cheapest.
+
+
 ## 0.4.31 - 2026-09-21
 
 - Fix research-routing references to clarify that an authorized bounded

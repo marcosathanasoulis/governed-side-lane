@@ -273,5 +273,9 @@ policy and apply it to eligible task-specific routes without repeated permission
 questions. Compare expected total accepted-task cost, including retries and
 review, rather than token price alone. Record the selected route, cost evidence,
 and authorization basis. Standing cost authorization does not enable an
-unconfigured provider or authorize unrelated tasks. Unknown costs do not prove
-a route is cheapest.
+unconfigured provider or authorize unrelated tasks. Unknown empirical history
+or a missing median is measurement absence, not a hard availability, capability,
+context, security, or known-failed-quality gate; a verified included
+subscription or current tariff with bounded expected usage and existing explicit
+authority can support dispatch while reporting the history as unknown. Unknown
+costs do not prove a route is cheapest and are never reported as zero.
