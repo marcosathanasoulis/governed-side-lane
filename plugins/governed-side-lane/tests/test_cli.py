@@ -1924,6 +1924,50 @@ class LaunchCapabilityGateTests(SideLaneTests):
                     cli._launch(args, config, repo, "Use algolia")
                 create.assert_not_called()
 
+    def test_gateway_read_launch_gate_with_cm_services_evidence(self) -> None:
+        """gateway-read is admitted only on the exact cm-services registration.
+
+        The registration is presence evidence only: the gate never reports a
+        live read, and an absent or near-miss server fails it before any
+        worktree is created.
+        """
+        config = cli.load_config()
+        repo = self.repo()
+        for inventory in (
+            {"cm-services": {"command": "cm-services"}},
+            {"cm-services-local": {"command": "cm-services"}},
+            {},
+        ):
+            with self.subTest(inventory=inventory):
+                with tempfile.TemporaryDirectory() as home:
+                    home_path = Path(home)
+                    (home_path / ".claude.json").write_text(
+                        json.dumps({"mcpServers": inventory}), encoding="utf-8"
+                    )
+                    args = mock.Mock(
+                        host="claude", mode="execute", provider="claude", model="claude-sonnet-5",
+                        capability=["gateway-read"], lane_name="gateway", skill=[],
+                        approve_billable_route=False, worktree_root=None, verify=None,
+                        read_root=[], mcp_config=None,
+                    )
+                    with (
+                        mock.patch.dict(os.environ, {"HOME": home}, clear=False),
+                        mock.patch("side_lane.cli.shutil.which", side_effect=lambda name: None if name in {"gcloud", "psql"} else "/bin/tool"),
+                        mock.patch("side_lane.cli._require_host_executable", side_effect=cli.SideLaneError("stop here")),
+                        mock.patch("side_lane.cli.create_worktree") as create,
+                    ):
+                        if "cm-services" in inventory:
+                            # Exact registration: the gate passes and launch
+                            # stops only at the next guard.
+                            with self.assertRaisesRegex(cli.SideLaneError, "stop here"):
+                                cli._launch(args, config, repo, "Read the run status")
+                        else:
+                            with self.assertRaisesRegex(
+                                cli.SideLaneError, "unavailable: gateway-read"
+                            ):
+                                cli._launch(args, config, repo, "Read the run status")
+                        create.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -180,6 +180,23 @@ class DevinAdapterTests(unittest.TestCase):
         self.assertNotIn("mcp__cm-services__*", both)
         self.assertEqual(
             len([rule for rule in both if rule.startswith("mcp__cm-services__")]), 7)
+        # gateway-read follows the family: exact Gateway run tools only.
+        gateway = devin._runtime_config("swe-2-medium", ("gateway-read",))["permissions"]["allow"]
+        self.assertEqual(
+            {rule for rule in gateway if rule.startswith("mcp__cm-services__")},
+            {"mcp__cm-services__gateway_run_status",
+             "mcp__cm-services__gateway_run_report"},
+        )
+        self.assertFalse(any("asana_" in rule for rule in gateway))
+        # The granted set is the canonical capability partition, not a second
+        # hand-maintained list: no non-cm-services grant is silently dropped.
+        for capability in ("playwright", "gitnexus", "codegraph", "slack-read", "aws-read"):
+            with self.subTest(capability=capability):
+                rules = devin._runtime_config("swe-2-medium", (capability,))["permissions"]["allow"]
+                self.assertTrue(
+                    any(rule.startswith("mcp__") for rule in rules),
+                    f"{capability} grants no mcp rule on Devin",
+                )
 
     def test_runtime_config_preserves_git_push_denies_and_inherited_hooks(self) -> None:
         inherited_hook = {"matcher": "^edit$", "hooks": [{"type": "command", "command": "check"}]}

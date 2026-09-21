@@ -256,6 +256,7 @@ class ToolPolicyTests(unittest.TestCase):
             | set(policy.allowed["algolia-read"])
             | set(policy.allowed["contentful-read"])
             | set(policy.allowed["contentful-master-read"])
+            | set(policy.allowed["gateway-read"])
         )
         for rules in list(policy.allowed.values()) + list(policy.denied.values()) + [policy.always]:
             for rule in rules:
@@ -302,6 +303,30 @@ class ToolPolicyTests(unittest.TestCase):
                 "mcp__cm-services__contentful_master_search_entries",
             ),
         )
+        self.assertEqual(
+            policy.allowed["gateway-read"],
+            (
+                "WaitForMcpServers",
+                "mcp__cm-services__gateway_run_status",
+                "mcp__cm-services__gateway_run_report",
+            ),
+        )
+
+    def test_gateway_read_names_no_deployment_url_or_credential(self) -> None:
+        """The Gateway grant is a capability boundary, not a deployment handle.
+
+        The server-side ``gateway_run_ids`` allowlist and the GET-only
+        status/report endpoints belong to the coordinator-provisioned server;
+        the public core records only exact tool IDs, so no endpoint URL,
+        account name, or credential argument may appear in the rule set.
+        """
+        from side_lane.governance import tool_policy
+        rules = tool_policy().allowed["gateway-read"]
+        for rule in rules:
+            for forbidden in ("://", "http", "Bearer", "token", "gateway_run_ids="):
+                self.assertNotIn(forbidden, rule)
+        self.assertFalse(any(rule.endswith("*") for rule in rules))
+        self.assertIn("gateway_run_ids", lane_system_prompt("execute", Path("/tmp/repo")))
 
     def test_malformed_allowlist_fails_closed(self) -> None:
         from side_lane.governance import tool_policy

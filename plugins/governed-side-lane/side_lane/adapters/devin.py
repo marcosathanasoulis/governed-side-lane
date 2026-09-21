@@ -15,6 +15,7 @@ import tempfile
 from typing import Any, Callable, Mapping, Sequence
 
 from side_lane import devin_command_policy
+from side_lane.capabilities import RUN_CONFIG_CAPABILITIES, USER_SCOPE_MCP_CAPABILITIES
 from side_lane.credentials import scrub_backend_environment
 from side_lane.governance import known_capabilities, lane_system_prompt, tool_policy
 from side_lane.mcp_run_config import (
@@ -463,12 +464,18 @@ def _runtime_config(model: str, capabilities: Sequence[str],
     # read as capability evidence — no connector-name registration and no
     # permission-ID documentation substitutes for a successful call. A missing
     # grant makes Devin prompt, and a prompt ends a non-interactive run.
-    # ``asana-read``/``drive-read`` share the fixed user-global ``cm-services``
-    # registration the coordinator provisions into the worker host's Devin
-    # user config; each capability admits only its own exact
+    # Every cm-services-family capability — asana, drive, gcloud, database,
+    # algolia, contentful, and Gateway — shares the fixed user-global
+    # ``cm-services`` registration the coordinator provisions into the worker
+    # host's Devin user config; each capability admits only its own exact
     # ``mcp__cm-services__<tool>`` rules from the canonical policy — the shared
-    # server never widens one grant into the other's tools.
-    for capability in sorted(set(capabilities) & {"playwright", "gitnexus", "codegraph", "slack-read", "aws-read", "asana-read", "drive-read", "gcloud-read", "database-read", "algolia-read", "contentful-read", "contentful-master-read"}):
+    # server never widens one grant into another's tools. The granted set is
+    # the canonical ``side_lane.capabilities`` partition rather than a second
+    # hand-maintained list here, so a newly added capability cannot be granted
+    # on Claude but silently dropped on Devin.
+    for capability in sorted(
+        set(capabilities) & (USER_SCOPE_MCP_CAPABILITIES | RUN_CONFIG_CAPABILITIES)
+    ):
         for rule in policy.allowed.get(capability, ()):
             if rule.startswith("mcp__") and rule not in allow:
                 allow.append(rule)

@@ -126,7 +126,8 @@ ROUTED_MAX_OUTPUT_TOKENS = "16384"
 # names. ``aws-read`` names the one server its per-run --mcp-config file may
 # register (side_lane.mcp_run_config); it never appears in
 # enabledMcpjsonServers because its registration is not a project .mcp.json
-# entry. ``asana-read`` and ``drive-read`` both map to the fixed local stdio
+# entry. Every cm-services-family capability — asana, drive, gcloud,
+# database, algolia, contentful, and Gateway — maps to the fixed local stdio
 # server registered as ``cm-services`` in the worker host's user-global config
 # (the controlled HOME the coordinator provisions); a user-scope registration
 # needs no project approval either. Server names must never be wildcarded and
@@ -138,11 +139,11 @@ ROUTED_MAX_OUTPUT_TOKENS = "16384"
 # pre-launch ``mcp get`` health probe. Approval (above) is a per-process
 # settings fact; readiness is a live subprocess check, and the two stay
 # separate so a graph/Slack grant never pays for — or gates on — a probe.
-# ``cm-services`` is probed once even when both of its capabilities are
+# ``cm-services`` is probed once even when several of its capabilities are
 # granted.
 READINESS_REQUIRED_CAPABILITIES = frozenset(
     {"playwright", "asana-read", "drive-read", "gcloud-read", "database-read", "algolia-read",
-     "contentful-read", "contentful-master-read"}
+     "contentful-read", "contentful-master-read", "gateway-read"}
 )
 
 
@@ -384,14 +385,20 @@ another tool, widen the grant, or claim a read happened.
 
 
 def _cm_services_startup_instruction(capabilities: Capabilities) -> str:
-    """Render the ``cm-services`` wait instruction once, for either grant.
+    """Render the ``cm-services`` wait instruction once, for any of its grants.
 
-    ``asana-read`` and ``drive-read`` share the one fixed user-global server;
-    the instruction is emitted once no matter how many of them are granted and
-    names only the tools the granted capabilities actually allow.
+    Every cm-services-family capability shares the one fixed user-global
+    server; the instruction is emitted once no matter how many of them are
+    granted and names only the tools the granted capabilities actually allow.
+    The granted set is intersected with ``CM_SERVICES_CAPABILITIES`` exactly:
+    a lane granted only a non-cm-services capability (``gitnexus``,
+    ``codegraph``, ``playwright``, ``slack-read``) shares the same
+    ``USER_SCOPE_MCP_CAPABILITIES`` membership but has no cm-services grant, so
+    it must receive no instruction at all rather than one naming an empty tool
+    list and a server it was never granted.
     """
 
-    granted = set(capabilities) & USER_SCOPE_MCP_CAPABILITIES
+    granted = set(capabilities) & CM_SERVICES_CAPABILITIES
     if not granted:
         return ""
     policy = tool_policy()
@@ -400,6 +407,13 @@ def _cm_services_startup_instruction(capabilities: Capabilities) -> str:
         if rule.startswith("mcp__cm-services__")
     )
     listed = ", ".join(f"`{tool}`" for tool in tools)
+    gateway_note = (
+        "\nThe server also restricts the Gateway tools to the exact run IDs in "
+        "the coordinator's `gateway_run_ids` grant file; a call naming any other "
+        "run fails closed, and neither tool accepts a URL, token, or other "
+        "credential argument — never pass one."
+        if "gateway-read" in granted else ""
+    )
     return f"""
 
 
@@ -417,8 +431,8 @@ after the wait the granted tools are absent, named differently, or the
 server reports an authentication failure, stop and report that exact state
 — do not substitute another tool, widen the grant, or claim a read
 happened. Each capability grants only its own tools on this shared server:
-granting one never grants the other. The capability is not task authority:
-read only the objects the coordinator's task names.
+granting one never grants another's tools.{gateway_note} The capability is
+not task authority: read only the objects the coordinator's task names.
 """
 
 

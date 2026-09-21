@@ -1008,7 +1008,7 @@ class ProjectMcpServerApprovalTests(unittest.TestCase):
         # asana-read/drive-read map to the fixed user-global cm-services
         # registration, which is not a project .mcp.json entry — so no
         # enabledMcpjsonServers approval is emitted for it.
-        for capabilities in (("asana-read",), ("drive-read",), ("gcloud-read",), ("database-read",), ("algolia-read",), ("asana-read", "drive-read", "gcloud-read", "database-read", "algolia-read")):
+        for capabilities in (("asana-read",), ("drive-read",), ("gcloud-read",), ("database-read",), ("algolia-read",), ("gateway-read",), ("asana-read", "drive-read", "gcloud-read", "database-read", "algolia-read", "gateway-read")):
             with self.subTest(capabilities=capabilities):
                 settings = self.settings_of(self.command("execute", capabilities))
                 self.assertNotIn("cm-services", settings.get("enabledMcpjsonServers", []))
@@ -1083,6 +1083,31 @@ class ProjectMcpServerApprovalTests(unittest.TestCase):
         self.assertIn('servers: ["slack"]', prompt)
         self.assertIn("presence evidence only", prompt)
         self.assertIn("never\nproof of authentication", prompt)
+
+    def test_cm_services_startup_instruction_is_absent_for_other_user_scope_grants(self) -> None:
+        """A non-cm-services user-scope grant gets no cm-services instruction.
+
+        ``gitnexus``/``codegraph``/``playwright``/``slack-read`` share
+        ``USER_SCOPE_MCP_CAPABILITIES`` membership with the cm-services family,
+        so the granted set is intersected with ``CM_SERVICES_CAPABILITIES``
+        exactly. Before that narrowing, a gitnexus-only lane was handed an
+        instruction naming an empty tool list and telling the worker to wait
+        on a server it had never been granted.
+        """
+        for capability in ("gitnexus", "codegraph", "playwright", "slack-read", "shell"):
+            with self.subTest(capability=capability):
+                self.assertEqual(claude._cm_services_startup_instruction((capability,)), "")
+                self.assertNotIn(
+                    "cm-services startup",
+                    self.system_prompt_of(self.command("execute", (capability,))),
+                )
+        # The cm-services family still gets exactly one instruction.
+        self.assertEqual(
+            self.system_prompt_of(
+                self.command("execute", ("gateway-read", "contentful-read"))
+            ).count("cm-services startup"),
+            1,
+        )
 
     def test_review_mode_stays_isolated_from_project_server_approval(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

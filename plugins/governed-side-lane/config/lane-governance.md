@@ -141,8 +141,21 @@ backup is allowed, but no alternate GLM model is.
   tools `contentful_master_get_entry` and `contentful_master_search_entries`
   (exact tool IDs `mcp__cm-services__contentful_master_get_entry` and
   `mcp__cm-services__contentful_master_search_entries`), mapped to the
-  `contentful-master` account. These capabilities use the same fixed
-  `cm-services` registration and are admitted by registration/readiness
+  `contentful-master` account. With the `gateway-read` capability, that same
+  server may be called only through its read-only Gateway run tools
+  `gateway_run_status` and `gateway_run_report` (exact tool IDs
+  `mcp__cm-services__gateway_run_status` and
+  `mcp__cm-services__gateway_run_report`), which answer only the GET status
+  and report endpoints for the run IDs in the coordinator's explicit
+  `gateway_run_ids` grant file. That grant file is the server's own
+  server-side allowlist, provisioned with the account before the run; a call
+  naming a run outside it fails closed, and neither tool takes a URL, token,
+  or other credential argument — the deployment's endpoint, credentials, and
+  private identifiers are never named in this public core or passed by the
+  worker. The capability is not task authority: read only the run IDs the
+  coordinator's task names, and never treat a status read as authority to
+  cancel, retry, or otherwise change a run. These capabilities use the same
+  fixed `cm-services` registration and are admitted by registration/readiness
   evidence, not by requiring local `gcloud` or `psql` executables.
 - Code-graph connectors are read-only. With the `gitnexus` capability, call
   `list_repos` first and report the indexed path, branch, and commit against
@@ -424,6 +437,12 @@ from host registration files, never values.
 - `WaitForMcpServers`
 - `mcp__cm-services__contentful_master_get_entry`
 - `mcp__cm-services__contentful_master_search_entries`
+
+### gateway-read
+
+- `WaitForMcpServers`
+- `mcp__cm-services__gateway_run_status`
+- `mcp__cm-services__gateway_run_report`
 
 ### codegraph
 

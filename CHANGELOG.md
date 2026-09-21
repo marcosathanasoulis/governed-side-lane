@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.37 - 2026-09-21
+
+- Add the optional `gateway-read` capability for the exact cm-services run status and report tools on Claude and Devin. Preserve server-side target-run grants, strict review exclusion, and presence-only capability evidence. Stop emitting cm-services startup instructions for unrelated graph or Slack grants.
+
 ## 0.4.36 - 2026-09-21
 
 - Accept report-only delivery without requiring an implementation commit. Require a fresh report, successful worker and verification, and unchanged source checkout; reject unrelated lane changes, tracked scratch mutations, commits, and source renames into the report. Recheck integrity after verification and keep ordinary execute/review delivery unchanged.
