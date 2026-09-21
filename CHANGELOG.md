@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.34 - 2026-09-21
+
+- Separate a verified included subscription from unknown pricing. A route verified as covered by a subscription the user already pays has a known `$0` additional/marginal usage cost, distinct from an unknown price and from a zero-cost provider key, and it does not make every OAuth or hosted route free — coverage is route-specific and some are metered. A missing empirical median for an otherwise authorized task is measurement absence, not an unknown current price: report the history as unavailable without rewriting it to zero and without alerting or demanding new approval solely because it is missing.
+
 ## 0.4.33 - 2026-09-21
 
 - Add explicit public documentation hostname grants for Claude and Devin execute workers, with input validation, native permission rules, and audit evidence. Strict review and unsupported hosts reject the grant.

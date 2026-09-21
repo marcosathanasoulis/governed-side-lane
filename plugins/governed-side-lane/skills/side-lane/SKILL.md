@@ -101,8 +101,12 @@ on uncertainty, non-determinism, impact, irreversibility, material disagreement
 risk, or an explicit acceptance gate.
 Compare the complete session: task tokens, known tool charges, dispatch/setup,
 retries and coordinator correction, and any independent review. Keep prepaid
-subscription usage separate from marginal provider-key usage. Unknown prices or
-overhead remain unknown and are never treated as zero. A frontier route needs
+subscription usage separate from marginal provider-key usage. An exact route
+verified as covered by a subscription the user already pays has a known `$0`
+additional/marginal usage cost — a different statement from an unknown price
+and from a zero-cost provider key, and not a claim that every OAuth or hosted
+route is free. Unknown prices or overhead remain unknown and are never treated
+as zero. A frontier route needs
 task-specific evidence that an eligible economical route cannot meet the need.
 
 GLM is optional and enters staffing only when the user explicitly enables it.
@@ -277,5 +281,12 @@ unconfigured provider or authorize unrelated tasks. Unknown empirical history
 or a missing median is measurement absence, not a hard availability, capability,
 context, security, or known-failed-quality gate; a verified included
 subscription or current tariff with bounded expected usage and existing explicit
-authority can support dispatch while reporting the history as unknown. Unknown
-costs do not prove a route is cheapest and are never reported as zero.
+authority can support dispatch while reporting the history as unavailable.
+Verified included coverage without overage has a known `$0` additional usage
+cost; a paid tariff retains its actual bounded estimate, not zero. A missing median is not an unknown
+current price and is not by itself a reason to alert, notify, or demand new
+approval on an otherwise authorized task. When coverage is verified and the
+median is not, the plain disclosure is "$0 additional usage cost — covered by
+subscription; historical median unavailable". Unknown costs do not prove a route
+is cheapest and are never reported as zero; missing history is never rewritten
+to zero.

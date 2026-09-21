@@ -178,8 +178,10 @@ excludes a candidate; it does not invite a guess. Missing or stale cost evidence
 excludes a candidate from `cost-optimized` and is reported as unknown in
 `best-fit`. For `best-fit`, rank only after the hard gates using reviewed
 task-fit evidence. For `cost-optimized`, choose the lowest estimated cost only
-among the same eligible candidates that meet the quality floor. Included native
-OAuth and available prepaid GLM have zero incremental cost. If one native host
+among the same eligible candidates that meet the quality floor. Native OAuth
+routes the host reports as included have a known `$0` additional usage cost, as
+does available prepaid GLM; OAuth is not automatically free, since some native
+OAuth models are metered or on extra usage. If one native host
 is on extra usage and the other is included, prefer the included host only when
 it passes the same capability/quality gates. For ordinary work, use a
 provider-neutral economical choice: among eligible candidates that satisfy the
@@ -193,7 +195,13 @@ assumptions, catalog/evidence timestamps, and the exact route in the brief.
 Estimate economics for the complete session: task tokens, known tool charges,
 dispatch/setup, retries and coordinator repair, and any independent review.
 Keep prepaid usage separate from marginal provider-key cost; unknown rates or
-overhead remain unknown and are never treated as zero. Prefer the least-cost
+overhead remain unknown and are never treated as zero. A route verified as
+covered by a subscription the user already pays has a known `$0` additional
+usage cost, which is neither an unknown price nor a zero-cost provider key, and
+is not a claim that every OAuth or hosted route is free. A missing median for an
+otherwise authorized task is measurement absence, not an unknown current price:
+report the history as unavailable without rewriting it to zero or alerting
+solely because it is missing. Prefer the least-cost
 sufficiently evidenced eligible fit for ordinary work. A frontier assignment
 requires task-specific evidence that an eligible economical route cannot meet
 the quality or capability requirement.
