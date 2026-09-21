@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.42 - 2026-09-21
+
+- Disable native Claude auto-memory for Side Lane workers and explicitly keep host memory read-only, preserving approved context and tools. This does not sandbox manual filesystem writes.
+
+
 ## 0.4.41 - 2026-09-21
 
 - Grant the exact read-only `gcp_run_job` tool under `gcloud-read` for named Cloud Run job metadata, while preserving the separate execution-listing tool and excluding unrelated capabilities and review mode.

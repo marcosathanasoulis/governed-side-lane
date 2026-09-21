@@ -120,6 +120,16 @@ REPORT_ONLY_HOOK_TIMEOUT_SECONDS = 10
 # claim provider capacity or replace the router's fail-closed guard.
 ROUTED_AUTOCOMPACT_WINDOW = "100k"
 ROUTED_MAX_OUTPUT_TOKENS = "16384"
+# Claude Code's native auto-memory — the per-project memory directory it loads
+# and writes under the controlled HOME — is switched off in every lane
+# worker's child environment, native or routed, review or execute. The value is
+# forced after transport scrubbing, so a caller's inherited false cannot
+# survive into the child. This governs that native feature only: it is a
+# same-user control, not an operating-system write control, because an execute
+# worker's own manual tools can still write the path. See
+# docs/lane-context.md and ``HOST_MEMORY_READONLY_NOTE`` below.
+AUTO_MEMORY_DISABLE_ENV = "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
+AUTO_MEMORY_DISABLED_VALUE = "1"
 # Exact MCP server names a granted capability maps to. ``slack-read`` maps to
 # the server registered as ``slack``; the canonical lane governance names the
 # registration, not the capability. The graph capabilities use their own exact
@@ -341,6 +351,21 @@ needs authentication, stop and report that exact state — do not substitute
 another tool, widen the grant, or claim a read happened. The capability is
 not task authority: read only the channel or thread the coordinator's task
 names.
+"""
+HOST_MEMORY_READONLY_NOTE = """\
+## Host memory is read-only
+
+Never create, update, or delete host memory, including the user or project
+memory stores maintained by Claude Code. This does not prohibit task-authorized
+edits to repository configuration files that are not memory stores. This is a same-user instruction and control, not an
+operating-system sandbox: it exists so no lane worker silently changes shared
+host state, and your own manual tools are not technically barred from that
+path. A durable fact this task produces belongs in a reviewed repository
+artifact in your lane worktree — the report, findings, or run artefact the task
+names — which the coordinator can verify; never in host memory. Explicit
+repository context (`AGENTS.md`, the authoritative `CLAUDE.md`, canonical
+governance, delivered skills, and approved MCP tools) is unaffected and stays
+available.
 """
 EXECUTE_ROLE_INSTRUCTION = """\
 
@@ -845,6 +870,11 @@ def build_transport_environment(
         provider, model, provider_config, model_config, mode
     )
     child = scrub_environment(inherited)
+    # Forced after scrubbing, for every provider and both modes, so an
+    # inherited `CLAUDE_CODE_DISABLE_AUTO_MEMORY=0` in the caller's environment
+    # cannot override it: the documented switch is read as truthy, and the
+    # child always gets the explicit true.
+    child[AUTO_MEMORY_DISABLE_ENV] = AUTO_MEMORY_DISABLED_VALUE
     if auth_method == "oauth":
         if secret is not None:
             raise ClaudeAdapterError("native OAuth routes must not receive an API key")
@@ -1219,6 +1249,9 @@ def build_command(
     web_note = web_scope_note(web_domains)
     if web_note:
         note = f"{note}\n\n{web_note}" if note else web_note
+    # Every Claude worker carries the host-memory rule, review or execute: it
+    # is a note, so no tool list, grant, or argv flag changes with it.
+    note = f"{note}\n\n{HOST_MEMORY_READONLY_NOTE}" if note else HOST_MEMORY_READONLY_NOTE
     if note:
         system_prompt += f"\n\n{note}"
     if mode == "execute":

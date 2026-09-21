@@ -145,7 +145,12 @@ explicitly configured, key-backed, and potentially billable.
 - Native Codex and Claude routes use each host's own OAuth session.
 - Optional GLM is execute-only, explicit, key-backed, and never a generic
   fallback; only fixed `glm-5.3` is eligible when explicitly approved.
-- Host-private memory and connectors are never presented as synchronized.
+- Host-private memory and connectors are never presented as synchronized. On
+  Claude-host lanes the worker child environment switches Claude Code's native
+  auto-memory off and the worker is told host memory is read-only, so a durable
+  fact is saved to a reviewed repository artifact instead. That is a same-user
+  instruction and control, not an operating-system sandbox: an execute worker's
+  own manual tools can still write the path, and this control does not automatically audit those writes.
 - Lane worktrees live under the coordinator repo's own `.side-lanes/`
   directory, which the runner auto-excludes from that repo's `git status` so
   earlier lanes never block the next launch.

@@ -735,7 +735,8 @@ class ClaudeAdapterTests(unittest.TestCase):
             "OPENAI_API_KEY": "y", "SIDE_LANE_CREDENTIAL_OTHER": "other-secret",
             "SIDE_LANE_CREDENTIALS_DIR": "/private/credentials"},
             provider="claude", model="claude-sonnet-5", provider_config=self.native, model_config=config, mode="execute")
-        self.assertEqual(child, {"PATH": "/bin"})
+        self.assertEqual(child, {"PATH": "/bin",
+                                 claude.AUTO_MEMORY_DISABLE_ENV: claude.AUTO_MEMORY_DISABLED_VALUE})
         with self.assertRaisesRegex(claude.ClaudeAdapterError, "must not receive"):
             claude.build_transport_environment({}, provider="claude", model="claude-sonnet-5",
                 provider_config=self.native, model_config=config, mode="execute", secret="never")
@@ -1861,6 +1862,205 @@ class ReportOnlyModeTests(unittest.TestCase):
                 "hook_event_name": "Stop", "cwd": "/", "stop_hook_active": False})
         self.assertEqual(result.returncode, 0)
         self.assertEqual(json.loads(result.stdout.decode("utf-8"))["decision"], "block")
+
+
+class HostMemoryReadOnlyTests(unittest.TestCase):
+    """Host memory is read-only for every Claude worker, native or routed.
+
+    Two seams are proven here: the child-environment switch that turns Claude
+    Code's native auto-memory off for every provider and both modes, and the
+    prompt note that states the rule. Both are same-user controls — neither is
+    an operating-system sandbox — and neither changes a tool grant or the
+    review lane's strict argv.
+    """
+
+    native = {"gateway": "native-claude", "auth_method": "oauth", "billable": False}
+    glm = {"gateway": "direct-zai", "auth_method": "provider-key", "billable": True,
+           "base_url": "https://api.z.ai/api/anthropic"}
+    kimi = {"gateway": "direct-kimi", "auth_method": "provider-key", "billable": True,
+            "base_url": "https://api.moonshot.cn/anthropic"}
+    omniroute = {"gateway": "omniroute-router", "auth_method": "provider-key",
+                 "billable": True, "base_url": "https://omniroute.example.invalid"}
+    models = {"claude": "claude-sonnet-5", "glm": "glm-5.3",
+              "kimi": "k3-256k", "omniroute": "routed-selector"}
+
+    def setUp(self) -> None:
+        claude._strict_mcp_executable_cache["claude"] = True
+        self.providers = {"claude": self.native, "glm": self.glm,
+                          "kimi": self.kimi, "omniroute": self.omniroute}
+
+    def model_config(self, provider: str, mode: str) -> dict:
+        """The minimum verified config each route needs for this mode."""
+        model = self.models[provider]
+        if provider == "claude":
+            protocol = "native-claude-readonly" if mode == "review" else "native-claude"
+        else:
+            protocol = "anthropic-compatible-readonly" if mode == "review" else "anthropic-compatible"
+        config: dict = {"runtime_model": model, "protocol": protocol}
+        if provider == "kimi":
+            config["identity_contract"] = {"requested_model": model, "resolved_model": model,
+                                           "settings_precedence": "verified"}
+        if provider == "omniroute":
+            config["qualification"] = {"verified": True, "verified_on": "2026-09-19",
+                                       "source": "mocked transport report"}
+            config["routing_policy_contract"] = {
+                "requested_selector": model, "allowed_upstream_models": ["deepseek-flash"],
+                "settings_precedence": "verified"}
+        return config
+
+    def routes(self) -> tuple:
+        """Every provider path, with the secret its route needs."""
+        return (("native", "claude", self.native, None),
+                ("glm", "glm", self.glm, "selected"),
+                ("direct", "kimi", self.kimi, "selected"),
+                ("routed", "omniroute", self.omniroute, "selected"))
+
+    def build(self, root: Path, mode: str, provider: str = "claude", **overrides: object) -> list[str]:
+        repo, lane = root / "repo", root / "lane"
+        for path in (repo, lane):
+            path.mkdir(exist_ok=True)
+            (path / ".git").write_text("gitdir: /tmp/example\n", encoding="utf-8")
+        return claude.build_command(
+            executable="claude", repo=repo, worktree=lane, provider=provider,
+            model=self.models[provider], provider_config=self.providers[provider],
+            model_config=self.model_config(provider, mode), prompt="task",
+            mode=mode, **overrides)
+
+    def command(self, mode: str, provider: str = "claude", **overrides: object) -> list[str]:
+        with tempfile.TemporaryDirectory() as directory:
+            return self.build(Path(directory), mode, provider, **overrides)
+
+    def prompt_of(self, command: list[str]) -> str:
+        return command[command.index("--append-system-prompt") + 1]
+
+    def test_every_provider_and_mode_forces_the_switch_over_an_inherited_false(self) -> None:
+        # The exact documented spelling is part of the contract: a renamed or
+        # respelled variable would silently stop disabling the feature.
+        self.assertEqual(claude.AUTO_MEMORY_DISABLE_ENV, "CLAUDE_CODE_DISABLE_AUTO_MEMORY")
+        self.assertEqual(claude.AUTO_MEMORY_DISABLED_VALUE, "1")
+        inherited = {"PATH": "/bin", "HOME": "/home/worker",
+                     claude.AUTO_MEMORY_DISABLE_ENV: "0"}
+        for label, provider, provider_config, secret in self.routes():
+            for mode in ("execute", "review"):
+                if mode == "review" and provider not in ("claude", "glm"):
+                    continue  # new direct providers and routed lanes are execute-only
+                with self.subTest(route=label, mode=mode):
+                    child = claude.build_transport_environment(
+                        inherited, provider=provider, model=self.models[provider],
+                        provider_config=provider_config,
+                        model_config=self.model_config(provider, mode),
+                        mode=mode, secret=secret)
+                    self.assertEqual(child[claude.AUTO_MEMORY_DISABLE_ENV],
+                                     claude.AUTO_MEMORY_DISABLED_VALUE)
+
+    def test_the_switch_is_additive_and_never_mutates_the_callers_environment(self) -> None:
+        inherited = {"PATH": "/bin", "HOME": "/home/worker", "LANG": "en_US.UTF-8",
+                     "TMPDIR": "/tmp/worker", "GIT_AUTHOR_NAME": "Worker",
+                     "ANTHROPIC_API_KEY": "inherited-secret", "OPENAI_API_KEY": "inherited"}
+        caller_copy = dict(inherited)
+        child = claude.build_transport_environment(
+            inherited, provider="claude", model=self.models["claude"],
+            provider_config=self.native,
+            model_config=self.model_config("claude", "execute"), mode="execute")
+        # The caller's mapping is untouched; the child is a new mapping.
+        self.assertEqual(inherited, caller_copy)
+        self.assertIsNot(child, inherited)
+        # Runtime environment the transport did not scrub is retained...
+        for name in ("PATH", "HOME", "LANG", "TMPDIR", "GIT_AUTHOR_NAME"):
+            self.assertEqual(child[name], caller_copy[name])
+        # ...inherited secrets are still scrubbed...
+        self.assertNotIn("ANTHROPIC_API_KEY", child)
+        self.assertNotIn("OPENAI_API_KEY", child)
+        # ...and the one addition is the forced auto-memory switch.
+        self.assertEqual(sorted(set(child) - set(caller_copy)),
+                         [claude.AUTO_MEMORY_DISABLE_ENV])
+        self.assertEqual(child[claude.AUTO_MEMORY_DISABLE_ENV], "1")
+        # A caller that already carries the switch keeps the key and only its
+        # value is forced, so the override is a value change, never a re-add.
+        falsified = {**inherited, claude.AUTO_MEMORY_DISABLE_ENV: "0"}
+        forced = claude.build_transport_environment(
+            falsified, provider="claude", model=self.models["claude"],
+            provider_config=self.native,
+            model_config=self.model_config("claude", "execute"), mode="execute")
+        self.assertEqual(forced[claude.AUTO_MEMORY_DISABLE_ENV], "1")
+        self.assertEqual(falsified[claude.AUTO_MEMORY_DISABLE_ENV], "0")
+        self.assertEqual(forced["PATH"], "/bin")
+
+    def test_the_launch_seam_hands_the_switch_to_both_child_paths(self) -> None:
+        """The native and the routed launch path both pass through one seam."""
+
+        for provider in ("claude", "omniroute"):
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                repo, lane = root / "repo", root / "lane"
+                for path in (repo, lane):
+                    path.mkdir()
+                    (path / ".git").write_text("gitdir: /tmp/example\n", encoding="utf-8")
+                worker = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+                claude.launch(
+                    executable="claude", repo=repo, worktree=lane, provider=provider,
+                    model=self.models[provider],
+                    provider_config=self.native if provider == "claude" else self.omniroute,
+                    model_config=self.model_config(provider, "execute"), prompt="task",
+                    secret=None if provider == "claude" else "selected",
+                    runner=worker, readiness_runner=SUPPORTS_STRICT_MCP,
+                    env={"PATH": "/bin", "HOME": str(root),
+                         claude.AUTO_MEMORY_DISABLE_ENV: "0"})
+                child = worker.call_args.kwargs["env"]
+                self.assertEqual(child[claude.AUTO_MEMORY_DISABLE_ENV], "1")
+                # The launch path's own environment work is retained.
+                self.assertEqual(child["PATH"], "/bin")
+                if provider == "omniroute":
+                    self.assertEqual(child["CLAUDE_CODE_MAX_OUTPUT_TOKENS"],
+                                     claude.ROUTED_MAX_OUTPUT_TOKENS)
+                    self.assertIn("CLAUDE_CONFIG_DIR", child)
+                else:
+                    self.assertNotIn("CLAUDE_CONFIG_DIR", child)
+
+    def test_the_prompt_note_states_the_rule_for_both_modes(self) -> None:
+        for mode in ("execute", "review"):
+            with self.subTest(mode=mode):
+                prompt = self.prompt_of(self.command(mode))
+                self.assertIn(claude.HOST_MEMORY_READONLY_NOTE, prompt)
+                normalized = " ".join(prompt.split())
+                self.assertIn("Host memory is read-only", normalized)
+                self.assertIn("Never create, update, or delete host memory", normalized)
+                self.assertIn("not an operating-system sandbox", normalized)
+                self.assertIn("reviewed repository artifact", normalized)
+
+    def test_the_note_reaches_a_routed_worker_byte_identically(self) -> None:
+        # One root, so the two prompts differ only if the note itself branches
+        # on the provider.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            native = self.build(root, "execute")
+            routed = self.build(root, "execute", "omniroute")
+        self.assertEqual(self.prompt_of(native), self.prompt_of(routed))
+
+    def test_the_note_changes_no_grant_and_keeps_the_curated_context(self) -> None:
+        execute = self.command("execute", capabilities=("shell", "git-push"))
+        review = self.command("review")
+        execute_prompt, review_prompt = self.prompt_of(execute), self.prompt_of(review)
+        # Curated context survives for both modes.
+        for prompt in (execute_prompt, review_prompt):
+            self.assertIn("Injected canonical side-lane governance", prompt)
+            self.assertIn("## Host memory is read-only", prompt)
+        # The note sits above the execute role instruction, which stays last.
+        self.assertLess(execute_prompt.index("## Host memory is read-only"),
+                        execute_prompt.index("# Delegated execute role"))
+        self.assertTrue(execute_prompt.endswith("approval.\n"))
+        # Every granted rule still reaches the argv, unchanged.
+        for rule in claude.allowed_tools("execute", ("shell", "git-push")):
+            self.assertIn(rule, execute)
+        # The review lane's strict read-only argv is unchanged: the note adds
+        # no flag and no tool.
+        self.assertIn("--safe-mode", review)
+        self.assertNotIn("--bare", review)
+        self.assertNotIn("--allowedTools", review)
+        self.assertEqual(review[review.index("--tools") + 1], "Read,Glob,Grep")
+        self.assertEqual(review[review.index("--mcp-config") + 1], '{"mcpServers":{}}')
+        self.assertNotIn("--bare", execute)
+        self.assertNotIn("--safe-mode", execute)
 
 
 if __name__ == "__main__":
