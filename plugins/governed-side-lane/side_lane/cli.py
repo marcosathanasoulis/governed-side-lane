@@ -31,6 +31,7 @@ from side_lane.mcp_run_config import (
     validate_against_capabilities,
 )
 from side_lane.read_roots import ReadRootError, parse_read_roots
+from side_lane.web_domains import WebDomainError, parse_web_domains
 from side_lane.skill_bundle import SkillBundleError, catalog_note, deliver_skills
 from side_lane.adapters.claude import ClaudeAdapterError, require_report_only_budget
 from side_lane.adapters.codex import CodexAdapterError
@@ -367,6 +368,27 @@ def make_parser() -> argparse.ArgumentParser:
         "mode only. The canonical path is named in the worker's instructions "
         "and recorded in the run audit. A read root never becomes writable: "
         "writes stay confined to the lane worktree",
+    )
+    run.add_argument(
+        "--web-domain",
+        action="append",
+        default=[],
+        metavar="HOST",
+        help="repeatable. Grant the worker fetch access to one more public "
+        "documentation origin, named as an exact lowercase hostname (for "
+        "example --web-domain cloud.google.com). The value must be a bare "
+        "hostname: a scheme, port, path, query, userinfo prefix, glob, IP "
+        "literal, single-label name, dot-local/internal name or reserved "
+        "suffix is rejected before anything starts. One host renders one "
+        "host-scoped rule (Devin Fetch(https://<host>/*), Claude Code "
+        "WebFetch(domain:<host>)); a bare Fetch/WebFetch grant is never "
+        "emitted and no capability unlocks the reach. The canonical host list "
+        "is named in the worker's instructions and recorded in the run audit. "
+        "This is permission matching, not a network sandbox: neither "
+        "unlisted destinations nor an approved origin's own redirects are "
+        "covered. Execute mode only; the Codex host refuses it, because an "
+        "execute Codex lane runs danger-full-access and exposes no "
+        "per-destination rule",
     )
     run.add_argument(
         "--mcp-config",
@@ -1227,7 +1249,7 @@ LANE_SOURCE_MUTATED = 6
 
 def _launch(
     args: argparse.Namespace, config: Mapping[str, Any], repo: Path, prompt: str,
-    *, read_roots: Sequence[Path] = (),
+    *, read_roots: Sequence[Path] = (), web_domains: Sequence[str] = (),
     run_mcp_servers: "Mapping[str, Any] | None" = None,
     measurement: "Mapping[str, Any] | None" = None,
 ) -> int:
@@ -1422,6 +1444,7 @@ def _launch(
                 support_dir=host_support_dir(args.host, executable),
                 secret=secret,
                 read_roots=read_roots,
+                web_domains=web_domains,
                 run_mcp_servers=run_mcp_servers,
             )
         elif args.host == "claude":
@@ -1440,6 +1463,7 @@ def _launch(
                 capabilities=capabilities,
                 secret=secret,
                 read_roots=read_roots,
+                web_domains=web_domains,
                 run_mcp_servers=run_mcp_servers,
                 report_only=report_only,
             )
@@ -1458,6 +1482,7 @@ def _launch(
                 mode=args.mode,
                 capabilities=capabilities,
                 read_roots=read_roots,
+                web_domains=web_domains,
                 run_mcp_servers=run_mcp_servers,
             )
     except Exception:
@@ -1525,6 +1550,7 @@ def _launch(
         usage=result.usage,
         provider_artifact=result.provider_artifact,
         read_roots=[str(root) for root in read_roots],
+        web_domains=list(web_domains),
         skill_catalog=skill_catalog,
         run_mcp_servers=(
             [
@@ -1546,6 +1572,7 @@ def _launch(
             "audit": str(audit),
             "result_artifact": str(audit),
             "skill_catalog": skill_catalog,
+            "web_domains": list(web_domains),
             "run_mcp_servers": list(audit_names(run_mcp_servers)) if run_mcp_servers else [],
             # None means the comparison itself failed — never report that as
             # a clean checkout, same contract as delivered/verified above.
@@ -1791,6 +1818,32 @@ def run(argv: Sequence[str] | None = None) -> int:
     # lane behind. `--read-root` is declared by the `run` subparser, so it is
     # always present here.
     read_roots = parse_read_roots(args.read_root)
+    # Same fail-closed ordering for the documentation-domain grants: every
+    # hostname is validated here, so a malformed, wildcard, IP, private or
+    # reserved domain stops the run before a worktree, a credential or a host
+    # process exists.
+    web_domains = parse_web_domains(args.web_domain)
+    if web_domains and args.mode != "execute":
+        # Review mode is the strict read-only form and has no fetch tool on any
+        # host, so a documentation-domain grant there is authority the worker
+        # cannot be given. Refused here rather than in the adapters so the run
+        # stops before the prompt gate, a worktree, or any host process; each
+        # adapter carries its own guard for direct callers.
+        raise SideLaneError("--web-domain is supported only in execute mode")
+    if web_domains and args.host == "codex":
+        # The one host that cannot express the grant. An execute Codex lane
+        # runs `danger-full-access`, so it already reaches every destination
+        # and exposes no per-destination rule to narrow it with; accepting the
+        # flag would describe, and audit, a scope nothing enforces. The Codex
+        # adapter carries the same refusal as the authoritative guard for
+        # direct callers. Refused here, before any worktree, credential or
+        # host process exists.
+        raise SideLaneError(
+            "--web-domain is not supported on the Codex host: an execute Codex "
+            "lane runs with danger-full-access and Codex CLI has no "
+            "per-destination web-fetch permission rule, so the grant could be "
+            "neither enforced nor honestly recorded"
+        )
     # Same fail-closed ordering for the per-run MCP registration file: its
     # structure, capability narrowing and env references are all checked here
     # (side_lane.mcp_run_config) before anything is created or started.
@@ -1804,6 +1857,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     return _launch(
         args, config, repo, load_prompt(args.prompt, args.prompt_file, args.mode),
         read_roots=read_roots,
+        web_domains=web_domains,
         run_mcp_servers=run_mcp_servers,
         measurement=measurement,
     )
@@ -1818,6 +1872,7 @@ def main() -> None:
         CredentialError,
         GovernanceError,
         ReadRootError,
+        WebDomainError,
         SkillBundleError,
         McpRunConfigError,
         WorktreeError,

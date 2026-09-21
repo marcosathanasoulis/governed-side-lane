@@ -35,6 +35,7 @@ from side_lane.mcp_run_config import (
     write_strict_mcp_bundle,
 )
 from side_lane.read_roots import scope_note
+from side_lane.web_domains import claude_rules, scope_note as web_scope_note
 from side_lane.results import LaneResult
 from side_lane.redaction import redact_provider_secret
 
@@ -500,12 +501,21 @@ def _capability_set(capabilities: Capabilities) -> frozenset[str]:
     return granted
 
 
-def allowed_tools(mode: str, capabilities: Capabilities = ()) -> tuple[str, ...]:
+def allowed_tools(mode: str, capabilities: Capabilities = (),
+                  web_domains: Sequence[str] = ()) -> tuple[str, ...]:
     """Deterministic ``--allowedTools`` rules rendered from canonical governance.
 
     Capability names are validated first and unknown names raise in every
     mode; review mode then returns an empty tuple. The rule text comes from the
     ``Execute tool allowlist`` section of ``config/lane-governance.md``.
+
+    ``web_domains`` is the one coordinator-supplied grant that is not a static
+    allowlist rule: a documentation origin is named per run, so it renders as
+    one ``WebFetch(domain:<host>)`` rule per exact host and never as a bare
+    ``WebFetch`` (every domain). It is not unlocked by any capability, so
+    ``shell``/``workspace-write``/``git-push`` never widen into network reach,
+    and ``web_domains.claude_rule`` re-validates each host here, so a synthetic
+    direct call fails closed instead of emitting a wider rule.
     """
 
     granted = _capability_set(capabilities)
@@ -518,6 +528,9 @@ def allowed_tools(mode: str, capabilities: Capabilities = ()) -> tuple[str, ...]
             for rule in rules:
                 if rule not in tools:
                     tools.append(rule)
+    for rule in claude_rules(web_domains):
+        if rule not in tools:
+            tools.append(rule)
     return tuple(tools)
 
 
@@ -1023,6 +1036,7 @@ def build_command(
     mode: str = "execute",
     capabilities: Capabilities = (),
     read_roots: Sequence[Path] = (),
+    web_domains: Sequence[str] = (),
     mcp_config_path: str | Path | None = None,
     run_mcp_servers: "Mapping[str, Any] | None" = None,
     report_only: bool = False,
@@ -1049,6 +1063,13 @@ def build_command(
         # (`--add-dir` is a workspace grant, not a read grant). Fail closed
         # rather than launch a lane that silently ignores the coordinator.
         raise ClaudeAdapterError("read roots are execute-only for the Claude host")
+    if web_domains and mode != "execute":
+        # A review lane's argv is the strict read-only form (`--safe-mode`,
+        # `--tools Read,Glob,Grep`, strict no-MCP): it has no WebFetch tool at
+        # all, so a documentation-domain grant there is inert authority. Fail
+        # closed rather than launch a lane whose stated scope the worker
+        # cannot be given.
+        raise ClaudeAdapterError("web domains are execute-only for the Claude host")
     if mcp_config_path is not None and mode != "execute":
         # Review mode is strict no-MCP by canonical governance: its argv pins
         # `--strict-mcp-config` with an empty server set, and no per-run
@@ -1128,7 +1149,7 @@ def build_command(
             # user/project/server registration (and its auth) keeps loading
             # alongside this file.
             command.extend(("--mcp-config", str(mcp_config_path)))
-        for tool in allowed_tools(mode, capabilities):
+        for tool in allowed_tools(mode, capabilities, web_domains):
             command.extend(("--allowedTools", tool))
         for tool in disallowed_tools(mode, capabilities):
             command.extend(("--disallowedTools", tool))
@@ -1148,6 +1169,9 @@ def build_command(
     # to discover it. No `--add-dir` is emitted: it extends the workspace
     # rather than granting a read, which would make a read root writable.
     note = scope_note(read_roots)
+    web_note = web_scope_note(web_domains)
+    if web_note:
+        note = f"{note}\n\n{web_note}" if note else web_note
     if note:
         system_prompt += f"\n\n{note}"
     if mode == "execute":
@@ -1285,9 +1309,14 @@ def launch(
     runner: Runner = None,
     readiness_runner: Runner = None,
     read_roots: Sequence[Path] = (),
+    web_domains: Sequence[str] = (),
     run_mcp_servers: "Mapping[str, McpRunServer] | None" = None,
     report_only: bool = False,
 ) -> LaneResult:
+    if web_domains and mode != "execute":
+        # Adapter-level fail-closed mirror of the build_command guard: `launch`
+        # may be called without going through that guard's inputs.
+        raise ClaudeAdapterError("web domains are execute-only for the Claude host")
     if provider != NATIVE_PROVIDER and provider != "glm":
         qualification = model_config.get("qualification")
         if not isinstance(qualification, Mapping) or qualification.get("verified") is not True:
@@ -1361,6 +1390,7 @@ def launch(
             runner=runner,
             readiness_runner=readiness_runner,
             read_roots=read_roots,
+            web_domains=web_domains,
             run_mcp_servers=run_mcp_servers,
             run_config_path=run_config_path,
             report_only=report_only,
@@ -1396,6 +1426,7 @@ def _launch_worker(
     runner: Runner,
     readiness_runner: Runner,
     read_roots: Sequence[Path],
+    web_domains: Sequence[str],
     run_mcp_servers: "Mapping[str, McpRunServer] | None",
     run_config_path: Path | None,
     report_only: bool = False,
@@ -1447,6 +1478,7 @@ def _launch_worker(
             mode=mode,
             capabilities=granted,
             read_roots=read_roots,
+            web_domains=web_domains,
             mcp_config_path=run_config_path,
             run_mcp_servers=run_mcp_servers,
             report_only=report_only,
@@ -1535,7 +1567,7 @@ def _launch_worker(
         stderr=stderr,
         availability=availability,
         capabilities=granted,
-        allowed_tools=allowed_tools(mode, granted),
+        allowed_tools=allowed_tools(mode, granted, web_domains),
         disallowed_tools=disallowed_tools(mode, granted),
         requested_model=model,
         # The transport requests this selector; it cannot attest to the

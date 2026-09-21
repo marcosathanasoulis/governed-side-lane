@@ -165,6 +165,28 @@ backup is allowed, but no alternate GLM model is.
   qualified route under existing authority; this does not introduce per-node
   approval.
 
+Per-run coordinator grants extend one lane, never the host or the capability
+set. Alongside the `--read-root` directories and `--mcp-config` servers, an
+execute lane may be given repeatable exact hostnames with `--web-domain HOST`
+to reach public technical documentation (for example `cloud.google.com`). The
+adapter renders each host as that host's own permission rule —
+`Fetch(https://HOST/*)` on Devin, `WebFetch(domain:HOST)` on Claude — and names
+the granted list in the worker's instructions. This grant is execute-only: it
+is refused in review mode, it never adds a shell, MCP, file, or write rule, and
+no capability unlocks it, so a lane without `--web-domain` receives no fetch
+rule at all and may not infer a web grant from shell authority. It is a
+permission-matching scope, not a network sandbox: the host, not the rule list,
+decides what a redirect, an embedded origin, or a subresource actually loads,
+and host runtime enforcement beyond the rule is unproven. Read it as "public
+technical documentation only" — no credentials, API keys, auth cookies,
+tokens, or private data — and stop and report a needed page that is not on the
+list instead of fetching it. A host with no per-destination fetch control
+(Codex, whose execute lane runs `danger-full-access`) refuses `--web-domain`
+before launch rather than recording a grant nothing enforces. Because the
+grant is assessed at dispatch, the coordinator names the required
+documentation domains up front instead of letting a worker prompt for them
+mid-run.
+
 For a task-scoped environment value, use `env NAME=value <already-granted-command>`;
 direct `NAME=value command` prefixes may prompt the native Devin permission layer.
 The `env` form does not grant a new launcher: the policy hook still checks the
@@ -173,9 +195,12 @@ literal value and the underlying command against the execute allowlist.
 ## Execute tool allowlist
 
 The Claude host adapter renders this section, and only this section, into
-`--allowedTools` / `--disallowedTools` for execute lanes. Review lanes never
-receive an allowlist. Each subsection names the capabilities that unlock its
-rules; `always` applies to every execute lane. Rules are ordinary developer
+`--allowedTools` / `--disallowedTools` for execute lanes; the one addition
+outside it is the per-run `--web-domain` grant described in Execute mode
+above, which appends one `WebFetch(domain:HOST)` rule per explicitly granted
+host and nothing else. Review lanes never receive an allowlist. Each
+subsection names the capabilities that unlock its rules; `always` applies to
+every execute lane. Rules are ordinary developer
 commands; nothing here may match deploy, IAM, credential, cloud, merge, or
 release tooling, which stay forbidden by the Common rules above.
 

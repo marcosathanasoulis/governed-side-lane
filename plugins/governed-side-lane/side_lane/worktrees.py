@@ -1001,6 +1001,7 @@ def write_audit(
     usage: dict | None = None,
     provider_artifact: str | None = None,
     read_roots: Sequence[str] = (),
+    web_domains: Sequence[str] = (),
     skill_catalog: "Sequence[Mapping[str, object]]" = (),
     run_mcp_servers: "Sequence[Mapping[str, object]]" = (),
     source_changes: Sequence[str] = (),
@@ -1013,6 +1014,13 @@ def write_audit(
     additive: the field is always present as a list (empty when nothing was
     granted), so a reader can tell "no read root was requested" from "this
     record predates read roots".
+
+    ``web_domains`` records the exact public documentation hostnames the
+    coordinator granted through ``--web-domain`` (execute mode only), in the
+    canonical sorted order the rules were rendered from. It records the grant
+    the coordinator made; it is a permission-matching scope, not a network
+    sandbox, and neither an unlisted destination nor an origin's own redirect
+    is covered by it. Additive in the same way, so the schema stays 2.
 
     ``skill_catalog`` records the pinned skills materialized into the lane
     worktree for this run (execute mode only), each with name, version,
@@ -1063,6 +1071,7 @@ def write_audit(
                 "repository": str(run.repository),
                 "worktree": str(run.worktree),
                 "read_roots": list(read_roots),
+                "web_domains": list(web_domains),
                 "skill_catalog": [dict(item) for item in skill_catalog],
                 "run_mcp_servers": [dict(item) for item in run_mcp_servers],
                 "source_changes": list(source_changes),

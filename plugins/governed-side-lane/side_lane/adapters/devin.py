@@ -27,6 +27,7 @@ from side_lane.mcp_run_config import (
 )
 from side_lane.read_roots import read_rule, scope_note
 from side_lane.results import LaneResult
+from side_lane.web_domains import devin_rules, scope_note as web_scope_note
 from side_lane.worktrees import (
     WorktreeError,
     ensure_devin_local_mcp_exclusion,
@@ -166,6 +167,7 @@ def build_command(
     prompt: str, export_path: str | Path, config_path: str | Path,
     mode: str = "execute", capabilities: Sequence[str] = (),
     read_roots: Sequence[Path] = (),
+    web_domains: Sequence[str] = (),
     run_mcp_servers: "Mapping[str, McpRunServer] | None" = None,
 ) -> tuple[str, ...]:
     program = _nonempty(executable, "Devin executable")
@@ -179,6 +181,9 @@ def build_command(
         raise DevinAdapterError(f"unknown capability: {', '.join(unknown)}")
     task = _nonempty(prompt, "prompt")
     note = scope_note(read_roots)
+    web_note = web_scope_note(web_domains)
+    if web_note:
+        note = f"{note}\n\n{web_note}" if note else web_note
     if run_mcp_servers:
         # The registrations themselves are delivered through the lane
         # worktree's local-scope MCP file (see `launch`); the task text only
@@ -376,7 +381,8 @@ def _runtime_config(model: str, capabilities: Sequence[str],
                     user_config: Mapping[str, Any] | None = None,
                     policy_hook_command: str | None = None,
                     worktree: Path | None = None,
-                    read_roots: Sequence[Path] = ()) -> dict[str, Any]:
+                    read_roots: Sequence[Path] = (),
+                    web_domains: Sequence[str] = ()) -> dict[str, Any]:
     """Build Devin's runtime config from the canonical tool policy.
 
     File tools are scoped to real directories: the lane worktree, plus any
@@ -390,6 +396,16 @@ def _runtime_config(model: str, capabilities: Sequence[str],
     still normalises `-C` before matching deny rules.
     """
     allow = _file_tool_rules(worktree, read_roots)
+    # One `Fetch(https://<host>/*)` rule per coordinator-granted documentation
+    # domain, and nothing else: no capability unlocks a web rule, so shell or
+    # workspace authority never widens into network reach, and a bare `Fetch`
+    # (every host) is never emitted. `devin_rules` re-validates each host, so
+    # a synthetic direct call fails closed instead of rendering a wider rule.
+    # The PreToolUse hook does not cover fetch: the rule above is the whole
+    # control on this host, and it matches permissions, not network traffic.
+    for rule in devin_rules(web_domains):
+        if rule not in allow:
+            allow.append(rule)
     policy = tool_policy()
     for capability in sorted(set(capabilities) & {"shell", "workspace-write", "git-push"}):
         for rule in policy.allowed.get(capability, ()):
@@ -617,6 +633,7 @@ def launch(
     prompt: str, mode: str = "execute", capabilities: Sequence[str] = (),
     env: Mapping[str, str] | None = None, popen: PopenFactory = subprocess.Popen,
     user_config_path: Path | None = None, read_roots: Sequence[Path] = (),
+    web_domains: Sequence[str] = (),
     run_mcp_servers: "Mapping[str, McpRunServer] | None" = None,
 ) -> LaneResult:
     repo_path = _worktree(repo)
@@ -653,14 +670,15 @@ def launch(
                                           str(policy_path)))
     config_path.write_text(json.dumps(_runtime_config(
         model, capabilities, _load_user_config(user_config_path), policy_hook_command,
-        worktree=worktree_path, read_roots=read_roots
+        worktree=worktree_path, read_roots=read_roots, web_domains=web_domains
     ), indent=2) + "\n",
                            encoding="utf-8")
     command = build_command(executable=executable, repo=repo_path, worktree=worktree_path,
         provider=provider, model=model, provider_config=provider_config,
         model_config=model_config, prompt=prompt, export_path=export_path,
         config_path=config_path, mode=mode, capabilities=capabilities,
-        read_roots=read_roots, run_mcp_servers=run_mcp_servers)
+        read_roots=read_roots, web_domains=web_domains,
+        run_mcp_servers=run_mcp_servers)
     child_env = build_environment(os.environ if env is None else env)
     # Per-run MCP delivery (execute only — this adapter supports no other
     # mode): validate env references against the environment the worker child
