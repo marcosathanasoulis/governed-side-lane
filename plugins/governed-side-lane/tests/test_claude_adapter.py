@@ -134,6 +134,125 @@ class ClaudeAdapterTests(unittest.TestCase):
             )
         self.assertEqual(command[command.index("--autocompact") + 1], "100k")
 
+    def test_routed_execute_renders_the_configured_autocompact_window(self) -> None:
+        # The installed CLI parses this operand as a plain decimal integer, so
+        # an accepted value is rendered as itself — not snapped onto a reviewed
+        # enum and not reduced by a reserve the CLI already owns.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            for tokens in (None, 100000, 128000, 180000, 200000, 1000000):
+                with self.subTest(tokens=tokens):
+                    command = self.routed_execute_command(
+                        repo, lane,
+                        {**self.routed_model_config(),
+                         "autocompact_window_tokens": tokens},
+                    )
+                    self.assertEqual(
+                        command[command.index("--autocompact") + 1],
+                        "100k" if tokens is None else str(tokens)
+                    )
+
+    def test_configured_autocompact_window_changes_only_that_operand(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            mcp_path = root / "strict-bundle.json"
+            capabilities = ("gitnexus", "shell")
+            baseline = self.routed_execute_command(
+                repo, lane, self.routed_model_config(),
+                capabilities=capabilities, strict_mcp_config_path=mcp_path)
+            configured = self.routed_execute_command(
+                repo, lane,
+                {**self.routed_model_config(), "autocompact_window_tokens": 200000},
+                capabilities=capabilities, strict_mcp_config_path=mcp_path)
+            self.assertEqual(baseline[baseline.index("--autocompact") + 1], "100k")
+            self.assertEqual(configured[configured.index("--autocompact") + 1], "200000")
+            self.assertTrue(any(
+                rule.startswith("mcp__gitnexus__") for rule in configured))
+            operand = baseline.index("--autocompact") + 1
+            del baseline[operand], configured[operand]
+            self.assertEqual(configured, baseline)
+
+    def test_autocompact_window_is_read_only_on_the_routed_execute_route(self) -> None:
+        # The option is an operator control for the routed lane. A route that
+        # never reads it must keep the argv it had, so a window set elsewhere
+        # is inert rather than a new failure mode for native or direct lanes.
+        deepseek = {"gateway": "direct-deepseek", "auth_method": "provider-key",
+                    "billable": True, "base_url": "https://api.deepseek.com/anthropic"}
+        minimax = {"gateway": "direct-minimax", "auth_method": "provider-key",
+                   "billable": True, "base_url": "https://api.minimax.io/anthropic"}
+        cases = (
+            ("native execute", "claude", self.native, "execute",
+             {"runtime_model": "claude-sonnet-5", "protocol": "native-claude"}),
+            ("native review", "claude", self.native, "review",
+             {"runtime_model": "claude-sonnet-5", "protocol": "native-claude-readonly"}),
+            ("direct deepseek", "deepseek", deepseek, "execute",
+             {"runtime_model": "deepseek-flash", "protocol": "anthropic-compatible",
+              "identity_contract": {"requested_model": "deepseek-flash",
+                                    "resolved_model": "deepseek-flash",
+                                    "settings_precedence": "verified"}}),
+            ("direct minimax", "minimax", minimax, "execute",
+             {"runtime_model": "minimax-m2", "protocol": "anthropic-compatible",
+              "identity_contract": {"requested_model": "minimax-m2",
+                                    "resolved_model": "minimax-m2",
+                                    "settings_precedence": "verified"}}),
+        )
+        for label, provider, provider_config, mode, config in cases:
+            with self.subTest(route=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+                baseline = claude.build_command(
+                    executable="claude", repo=repo, worktree=lane, provider=provider,
+                    model=config["runtime_model"], provider_config=provider_config,
+                    model_config=config, prompt="task", mode=mode)
+                configured = claude.build_command(
+                    executable="claude", repo=repo, worktree=lane, provider=provider,
+                    model=config["runtime_model"], provider_config=provider_config,
+                    model_config={**config, "autocompact_window_tokens": 128000},
+                    prompt="task", mode=mode)
+            self.assertNotIn("--autocompact", configured)
+            self.assertEqual(configured, baseline)
+
+    def test_malformed_autocompact_window_fails_before_any_provider_launch(self) -> None:
+        # A bool is rejected as a type error rather than travelling to the
+        # range check, and no value is coerced: ``True`` is not one token and
+        # the string ``"100k"`` is not re-parsed into a window.
+        illegal = (
+            (True, "whole number"),
+            (False, "whole number"),
+            (128000.0, "whole number"),
+            ("128000", "whole number"),
+            ("100k", "whole number"),
+            ([], "whole number"),
+            ({}, "whole number"),
+            (0, "between"),
+            (-1, "between"),
+            (99999, "between"),
+            (1000001, "between"),
+        )
+        for value, expected in illegal:
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+                home = root / "home"
+                home.mkdir()
+                runner = mock.Mock()
+                with self.assertRaisesRegex(
+                        claude.ClaudeAdapterError,
+                        f"autocompact_window_tokens must be .*{expected}"):
+                    claude.launch(
+                        executable="claude", repo=repo, worktree=lane,
+                        provider="omniroute", model="routed-selector",
+                        provider_config=self.routed_provider_config(),
+                        model_config={**self.routed_model_config(),
+                                      "autocompact_window_tokens": value},
+                        prompt="task", env={"HOME": str(home), "PATH": "/bin"},
+                        secret="router-secret", runner=runner,
+                        readiness_runner=SUPPORTS_STRICT_MCP,
+                    )
+                runner.assert_not_called()
+
     def test_routed_launch_uses_isolated_home_and_preserves_source_config(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -244,6 +363,19 @@ class ClaudeAdapterTests(unittest.TestCase):
     def routed_provider_config(self) -> dict:
         return {"gateway": "omniroute-router", "auth_method": "provider-key",
                 "billable": True, "base_url": "https://omniroute.example"}
+
+    def routed_execute_command(self, repo: Path, lane: Path, model_config: dict,
+                               capabilities=(), strict_mcp_config_path=None) -> list[str]:
+        """Build one routed execute argv; no process starts and no home loads."""
+        return claude.build_command(
+            executable="claude", repo=repo, worktree=lane,
+            provider="omniroute", model="routed-selector",
+            provider_config=self.routed_provider_config(),
+            model_config=model_config, prompt="task", mode="execute",
+            capabilities=capabilities,
+            strict_mcp_config_path=strict_mcp_config_path,
+            strict_mcp_support=True if strict_mcp_config_path is not None else None,
+        )
 
     def test_routed_execute_preserves_inherited_pre_tool_use_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.45 - 2026-09-21
+
+- Allow an optional per-model OmniRoute execute client compaction budget (`autocompact_window_tokens`, integer 100000–1000000). Absent/null keeps 100k; output remains 16384. Other providers and review are unchanged. This operational budget is not a vendor-capacity claim.
+
+
 ## 0.4.44 - 2026-09-21
 
 - Add execute-only `--report-deliverable` for fresh, uncommitted reports across worker hosts. Preserve the separate Claude `--report-only` budget and Stop-hook contract, source-change checks, native failures, and no-publication behavior.

@@ -120,6 +120,18 @@ REPORT_ONLY_HOOK_TIMEOUT_SECONDS = 10
 # claim provider capacity or replace the router's fail-closed guard.
 ROUTED_AUTOCOMPACT_WINDOW = "100k"
 ROUTED_MAX_OUTPUT_TOKENS = "16384"
+# The routed lane's auto-compaction window is an operator execution budget, not
+# a vendor context-capacity claim: it bounds how much conversation the CLI
+# carries before it compacts, and the CLI still owns whatever reserve it takes
+# below the requested window — no reserve arithmetic is done here. An explicit
+# ``autocompact_window_tokens`` is rendered as the plain decimal integer the
+# installed CLI parses; it is neither an enum of one reviewed value nor a
+# derived window. Absent or null, the routed default above is unchanged, and
+# the option is read on the routed provider only: the native Claude, direct
+# provider, and review paths never see it and stay byte-identical.
+AUTOCOMPACT_WINDOW_TOKENS_KEY = "autocompact_window_tokens"
+AUTOCOMPACT_WINDOW_TOKENS_MIN = 100_000
+AUTOCOMPACT_WINDOW_TOKENS_MAX = 1_000_000
 # Claude Code's native auto-memory — the per-project memory directory it loads
 # and writes under the controlled HOME — is switched off in every lane
 # worker's child environment, native or routed, review or execute. The value is
@@ -1096,6 +1108,39 @@ def _optional_budget(model_config: Mapping[str, Any]) -> str | None:
     return str(parsed)
 
 
+def _routed_autocompact_window(model_config: Mapping[str, Any]) -> str:
+    """Return the routed execute lane's ``--autocompact`` operand.
+
+    ``autocompact_window_tokens`` is an operator execution budget for the
+    routed lane only: it says how much conversation the CLI may carry before it
+    compacts, and claims nothing about an upstream vendor's context capacity.
+    It is read here and nowhere else, so the native Claude, direct-provider,
+    and review argv stay exactly as they were. Absent or null, the routed
+    default is unchanged; a non-null value must be a whole number of tokens inside
+    the domain the installed CLI accepts — a bool, float, string, or
+    out-of-domain integer is an input error and is rejected before any
+    provider starts rather than silently coerced or defaulted.
+    """
+
+    value = model_config.get(AUTOCOMPACT_WINDOW_TOKENS_KEY)
+    if value is None:
+        return ROUTED_AUTOCOMPACT_WINDOW
+    if isinstance(value, bool) or not isinstance(value, int):
+        # ``True`` is not a token count even though ``isinstance(True, int)``
+        # holds, and a float or numeric string is rejected rather than coerced:
+        # a rounded or half-parsed window would silently become a different
+        # budget than the operator configured.
+        raise ClaudeAdapterError(
+            "autocompact_window_tokens must be a whole number of tokens"
+        )
+    if not AUTOCOMPACT_WINDOW_TOKENS_MIN <= value <= AUTOCOMPACT_WINDOW_TOKENS_MAX:
+        raise ClaudeAdapterError(
+            "autocompact_window_tokens must be between "
+            f"{AUTOCOMPACT_WINDOW_TOKENS_MIN} and {AUTOCOMPACT_WINDOW_TOKENS_MAX}"
+        )
+    return str(value)
+
+
 def build_command(
     *,
     executable: str,
@@ -1207,7 +1252,9 @@ def build_command(
             )
         )
         if provider in ROUTED_PROVIDERS:
-            command.extend(("--autocompact", ROUTED_AUTOCOMPACT_WINDOW))
+            # The routed execute lane is the only surface that reads the
+            # operator's window; every other provider keeps the argv it had.
+            command.extend(("--autocompact", _routed_autocompact_window(model_config)))
         effort = _optional_effort(model_config)
         if effort is not None:
             command.extend(("--effort", effort))
