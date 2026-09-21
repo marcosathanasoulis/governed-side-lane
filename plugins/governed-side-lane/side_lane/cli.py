@@ -787,8 +787,38 @@ def _recommend(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
             result["reason_codes"] = result["reason_codes"] + [
                 "routed-policy-collection-failed"
             ]
+    # Presence-only staffing eligibility must never read as verified scope, so
+    # the label ships with the output rather than only living in the snapshot
+    # that routing normalizes back down to names. It belongs to a task that
+    # actually requires the capability: a registered ``cm-services`` on an
+    # unrelated task must not carry a pending-verification label nobody asked
+    # for.
+    if (
+        "gateway-read" in normalized["required_capabilities"]
+        and any(
+            "gateway-read" in snapshot["available_capabilities"]
+            for snapshot in normalized["host_capabilities"].values()
+        )
+    ):
+        result["gateway_read_pending_verification"] = GATEWAY_READ_PENDING_VERIFICATION
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
+
+
+#: The one capability the printed recommendation labels as promoted on
+#: connector-registration presence alone. Registration is not authentication:
+#: this text travels beside ``presence_only`` in the recommendation output so a
+#: reader cannot mistake a registered ``cm-services`` server for verified
+#: access, and dispatch still runs the wrapper's own target preflight and the
+#: host's native readiness check before any gateway call. It is deliberately
+#: single-capability and not a general evidence framework; the longer-standing
+#: Playwright promotion is unchanged and keeps its own check-capabilities basis.
+GATEWAY_READ_PENDING_VERIFICATION = (
+    "gateway-read staffing availability is cm-services connector-registration "
+    "presence only; live authentication and the exact granted run-id scope "
+    "remain pending dispatch, and the wrapper target preflight and the host's "
+    "native readiness check remain mandatory"
+)
 
 
 def _recommendation_host_snapshot(
@@ -798,9 +828,16 @@ def _recommendation_host_snapshot(
 
     A configured Playwright server is enough for an execute recommendation
     because dispatch performs a live readiness check and the route catalog
-    still requires its own local evaluation and connector evidence. Other
-    merely-present capabilities remain unavailable because their authority or
-    authentication has not been verified. Review lanes expose no MCP servers.
+    still requires its own local evaluation and connector evidence. A
+    ``gateway-read`` grant is admitted the same way, but only when the exact
+    ``cm-services`` server is registered: the capability's own evidence is
+    ``present`` for that registration and never ``verified``, and neither the
+    recommendation nor ``check-capabilities`` claims authentication from it —
+    see :data:`GATEWAY_READ_PENDING_VERIFICATION` for the label that travels
+    with the printed recommendation. Other merely-present capabilities remain
+    unavailable because their authority or authentication has not been
+    verified. Review lanes expose no MCP servers, and review mode drops these
+    promoted names even if a future report shape ever marked one verified.
     """
 
     connectors = report.get("mcp_connectors", [])
@@ -810,7 +847,9 @@ def _recommendation_host_snapshot(
         raise SideLaneError("capability report is malformed")
     available = {name for name, state in capabilities.items() if state}
     if mode != "execute":
-        available.difference_update({"playwright", "gitnexus", "codegraph"})
+        available.difference_update(
+            {"playwright", "gateway-read", "gitnexus", "codegraph"}
+        )
     if (
         mode == "execute"
         and "playwright" in connectors
@@ -819,6 +858,14 @@ def _recommendation_host_snapshot(
         and evidence["playwright"].get("state") == "present"
     ):
         available.add("playwright")
+    if (
+        mode == "execute"
+        and "cm-services" in connectors
+        and isinstance(evidence, Mapping)
+        and isinstance(evidence.get("gateway-read"), Mapping)
+        and evidence["gateway-read"].get("state") == "present"
+    ):
+        available.add("gateway-read")
     return {
         "available_connectors": sorted(connectors) if mode == "execute" else [],
         "available_capabilities": sorted(available),

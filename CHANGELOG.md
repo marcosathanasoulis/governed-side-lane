@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.39 - 2026-09-21
+
+- Treat an exact gateway-read connector registration as presence-only staffing evidence while leaving authentication and target scope pending dispatch. Keep route capability qualification and live dispatch checks separate; exclude review lanes.
+
+
 ## 0.4.38 - 2026-09-21
 
 - Make routed Claude MCP launch arguments parser-safe and validate readiness against the exact disposable per-run bundle instead of a potentially ignored dynamic `mcp get` configuration.
