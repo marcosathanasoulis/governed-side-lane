@@ -78,6 +78,17 @@ class PromptItIntegrationTests(unittest.TestCase):
         self.assertIn("exact preapproved backup", self.readme)
         self.assertNotIn("unchanged and never fall back to this route", self.readme)
 
+    def test_authorized_execute_mode_source_research_preserves_review_contract(self) -> None:
+        self.assertIn("authorized bounded source-research task", self.text)
+        self.assertIn("execute harness", self.text)
+        self.assertIn("brief or report-only output", self.text)
+        self.assertIn("Read-only scope does not mean strict review-mode-only", self.governance)
+        self.assertIn("strict review no-secret/no-MCP contract", self.governance)
+
+    def test_omniroute_add_on_is_optional_and_linked(self) -> None:
+        self.assertIn("OmniRoute add-on guide", self.readme)
+        self.assertIn("native/direct routes remain fully usable without it", self.text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -49,7 +49,9 @@ public [model guide](../../docs/model-guide.md) and
 [connector guide](../../docs/connector-guide.md).
 They do not make a route executable: keep candidate, configured, available, and
 authorized states separate, and continue normally with one native OpenAI or
-Claude host when no optional route qualifies.
+Claude host when no optional route qualifies. For optional pooled routing, read
+the [OmniRoute add-on guide](../../docs/omniroute-guide.md); it is not required
+and Side Lane owns task fit and acceptance even when a gateway is present.
 
 For new provider setup or a first trial, read
 [provider qualification](references/provider-qualification.md). It covers
@@ -99,8 +101,12 @@ on uncertainty, non-determinism, impact, irreversibility, material disagreement
 risk, or an explicit acceptance gate.
 Compare the complete session: task tokens, known tool charges, dispatch/setup,
 retries and coordinator correction, and any independent review. Keep prepaid
-subscription usage separate from marginal provider-key usage. Unknown prices or
-overhead remain unknown and are never treated as zero. A frontier route needs
+subscription usage separate from marginal provider-key usage. An exact route
+verified as covered by a subscription the user already pays has a known `$0`
+additional/marginal usage cost — a different statement from an unknown price
+and from a zero-cost provider key, and not a claim that every OAuth or hosted
+route is free. Unknown prices or overhead remain unknown and are never treated
+as zero. A frontier route needs
 task-specific evidence that an eligible economical route cannot meet the need.
 
 GLM is optional and enters staffing only when the user explicitly enables it.
@@ -152,11 +158,16 @@ Coordinator origin does not select a provider: Codex-origin staffing may
 consider configured native Claude and fixed `glm-5.3` on its Claude worker;
 Claude-origin staffing may consider configured native Codex and the same
 explicitly enabled fixed GLM route on its Claude worker.
-During Prompt it research, the runner may launch a qualified review lane only
-when the user has explicitly authorized that bounded external research team;
-generic Prompt it consent and recommendation output do not authorize launch.
-Review governance still forbids MCP/connectors and secrets. Execute lanes,
-including GLM, retain their separate approval gates.
+During Prompt it research, the runner may launch a qualified review lane when
+the user has explicitly authorized that bounded external research team. An
+authorized bounded source-research task may also use an execute harness with an
+exact route, capabilities, read roots, and a brief or report-only output scope,
+when existing explicit execution, delegation, and spend authority covers it and
+the task performs no implementation or external writes. Read-only scope does not
+mean strict review-mode-only. Generic Prompt it consent and recommendation
+output do not authorize any launch. Review governance still forbids
+MCP/connectors and secrets. Execute lanes, including GLM, retain their separate
+approval gates.
 
 Claude-host and Devin-host workers default to a 30-minute (1,800-second)
 process timeout. An explicit model route's positive integer `timeout_seconds`
@@ -266,5 +277,16 @@ policy and apply it to eligible task-specific routes without repeated permission
 questions. Compare expected total accepted-task cost, including retries and
 review, rather than token price alone. Record the selected route, cost evidence,
 and authorization basis. Standing cost authorization does not enable an
-unconfigured provider or authorize unrelated tasks. Unknown costs do not prove
-a route is cheapest.
+unconfigured provider or authorize unrelated tasks. Unknown empirical history
+or a missing median is measurement absence, not a hard availability, capability,
+context, security, or known-failed-quality gate; a verified included
+subscription or current tariff with bounded expected usage and existing explicit
+authority can support dispatch while reporting the history as unavailable.
+Verified included coverage without overage has a known `$0` additional usage
+cost; a paid tariff retains its actual bounded estimate, not zero. A missing median is not an unknown
+current price and is not by itself a reason to alert, notify, or demand new
+approval on an otherwise authorized task. When coverage is verified and the
+median is not, the plain disclosure is "$0 additional usage cost — covered by
+subscription; historical median unavailable". Unknown costs do not prove a route
+is cheapest and are never reported as zero; missing history is never rewritten
+to zero.

@@ -138,5 +138,5 @@
       }
     }
   },
-  "capabilities": ["workspace-write", "shell", "git-push", "gitnexus", "codegraph", "slack-read", "aws-read", "asana-read", "drive-read", "gcloud-read", "secret-use", "database-read", "algolia-read", "contentful-read", "contentful-master-read", "workflow-write", "playwright"]
+  "capabilities": ["workspace-write", "shell", "git-push", "gitnexus", "codegraph", "slack-read", "aws-read", "asana-read", "drive-read", "gcloud-read", "secret-use", "database-read", "algolia-read", "contentful-read", "contentful-master-read", "gateway-read", "workflow-write", "playwright"]
 }

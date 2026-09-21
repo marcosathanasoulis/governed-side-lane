@@ -8,22 +8,34 @@ from contextlib import suppress
 from pathlib import Path
 import re
 import signal
+import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 from typing import Any, Callable, Mapping, Sequence, Union
 from urllib.parse import urlparse
 
+from side_lane import report_stop_hook, routed_read_pagination
+from side_lane.capabilities import (
+    CAPABILITY_MCP_SERVERS,
+    CM_SERVICES_CAPABILITIES,
+    RUN_CONFIG_CAPABILITIES,
+    USER_SCOPE_MCP_CAPABILITIES,
+)
 from side_lane.credentials import scrub_backend_environment
 from side_lane.governance import known_capabilities, lane_system_prompt, tool_policy
 from side_lane.mcp_run_config import (
     McpRunServer,
+    build_strict_mcp_bundle,
     claude_payload,
     ensure_no_registration_conflicts,
     require_env_references,
     write_ephemeral,
+    write_strict_mcp_bundle,
 )
 from side_lane.read_roots import scope_note
+from side_lane.web_domains import claude_rules, scope_note as web_scope_note
 from side_lane.results import LaneResult
 from side_lane.redaction import redact_provider_secret
 
@@ -38,6 +50,10 @@ BILLABLE_PROVIDERS = frozenset({"glm", "openrouter", "deepseek", "kimi", "minima
 ROUTED_PROVIDERS = frozenset({"omniroute"})
 ROUTED_GATEWAYS = {"omniroute": "omniroute-router"}
 ROUTING_POLICY_CONTRACT_KEY = "routing_policy_contract"
+# The installed Superpowers plugin adds a coordinator-intake SessionStart
+# hook. Routed workers already receive the pinned lane skills and role prompt,
+# so only this exact plugin is disabled in the disposable routed settings.
+ROUTED_COORDINATOR_PLUGIN = "superpowers@claude-plugins-official"
 # Claude Code sends ANTHROPIC_API_KEY as `X-Api-Key` (first-party key auth)
 # and ANTHROPIC_AUTH_TOKEN as `Authorization: Bearer` (proxy/OAuth-style); a
 # first-party Anthropic key must use the former.
@@ -92,64 +108,218 @@ GLM_QUOTA_PAUSE = re.compile(
 )
 SUPPORTED_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 MCP_READINESS_TIMEOUT_SECONDS = 20
+# Report-only execute lanes (`--report-only`) get one deterministic Stop hook
+# inside the same invocation. The filename and action are fixed here; a worker
+# never chooses its own acceptance path, and the hook is armed with the run
+# baseline the runner captured before the worker started, so a report the
+# worktree already contained at HEAD is not mistaken for this run's.
+REPORT_ONLY_REPORT_NAME = "SIDE_LANE_REPORT.md"
+REPORT_ONLY_HOOK_TIMEOUT_SECONDS = 10
 # Process-local controls for routed runs. Compaction starts below the
 # reviewed OmniRoute ceiling and output is bounded per response; these do not
 # claim provider capacity or replace the router's fail-closed guard.
 ROUTED_AUTOCOMPACT_WINDOW = "100k"
 ROUTED_MAX_OUTPUT_TOKENS = "16384"
+# Claude Code's native auto-memory — the per-project memory directory it loads
+# and writes under the controlled HOME — is switched off in every lane
+# worker's child environment, native or routed, review or execute. The value is
+# forced after transport scrubbing, so a caller's inherited false cannot
+# survive into the child. This governs that native feature only: it is a
+# same-user control, not an operating-system write control, because an execute
+# worker's own manual tools can still write the path. See
+# docs/lane-context.md and ``HOST_MEMORY_READONLY_NOTE`` below.
+AUTO_MEMORY_DISABLE_ENV = "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
+AUTO_MEMORY_DISABLED_VALUE = "1"
 # Exact MCP server names a granted capability maps to. ``slack-read`` maps to
 # the server registered as ``slack``; the canonical lane governance names the
 # registration, not the capability. The graph capabilities use their own exact
 # names. ``aws-read`` names the one server its per-run --mcp-config file may
 # register (side_lane.mcp_run_config); it never appears in
 # enabledMcpjsonServers because its registration is not a project .mcp.json
-# entry. ``asana-read`` and ``drive-read`` both map to the fixed local stdio
+# entry. Every cm-services-family capability — asana, drive, gcloud,
+# database, algolia, contentful, and Gateway — maps to the fixed local stdio
 # server registered as ``cm-services`` in the worker host's user-global config
 # (the controlled HOME the coordinator provisions); a user-scope registration
 # needs no project approval either. Server names must never be wildcarded and
 # a grant never approves a server outside this mapping.
-CAPABILITY_MCP_SERVERS = {
-    "playwright": "playwright",
-    "gitnexus": "gitnexus",
-    "codegraph": "codegraph",
-    "slack-read": "slack",
-    "aws-read": "aws",
-    "asana-read": "cm-services",
-    "drive-read": "cm-services",
-    "gcloud-read": "cm-services",
-    "database-read": "cm-services",
-    "algolia-read": "cm-services",
-    "contentful-read": "cm-services",
-    "contentful-master-read": "cm-services",
-}
-# Capabilities whose MCP registration arrives per run through the validated
-# ``--mcp-config`` file (side_lane.mcp_run_config) instead of a project
-# ``.mcp.json`` entry. They get no ``enabledMcpjsonServers`` approval — that
-# setting approves project-file servers — and no ``--strict-mcp-config``, so
-# every existing user/project registration keeps loading alongside the
-# per-run file.
-RUN_CONFIG_CAPABILITIES = frozenset({"aws-read"})
-# Capabilities whose server is a fixed LOCAL registration provisioned into the
-# worker host's user-global MCP config (the controlled HOME) by the
-# coordinator-side account module before the run. Like a per-run server, a
-# user-scope registration is not a project ``.mcp.json`` entry, so it gets no
-# ``enabledMcpjsonServers`` approval — but unlike a per-run server it exists
-# before launch, so it is eligible for the pre-launch readiness probe below.
-USER_SCOPE_MCP_CAPABILITIES = frozenset(
-    {"asana-read", "drive-read", "gcloud-read", "database-read", "algolia-read",
-     "contentful-read", "contentful-master-read"}
-)
+# CAPABILITY_MCP_SERVERS, RUN_CONFIG_CAPABILITIES, and USER_SCOPE_MCP_CAPABILITIES
+# are imported from side_lane.capabilities to avoid circular imports.
+
 # Capabilities whose MCP server additionally requires the expensive
 # pre-launch ``mcp get`` health probe. Approval (above) is a per-process
 # settings fact; readiness is a live subprocess check, and the two stay
 # separate so a graph/Slack grant never pays for — or gates on — a probe.
-# ``cm-services`` is probed once even when both of its capabilities are
+# ``cm-services`` is probed once even when several of its capabilities are
 # granted.
 READINESS_REQUIRED_CAPABILITIES = frozenset(
     {"playwright", "asana-read", "drive-read", "gcloud-read", "database-read", "algolia-read",
-     "contentful-read", "contentful-master-read"}
+     "contentful-read", "contentful-master-read", "gateway-read"}
 )
+
+
+def _effective_mcp_registrations(
+    host: str,
+    repo: Path,
+    worktree: Path,
+    home: Path,
+    granted_capabilities: "frozenset[str] | set[str] | tuple[str, ...]" = (),
+) -> list[tuple[str, str, Path]]:
+    """Return (server_name, scope, path, definition) tuples from user/project/worktree configs.
+
+    Only returns registrations for servers whose corresponding capabilities are in
+    ``granted_capabilities`` and are ``USER_SCOPE_MCP_CAPABILITIES`` or
+    ``RUN_CONFIG_CAPABILITIES``. Scope is "user", "project", or "worktree".
+    Used to build the narrow bundle for ``--strict-mcp-config`` in routed
+    execute lanes.
+
+    Raises ``ClaudeAdapterError`` if the same server name has different definitions
+    across scopes (silent last-write-wins would hide a configuration conflict).
+    """
+    results: list[tuple[str, str, Path, dict[str, Any]]] = []
+    if host != "claude":
+        return []
+
+    granted = set(granted_capabilities)
+    # Build the set of server names whose corresponding capability is granted.
+    # Includes both cm-services family and host-native servers (gitnexus, codegraph,
+    # playwright, slack).
+    user_scope_names: set[str] = set()
+    for cap in USER_SCOPE_MCP_CAPABILITIES | RUN_CONFIG_CAPABILITIES:
+        if cap not in granted:
+            continue
+        server = CAPABILITY_MCP_SERVERS.get(cap)
+        if server:
+            user_scope_names.add(server)
+
+    # Track definitions seen so far to detect same-name conflicts.
+    # key: server name, value: (scope, path, definition)
+    seen: dict[str, tuple[str, Path, dict[str, Any]]] = {}
+
+    def _check_and_record(
+        name: str, scope: str, path: Path, definition: dict[str, Any],
+    ) -> None:
+        """Record a definition, raising on conflict with a prior one."""
+        if name in seen:
+            prior_scope, prior_path, prior_def = seen[name]
+            if prior_def != definition:
+                raise ClaudeAdapterError(
+                    f"MCP server {name!r} has conflicting definitions: "
+                    f"{prior_scope} scope ({prior_path}) defines it differently from "
+                    f"{scope} scope ({path}). Identical definitions coalesce; "
+                    f"different definitions must be reconciled before routing."
+                )
+            # Identical — skip duplicate entry
+            return
+        seen[name] = (scope, path, definition)
+        results.append((name, scope, path, definition))
+
+    # Scan user-global config (~/.claude.json)
+    user_config = home / ".claude.json"
+    try:
+        os.stat(user_config)
+    except FileNotFoundError:
+        user_config_exists = False
+    except OSError as exc:
+        raise ClaudeAdapterError(
+            f"user MCP config {user_config} could not be read: {exc}"
+        ) from exc
+    else:
+        user_config_exists = True
+    if user_config_exists:
+        try:
+            cfg = json.loads(user_config.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ClaudeAdapterError(
+                f"user MCP config {user_config} is not valid JSON: {exc}"
+            ) from exc
+        except OSError as exc:
+            raise ClaudeAdapterError(
+                f"user MCP config {user_config} could not be read: {exc}"
+            ) from exc
+        # Top-level mcpServers
+        top_servers = cfg.get("mcpServers", {})
+        if isinstance(top_servers, dict):
+            for name, definition in top_servers.items():
+                if name in user_scope_names and isinstance(definition, dict):
+                    _check_and_record(name, "user", user_config, definition)
+        # Project entries
+        projects = cfg.get("projects", {})
+        if isinstance(projects, dict):
+            proj_entry = projects.get(str(repo))
+            if isinstance(proj_entry, dict):
+                proj_servers = proj_entry.get("mcpServers", {})
+                if isinstance(proj_servers, dict):
+                    for name, definition in proj_servers.items():
+                        if name in user_scope_names and isinstance(definition, dict):
+                            _check_and_record(name, "project", user_config, definition)
+
+    # Lane worktree .mcp.json — server names are top-level keys (no mcpServers wrapper)
+    worktree_mcp = worktree / ".mcp.json"
+    if worktree_mcp.is_file():
+        try:
+            cfg = json.loads(worktree_mcp.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ClaudeAdapterError(
+                f"worktree MCP config {worktree_mcp} is not valid JSON: {exc}"
+            ) from exc
+        except OSError as exc:
+            raise ClaudeAdapterError(
+                f"worktree MCP config {worktree_mcp} could not be read: {exc}"
+            ) from exc
+        servers = cfg.get("mcpServers", {})
+        if not isinstance(servers, dict) or not servers:
+            # .mcp.json uses server names as top-level keys directly
+            servers = cfg if isinstance(cfg, dict) else {}
+        if isinstance(servers, dict):
+            for name, definition in servers.items():
+                if name in user_scope_names and isinstance(definition, dict):
+                    _check_and_record(name, "worktree", worktree_mcp, definition)
+
+    return results
+
+
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+# Per-executable cache: does this executable accept --strict-mcp-config?
+# Populated once per executable identity on first probe.  The key is the
+# executable string as passed to the adapter; the value is True if the
+# installed CLI supports the flag.
+_strict_mcp_executable_cache: dict[str, bool] = {}
+
+
+def _check_strict_mcp_support(
+    executable: str, runner: Runner,
+    *, cwd: Path, env: "Mapping[str, str]",
+) -> bool:
+    """Return True if the installed CLI accepts ``--strict-mcp-config``.
+
+    Probed in the actual worker working directory and environment rather
+    than the coordinator's ``Path.cwd()`` or ``os.environ``.  Cached per
+    executable identity after the first probe.  A missing or broken
+    executable is cached as False so the check is not retried.
+    """
+
+    if executable in _strict_mcp_executable_cache:
+        return _strict_mcp_executable_cache[executable]
+
+    result = False
+    try:
+        completed = runner(
+            [executable, "--help"],
+            timeout=10,
+            cwd=cwd,
+            env=dict(env),
+            stdin=subprocess.DEVNULL,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        result = completed.returncode == 0 and "--strict-mcp-config" in completed.stdout
+    except (OSError, subprocess.SubprocessError):
+        result = False
+
+    _strict_mcp_executable_cache[executable] = result
+    return result
 PLAYWRIGHT_STARTUP_INSTRUCTION = """\
 
 
@@ -182,6 +352,36 @@ another tool, widen the grant, or claim a read happened. The capability is
 not task authority: read only the channel or thread the coordinator's task
 names.
 """
+HOST_MEMORY_READONLY_NOTE = """\
+## Host memory is read-only
+
+Never create, update, or delete host memory, including the user or project
+memory stores maintained by Claude Code. This does not prohibit task-authorized
+edits to repository configuration files that are not memory stores. This is a same-user instruction and control, not an
+operating-system sandbox: it exists so no lane worker silently changes shared
+host state, and your own manual tools are not technically barred from that
+path. A durable fact this task produces belongs in a reviewed repository
+artifact in your lane worktree — the report, findings, or run artefact the task
+names — which the coordinator can verify; never in host memory. Explicit
+repository context (`AGENTS.md`, the authoritative `CLAUDE.md`, canonical
+governance, delivered skills, and approved MCP tools) is unaffected and stays
+available.
+"""
+EXECUTE_ROLE_INSTRUCTION = """\
+
+
+# Delegated execute role
+
+This is an already-approved delegated execute task. Begin the assigned scope
+immediately: do not invoke coordinator planning or routing approval gates, ask
+whether to proceed, or stop at a design for the same approved scope. First read
+the assigned repository rules and verify the real worktree and source paths,
+then carry out the requested implementation or report. Useful research and
+design analysis remain allowed when they serve the task. Honor explicit
+review-only, report-only, read-only, and no-commit instructions, and stop and
+report genuine authority, credential, or scope blockers rather than requesting
+approval.
+"""
 
 
 def _run_config_mcp_instruction(server_names: "Sequence[str]") -> str:
@@ -210,14 +410,20 @@ another tool, widen the grant, or claim a read happened.
 
 
 def _cm_services_startup_instruction(capabilities: Capabilities) -> str:
-    """Render the ``cm-services`` wait instruction once, for either grant.
+    """Render the ``cm-services`` wait instruction once, for any of its grants.
 
-    ``asana-read`` and ``drive-read`` share the one fixed user-global server;
-    the instruction is emitted once no matter how many of them are granted and
-    names only the tools the granted capabilities actually allow.
+    Every cm-services-family capability shares the one fixed user-global
+    server; the instruction is emitted once no matter how many of them are
+    granted and names only the tools the granted capabilities actually allow.
+    The granted set is intersected with ``CM_SERVICES_CAPABILITIES`` exactly:
+    a lane granted only a non-cm-services capability (``gitnexus``,
+    ``codegraph``, ``playwright``, ``slack-read``) shares the same
+    ``USER_SCOPE_MCP_CAPABILITIES`` membership but has no cm-services grant, so
+    it must receive no instruction at all rather than one naming an empty tool
+    list and a server it was never granted.
     """
 
-    granted = set(capabilities) & USER_SCOPE_MCP_CAPABILITIES
+    granted = set(capabilities) & CM_SERVICES_CAPABILITIES
     if not granted:
         return ""
     policy = tool_policy()
@@ -226,6 +432,13 @@ def _cm_services_startup_instruction(capabilities: Capabilities) -> str:
         if rule.startswith("mcp__cm-services__")
     )
     listed = ", ".join(f"`{tool}`" for tool in tools)
+    gateway_note = (
+        "\nThe server also restricts the Gateway tools to the exact run IDs in "
+        "the coordinator's `gateway_run_ids` grant file; a call naming any other "
+        "run fails closed, and neither tool accepts a URL, token, or other "
+        "credential argument — never pass one."
+        if "gateway-read" in granted else ""
+    )
     return f"""
 
 
@@ -243,8 +456,8 @@ after the wait the granted tools are absent, named differently, or the
 server reports an authentication failure, stop and report that exact state
 — do not substitute another tool, widen the grant, or claim a read
 happened. Each capability grants only its own tools on this shared server:
-granting one never grants the other. The capability is not task authority:
-read only the objects the coordinator's task names.
+granting one never grants another's tools.{gateway_note} The capability is
+not task authority: read only the objects the coordinator's task names.
 """
 
 
@@ -329,12 +542,21 @@ def _capability_set(capabilities: Capabilities) -> frozenset[str]:
     return granted
 
 
-def allowed_tools(mode: str, capabilities: Capabilities = ()) -> tuple[str, ...]:
+def allowed_tools(mode: str, capabilities: Capabilities = (),
+                  web_domains: Sequence[str] = ()) -> tuple[str, ...]:
     """Deterministic ``--allowedTools`` rules rendered from canonical governance.
 
     Capability names are validated first and unknown names raise in every
     mode; review mode then returns an empty tuple. The rule text comes from the
     ``Execute tool allowlist`` section of ``config/lane-governance.md``.
+
+    ``web_domains`` is the one coordinator-supplied grant that is not a static
+    allowlist rule: a documentation origin is named per run, so it renders as
+    one ``WebFetch(domain:<host>)`` rule per exact host and never as a bare
+    ``WebFetch`` (every domain). It is not unlocked by any capability, so
+    ``shell``/``workspace-write``/``git-push`` never widen into network reach,
+    and ``web_domains.claude_rule`` re-validates each host here, so a synthetic
+    direct call fails closed instead of emitting a wider rule.
     """
 
     granted = _capability_set(capabilities)
@@ -347,6 +569,9 @@ def allowed_tools(mode: str, capabilities: Capabilities = ()) -> tuple[str, ...]
             for rule in rules:
                 if rule not in tools:
                     tools.append(rule)
+    for rule in claude_rules(web_domains):
+        if rule not in tools:
+            tools.append(rule)
     return tuple(tools)
 
 
@@ -385,6 +610,73 @@ def scrub_environment(inherited: Mapping[str, str]) -> dict[str, str]:
     })
 
 
+def _write_private_json(path: Path, payload: Mapping[str, Any]) -> None:
+    """Atomically write one 0600 JSON artifact inside a config directory."""
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, prefix=f"{path.name}.", delete=False
+    ) as temporary:
+        json.dump(payload, temporary, indent=2)
+        temporary.write("\n")
+        temporary_path = Path(temporary.name)
+    os.chmod(temporary_path, 0o600)
+    os.replace(temporary_path, path)
+
+
+def _merge_read_pagination_hook(settings: object, command: str) -> dict[str, Any]:
+    """Return copied Claude settings with the Read pagination hook appended.
+
+    Mirrors the Devin adapter's ``_merge_policy_hook``: every inherited
+    ``PreToolUse`` entry survives alongside the new one, and a malformed
+    ``hooks`` block fails closed at launch preparation.
+    """
+
+    if not isinstance(settings, Mapping):
+        raise ClaudeAdapterError("Claude settings must be a JSON object")
+    merged: dict[str, Any] = {key: value for key, value in settings.items()}
+    hooks = merged.get("hooks")
+    if hooks is None:
+        merged_hooks: dict[str, Any] = {}
+    elif isinstance(hooks, Mapping):
+        merged_hooks = {key: value for key, value in hooks.items()}
+    else:
+        raise ClaudeAdapterError("Claude settings hooks must be a JSON object")
+    existing = merged_hooks.get("PreToolUse", [])
+    if not isinstance(existing, list):
+        raise ClaudeAdapterError("Claude settings hooks.PreToolUse must be an array")
+    merged_hooks["PreToolUse"] = [*existing, {
+        "matcher": routed_read_pagination.hook_matcher(),
+        "hooks": [{"type": "command", "command": command, "timeout": 5}],
+    }]
+    merged["hooks"] = merged_hooks
+    return merged
+
+
+def _disable_routed_coordinator_plugin(settings: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy settings while disabling only the known routed-worker plugin.
+
+    The source user settings remain byte-for-byte untouched. An absent plugin
+    map stays absent, and an existing false entry stays false; malformed maps
+    fail closed instead of silently changing the worker's hook set.
+    """
+
+    merged = dict(settings)
+    if "enabledPlugins" not in merged:
+        return merged
+    enabled_plugins = merged["enabledPlugins"]
+    if not isinstance(enabled_plugins, Mapping):
+        raise ClaudeAdapterError("Claude settings enabledPlugins must be a JSON object")
+    copied_plugins = dict(enabled_plugins)
+    for plugin, enabled in copied_plugins.items():
+        if not isinstance(plugin, str) or type(enabled) is not bool:
+            raise ClaudeAdapterError(
+                "Claude settings enabledPlugins entries must map plugin names to booleans")
+    if ROUTED_COORDINATOR_PLUGIN in copied_plugins:
+        copied_plugins[ROUTED_COORDINATOR_PLUGIN] = False
+    merged["enabledPlugins"] = copied_plugins
+    return merged
+
+
 def _prepare_routed_claude_home(
     source_home: Path, repo_path: Path, worktree_path: Path
 ) -> Path:
@@ -413,22 +705,38 @@ def _prepare_routed_claude_home(
             str(path.resolve()): {"hasTrustDialogAccepted": True}
             for path in (repo_path, worktree_path)
         }
-        config_path = runtime_home / ".claude.json"
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=runtime_home, prefix=".claude.json.", delete=False
-        ) as temporary:
-            json.dump(config, temporary, indent=2)
-            temporary.write("\n")
-            temporary_path = Path(temporary.name)
-        os.chmod(temporary_path, 0o600)
-        os.replace(temporary_path, config_path)
+        _write_private_json(runtime_home / ".claude.json", config)
+        # Bound each native Read call to a line range through a per-run
+        # PreToolUse hook. The hook config and the merged settings live in
+        # this disposable config dir — never in the symlinked source hooks
+        # directory — so the real user home is untouched.
+        hook_config_path = runtime_home / "routed-read-pagination.json"
+        _write_private_json(
+            hook_config_path, {"limit": routed_read_pagination.DEFAULT_LINE_BOUND})
+        hook_command = shlex.join((
+            sys.executable,
+            str(Path(routed_read_pagination.__file__).resolve()),
+            str(hook_config_path),
+        ))
         source_claude_dir = source_home / ".claude"
-        for name in ("settings.json", "settings.local.json"):
-            source_settings = source_claude_dir / name
-            if source_settings.is_file():
-                target_settings = runtime_home / name
-                shutil.copyfile(source_settings, target_settings)
-                os.chmod(target_settings, 0o600)
+        source_settings = source_claude_dir / "settings.json"
+        inherited_settings: object = {}
+        if source_settings.is_file():
+            try:
+                inherited_settings = json.loads(
+                    source_settings.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ClaudeAdapterError("Claude settings are invalid JSON") from exc
+        merged_settings = _merge_read_pagination_hook(inherited_settings, hook_command)
+        _write_private_json(
+            runtime_home / "settings.json",
+            _disable_routed_coordinator_plugin(merged_settings),
+        )
+        source_local = source_claude_dir / "settings.local.json"
+        if source_local.is_file():
+            target_local = runtime_home / "settings.local.json"
+            shutil.copyfile(source_local, target_local)
+            os.chmod(target_local, 0o600)
         # Claude resolves global instructions and skills relative to its
         # configuration home. Preserve same-user context and installed plugins
         # through shared links, including plugin bookkeeping. This is not a
@@ -562,6 +870,11 @@ def build_transport_environment(
         provider, model, provider_config, model_config, mode
     )
     child = scrub_environment(inherited)
+    # Forced after scrubbing, for every provider and both modes, so an
+    # inherited `CLAUDE_CODE_DISABLE_AUTO_MEMORY=0` in the caller's environment
+    # cannot override it: the documented switch is read as truthy, and the
+    # child always gets the explicit true.
+    child[AUTO_MEMORY_DISABLE_ENV] = AUTO_MEMORY_DISABLED_VALUE
     if auth_method == "oauth":
         if secret is not None:
             raise ClaudeAdapterError("native OAuth routes must not receive an API key")
@@ -594,7 +907,7 @@ def _approved_mcp_servers(capabilities: Capabilities) -> tuple[str, ...]:
     return tuple(sorted({CAPABILITY_MCP_SERVERS[name] for name in capabilities
                          if name in CAPABILITY_MCP_SERVERS
                          and name not in RUN_CONFIG_CAPABILITIES
-                         and name not in USER_SCOPE_MCP_CAPABILITIES}))
+                         and name not in CM_SERVICES_CAPABILITIES}))
 
 
 def _required_mcp_servers(capabilities: Capabilities) -> tuple[str, ...]:
@@ -614,12 +927,112 @@ def _required_mcp_servers(capabilities: Capabilities) -> tuple[str, ...]:
                          and name not in RUN_CONFIG_CAPABILITIES}))
 
 
+def _merge_stop_hook(settings: object, command: str) -> dict[str, Any]:
+    """Return copied Claude settings with the report Stop hook appended.
+
+    Mirrors ``_merge_read_pagination_hook``: every inherited key survives and a
+    malformed ``hooks`` block fails closed at launch preparation. Only the
+    ``Stop`` key is touched, so an inherited ``PreToolUse`` entry — or any
+    other event — keeps running exactly as before.
+    """
+
+    if not isinstance(settings, Mapping):
+        raise ClaudeAdapterError("Claude settings must be a JSON object")
+    merged: dict[str, Any] = {key: value for key, value in settings.items()}
+    hooks = merged.get("hooks")
+    if hooks is None:
+        merged_hooks: dict[str, Any] = {}
+    elif isinstance(hooks, Mapping):
+        merged_hooks = {key: value for key, value in hooks.items()}
+    else:
+        raise ClaudeAdapterError("Claude settings hooks must be a JSON object")
+    existing = merged_hooks.get("Stop", [])
+    if not isinstance(existing, list):
+        raise ClaudeAdapterError("Claude settings hooks.Stop must be an array")
+    merged_hooks["Stop"] = [*existing, {
+        "hooks": [{
+            "type": "command",
+            "command": command,
+            "timeout": REPORT_ONLY_HOOK_TIMEOUT_SECONDS,
+        }],
+    }]
+    merged["hooks"] = merged_hooks
+    return merged
+
+
+def report_only_hook_command(baseline: report_stop_hook.ReportBaseline) -> str:
+    """Shell-quote the trusted helper invocation that guards one run's stop.
+
+    The command is built from the current interpreter, this package's own
+    helper module, and the run baseline the runner captured — never from model
+    input or hook stdin. ``shlex.join`` quotes it so a worktree path containing
+    spaces, quotes, or shell metacharacters survives as one argv.
+    """
+
+    helper = Path(report_stop_hook.__file__).resolve()
+    settings = json.dumps(
+        report_stop_hook.hook_settings(baseline), separators=(",", ":"), sort_keys=True
+    )
+    return shlex.join((sys.executable, str(helper), "--settings", settings))
+
+
+def report_only_report_path(worktree: Path) -> Path:
+    """The one report path a report-only lane is judged on."""
+
+    return worktree / REPORT_ONLY_REPORT_NAME
+
+
+def _report_only_baseline(
+    worktree: Path, baseline: report_stop_hook.ReportBaseline | None
+) -> report_stop_hook.ReportBaseline:
+    """The run baseline the Stop hook is armed with.
+
+    The runner captures this before the worker starts and passes it down, so
+    the hook and the runner's post-run acceptance compare against the same
+    recorded state. A direct caller that omits it captures here instead, which
+    is still before any process starts and therefore the same rule.
+
+    An unsafe preexisting path fails closed before a model runs: no honest
+    baseline can be taken from a symlink, FIFO, socket, device, or directory,
+    and silently treating the path as empty would let such an entry stand in
+    for a delivery.
+    """
+    if baseline is not None:
+        return baseline
+    try:
+        return report_stop_hook.capture_report_baseline(
+            report_only_report_path(worktree)
+        )
+    except report_stop_hook.UnsafeReportPath as exc:
+        raise ClaudeAdapterError(f"report-only cannot start: {exc}") from exc
+
+
+def require_report_only_budget(model_config: Mapping[str, Any]) -> str:
+    """Return the finite positive USD cap a report-only lane must carry.
+
+    The opt-in promises the Stop hook and the spend cap travel in the same
+    invocation, so a missing or unusable ``max_budget_usd`` fails before any
+    model starts rather than launching an unbounded lane. Nothing here changes
+    the catalog or the ordinary execute path, which still treats the budget as
+    optional.
+    """
+
+    budget = _optional_budget(model_config)
+    if budget is None:
+        raise ClaudeAdapterError(
+            "report-only requires a finite positive max_budget_usd: the Stop "
+            "hook and the USD cap must be part of the same invocation"
+        )
+    return budget
+
+
 def _per_launch_settings(
     provider: str,
     model: str,
     mode: str,
     base_url: str | None = None,
     capabilities: Capabilities = (),
+    report_only_baseline: report_stop_hook.ReportBaseline | None = None,
 ) -> str:
     """Return nonsecret settings that outrank user/project/local settings.
 
@@ -645,6 +1058,15 @@ def _per_launch_settings(
         if base_url is not None:
             settings["env"]["ANTHROPIC_BASE_URL"] = base_url.rstrip("/")
         settings["alwaysThinkingEnabled"] = True
+    if report_only_baseline is not None:
+        # Process-local only: this hook rides the run's own --settings payload,
+        # so no saved settings file, user hook, or permission is written,
+        # replaced, or disabled. Inherited hooks keep loading from their own
+        # setting sources alongside this one. The run baseline travels in the
+        # same payload, so the hook judges the report against the state this
+        # run started from rather than accepting a file it inherited.
+        settings = _merge_stop_hook(
+            settings, report_only_hook_command(report_only_baseline))
     return json.dumps(settings, separators=(",", ":"), sort_keys=True)
 
 
@@ -661,6 +1083,10 @@ def _optional_budget(model_config: Mapping[str, Any]) -> str | None:
     value = model_config.get("max_budget_usd")
     if value is None:
         return None
+    if isinstance(value, bool):
+        # `true` is not a USD amount, and float(True) == 1.0 would silently
+        # become a one-dollar cap instead of the input error it is.
+        raise ClaudeAdapterError("max_budget_usd must be a positive finite number")
     try:
         parsed = float(value)
     except (TypeError, ValueError) as exc:
@@ -683,14 +1109,31 @@ def build_command(
     mode: str = "execute",
     capabilities: Capabilities = (),
     read_roots: Sequence[Path] = (),
+    web_domains: Sequence[str] = (),
     mcp_config_path: str | Path | None = None,
     run_mcp_servers: "Mapping[str, Any] | None" = None,
+    report_only: bool = False,
+    report_baseline: report_stop_hook.ReportBaseline | None = None,
+    strict_mcp_config_path: str | Path | None = None,
+    strict_mcp_support: bool | None = None,
 ) -> list[str]:
     executable = _nonempty(executable, "Claude executable")
     repo_path = validate_worktree(repo)
     worktree_path = validate_worktree(worktree)
     if repo_path == worktree_path:
         raise ClaudeAdapterError(f"{mode} lane requires a dedicated worktree")
+    if report_only and mode != "execute":
+        # The hook rides the execute lane's own argv and settings; a review
+        # lane's argv is the strict read-only form and must stay byte-identical.
+        raise ClaudeAdapterError("report-only is execute mode only for the Claude host")
+    armed_baseline: report_stop_hook.ReportBaseline | None = None
+    if report_only:
+        # Fail before the model, not after: the opt-in only makes sense if the
+        # Stop hook and the USD cap are both in this one command.
+        require_report_only_budget(model_config)
+        # Captured before the worker exists, so the hook can tell this run's
+        # report from one the worktree already contained at HEAD.
+        armed_baseline = _report_only_baseline(worktree_path, report_baseline)
     if read_roots and mode != "execute":
         # A review lane's argv is the strict read-only form; a granted read
         # root cannot be added to it without either assuming the plan-mode
@@ -698,12 +1141,24 @@ def build_command(
         # (`--add-dir` is a workspace grant, not a read grant). Fail closed
         # rather than launch a lane that silently ignores the coordinator.
         raise ClaudeAdapterError("read roots are execute-only for the Claude host")
+    if web_domains and mode != "execute":
+        # A review lane's argv is the strict read-only form (`--safe-mode`,
+        # `--tools Read,Glob,Grep`, strict no-MCP): it has no WebFetch tool at
+        # all, so a documentation-domain grant there is inert authority. Fail
+        # closed rather than launch a lane whose stated scope the worker
+        # cannot be given.
+        raise ClaudeAdapterError("web domains are execute-only for the Claude host")
     if mcp_config_path is not None and mode != "execute":
         # Review mode is strict no-MCP by canonical governance: its argv pins
         # `--strict-mcp-config` with an empty server set, and no per-run
         # registration may widen that. The CLI rejects `--mcp-config` in
         # review mode already; this is the adapter-level fail-closed guard.
         raise ClaudeAdapterError("per-run MCP config is execute-only for the Claude host")
+    if strict_mcp_config_path is not None and strict_mcp_support is not True:
+        raise ClaudeAdapterError(
+            "strict MCP bundle requested but CLI support for --strict-mcp-config "
+            "has not been confirmed; the routed lane cannot be launched"
+        )
     runtime_model, _gateway, _auth_method, _billable = _route_metadata(
         provider, model, provider_config, model_config, mode
     )
@@ -746,7 +1201,8 @@ def build_command(
                 "--verbose",
                 "--settings",
                 _per_launch_settings(
-                    provider, runtime_model, mode, provider_config.get("base_url"), capabilities
+                    provider, runtime_model, mode, provider_config.get("base_url"),
+                    capabilities, armed_baseline,
                 ),
             )
         )
@@ -758,12 +1214,19 @@ def build_command(
         budget = _optional_budget(model_config)
         if budget is not None:
             command.extend(("--max-budget-usd", budget))
-        if mcp_config_path is not None:
-            # Additive per-run MCP registration: `--strict-mcp-config` is
-            # deliberately NOT passed, so every existing user/project/server
-            # registration (and its auth) keeps loading alongside this file.
+        if strict_mcp_config_path is not None:
+            # Routed execute lane: use --strict-mcp-config with the narrow bundle
+            # to prevent loading of any inherited MCP registrations. The bundle
+            # already contains the per-run servers, user-scope registrations
+            # (cm-services), and lane worktree .mcp.json servers.
+            command.extend(("--strict-mcp-config", f"--mcp-config={strict_mcp_config_path}"))
+        elif mcp_config_path is not None:
+            # Native execute lane: additive per-run MCP registration --
+            # --strict-mcp-config is deliberately NOT passed, so every existing
+            # user/project/server registration (and its auth) keeps loading
+            # alongside this file.
             command.extend(("--mcp-config", str(mcp_config_path)))
-        for tool in allowed_tools(mode, capabilities):
+        for tool in allowed_tools(mode, capabilities, web_domains):
             command.extend(("--allowedTools", tool))
         for tool in disallowed_tools(mode, capabilities):
             command.extend(("--disallowedTools", tool))
@@ -783,61 +1246,184 @@ def build_command(
     # to discover it. No `--add-dir` is emitted: it extends the workspace
     # rather than granting a read, which would make a read root writable.
     note = scope_note(read_roots)
+    web_note = web_scope_note(web_domains)
+    if web_note:
+        note = f"{note}\n\n{web_note}" if note else web_note
+    # Every Claude worker carries the host-memory rule, review or execute: it
+    # is a note, so no tool list, grant, or argv flag changes with it.
+    note = f"{note}\n\n{HOST_MEMORY_READONLY_NOTE}" if note else HOST_MEMORY_READONLY_NOTE
     if note:
         system_prompt += f"\n\n{note}"
+    if mode == "execute":
+        # Keep this last so host-native skill text or scope notes cannot turn an
+        # already authorized execute lane back into a planning/approval dialogue.
+        system_prompt += EXECUTE_ROLE_INSTRUCTION
     command.extend(("--append-system-prompt", system_prompt))
     return command
+
+
+def _install_strict_readiness_config(
+    config_dir: Path, bundle_path: Path,
+) -> None:
+    """Replace the disposable Claude registry with the exact routed bundle.
+
+    Claude 2.1.278 treats ``--mcp-config`` as variadic for the ``mcp get``
+    subcommand and can therefore ignore a dynamic bundle while reporting a
+    user-global server as connected.  The routed config directory is already
+    per-run and disposable; putting the validated bundle in its ``.claude.json``
+    gives the readiness probe an exact, isolated registry without touching the
+    user's config or performing a model call.
+    """
+    try:
+        bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ClaudeAdapterError("strict MCP bundle is not readable JSON") from exc
+    if not isinstance(bundle, dict) or not isinstance(bundle.get("mcpServers"), dict):
+        raise ClaudeAdapterError("strict MCP bundle must contain an mcpServers object")
+    config_path = config_dir / ".claude.json"
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ClaudeAdapterError("disposable Claude config is not valid JSON") from exc
+    if not isinstance(config, dict):
+        raise ClaudeAdapterError("disposable Claude config must be an object")
+    config["mcpServers"] = bundle["mcpServers"]
+    _write_private_json(config_path, config)
 
 
 def _require_mcp_readiness(
     *, executable: str, cwd: Path, capabilities: Capabilities,
     env: Mapping[str, str], runner: Runner, secret: str | None = None,
+    strict_mcp_config_path: Path | None = None,
 ) -> None:
-    """Health-check capability-required MCP servers before starting a model."""
+    """Health-check capability-required MCP servers before starting a model.
 
-    user_scope = {CAPABILITY_MCP_SERVERS[name] for name in USER_SCOPE_MCP_CAPABILITIES}
-    for server in _required_mcp_servers(capabilities):
-        if server in user_scope:
-            # A user-global registration is not a project .mcp.json entry, so
-            # there is no project server to approve for the probe; `mcp get`
-            # resolves the server by name across scopes.
-            command = [executable, "mcp", "get", server]
-        else:
-            settings = json.dumps(
-                {"enabledMcpjsonServers": [server]}, separators=(",", ":"), sort_keys=True
-            )
-            command = [executable, "--settings", settings, "mcp", "get", server]
-        try:
-            completed = runner(
-                command,
-                timeout=MCP_READINESS_TIMEOUT_SECONDS,
-                cwd=cwd,
-                env=dict(env),
-                stdin=subprocess.DEVNULL,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise ClaudeAdapterError(f"could not check {server} MCP readiness: {_redact(exc, secret)}") from None
-        stdout = str(getattr(completed, "stdout", "") or "")
-        connected = any(
-            re.search(r"^\s*Status:\s*[^\w]*Connected\s*$", ANSI_ESCAPE.sub("", line), re.I)
-            for line in stdout.splitlines()
+    Probes the installed CLI with the EXACT granted strict bundle
+    (``--strict-mcp-config --mcp-config <path>``) so that the readiness check
+    validates the same configuration that will be active during the run.
+    """
+
+    # Probe the installed CLI once per executable to determine whether it supports
+    # --strict-mcp-config.  This avoids inferring support from the flag's presence
+    # in the command build (which is a contract claim, not a runtime fact).
+    cli_supports_strict = _check_strict_mcp_support(
+        executable, runner, cwd=cwd, env=env,
+    )
+
+    if strict_mcp_config_path is not None and not cli_supports_strict:
+        raise ClaudeAdapterError(
+            f"{executable} does not support --strict-mcp-config; "
+            "a routed execute lane that requires the strict MCP bundle cannot launch"
         )
-        if int(completed.returncode) != 0 or not connected:
-            status = next(
-                (ANSI_ESCAPE.sub("", line).strip() for line in stdout.splitlines()
-                 if "status:" in line.lower()),
-                "status unavailable",
+
+    readiness_env = dict(env)
+    readiness_config_dir: Path | None = None
+    try:
+        if cli_supports_strict and strict_mcp_config_path is not None:
+            # Use a private exact-bundle registry for every strict caller,
+            # including direct billable providers that do not use the routed home.
+            readiness_config_dir = Path(tempfile.mkdtemp(prefix=".side-lane-mcp-readiness-"))
+            _install_strict_readiness_config(readiness_config_dir, strict_mcp_config_path)
+            readiness_env["CLAUDE_CONFIG_DIR"] = str(readiness_config_dir)
+        for server in _required_mcp_servers(capabilities):
+            if cli_supports_strict and strict_mcp_config_path is not None:
+                # The exact bundle has already been installed in the disposable
+                # CLAUDE_CONFIG_DIR.  Do not pass --mcp-config to `mcp get`: that
+                # option is variadic and the CLI may consume the subcommand as
+                # additional filenames, or silently fall back to user-global state.
+                command = [executable, "mcp", "get", server]
+            elif server == "cm-services":
+                # The fixed user-global cm-services server is not a project .mcp.json
+                # entry, so it is probed by bare name across scopes.
+                command = [executable, "mcp", "get", server]
+            else:
+                # Probe the requested server with explicit project approval.  This
+                # is required for project .mcp.json servers such as playwright and
+                # matches the per-launch ``enabledMcpjsonServers`` approval.
+                settings = json.dumps(
+                    {"enabledMcpjsonServers": [server]}, separators=(",", ":"), sort_keys=True
+                )
+                command = [executable, "--settings", settings, "mcp", "get", server]
+            try:
+                completed = runner(
+                    command,
+                    timeout=MCP_READINESS_TIMEOUT_SECONDS,
+                    cwd=cwd,
+                    env=readiness_env,
+                    stdin=subprocess.DEVNULL,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise ClaudeAdapterError(f"could not check {server} MCP readiness: {_redact(exc, secret)}") from None
+            stdout = str(getattr(completed, "stdout", "") or "")
+            connected = any(
+                re.search(r"^\s*Status:\s*[^\w]*Connected\s*$", ANSI_ESCAPE.sub("", line), re.I)
+                for line in stdout.splitlines()
             )
-            raise ClaudeAdapterError(
-                f"required MCP server {server!r} is not ready before worker launch ({_redact(status, secret)})"
-            )
+            if int(completed.returncode) != 0 or not connected:
+                status = next(
+                    (ANSI_ESCAPE.sub("", line).strip() for line in stdout.splitlines()
+                     if "status:" in line.lower()),
+                    "status unavailable",
+                )
+                raise ClaudeAdapterError(
+                    f"required MCP server {server!r} is not ready before worker launch ({_redact(status, secret)})"
+                )
+    finally:
+        if readiness_config_dir is not None:
+            shutil.rmtree(readiness_config_dir, ignore_errors=True)
 
 
 def _redact(value: object, secret: str | None) -> str:
     return redact_provider_secret(value, secret)
+
+
+def validate_against_capabilities(
+    *,
+    executable: str,
+    cwd: Path,
+    strict_mcp_config_path: Path,
+    capabilities: Capabilities,
+    env: Mapping[str, str],
+    runner: Runner,
+    secret: str | None = None,
+) -> None:
+    """Verify bundle servers through a private exact registry snapshot.
+
+    This helper is retained for callers that validate a bundle before launch;
+    it deliberately does not pass ``--mcp-config`` to ``mcp get`` because the
+    CLI option is variadic and may ignore the dynamic file.
+    """
+    if not strict_mcp_config_path.exists():
+        return
+    readiness_dir = Path(tempfile.mkdtemp(prefix=".side-lane-mcp-validate-"))
+    try:
+        _install_strict_readiness_config(readiness_dir, strict_mcp_config_path)
+        bundle = json.loads(strict_mcp_config_path.read_text(encoding="utf-8"))
+        servers = bundle.get("mcpServers") or {}
+        if not isinstance(servers, dict):
+            raise ClaudeAdapterError("strict MCP bundle must contain an mcpServers object")
+        probe_env = dict(env)
+        probe_env["CLAUDE_CONFIG_DIR"] = str(readiness_dir)
+        for server_name in servers:
+            result = runner(
+                [executable, "mcp", "get", server_name],
+                cwd=str(cwd), env=probe_env, secret=secret,
+            )
+            stdout = str(getattr(result, "stdout", "") or "")
+            connected = any(
+                re.search(r"^\s*Status:\s*[^\w]*Connected\s*$", ANSI_ESCAPE.sub("", line), re.I)
+                for line in stdout.splitlines()
+            )
+            if result.returncode != 0 or not connected:
+                raise ClaudeAdapterError(
+                    f"required MCP server {server_name!r} is not available: "
+                    f"{_redact(stdout.strip(), secret)!r}"
+                )
+    finally:
+        shutil.rmtree(readiness_dir, ignore_errors=True)
 
 
 def launch(
@@ -857,8 +1443,15 @@ def launch(
     runner: Runner = None,
     readiness_runner: Runner = None,
     read_roots: Sequence[Path] = (),
+    web_domains: Sequence[str] = (),
     run_mcp_servers: "Mapping[str, McpRunServer] | None" = None,
+    report_only: bool = False,
+    report_baseline: report_stop_hook.ReportBaseline | None = None,
 ) -> LaneResult:
+    if web_domains and mode != "execute":
+        # Adapter-level fail-closed mirror of the build_command guard: `launch`
+        # may be called without going through that guard's inputs.
+        raise ClaudeAdapterError("web domains are execute-only for the Claude host")
     if provider != NATIVE_PROVIDER and provider != "glm":
         qualification = model_config.get("qualification")
         if not isinstance(qualification, Mapping) or qualification.get("verified") is not True:
@@ -872,7 +1465,6 @@ def launch(
     # side_lane.mcp_run_config): materialized OUTSIDE the lane worktree so it
     # can never appear in the delivery check, and removed after the run —
     # ephemeral by construction, never a user-global config write.
-    run_config_path: Path | None = None
     if run_mcp_servers:
         if mode != "execute":
             raise ClaudeAdapterError("per-run MCP config is execute-only for the Claude host")
@@ -884,12 +1476,39 @@ def launch(
         ensure_no_registration_conflicts(
             run_mcp_servers, "claude", worktree_path, env=os.environ if env is None else env
         )
-        runtime_dir = worktree_path.parent / ".side-lane-runtime" / "mcp"
-        run_config_path = write_ephemeral(
-            runtime_dir, f"{worktree_path.name}-mcp.json",
-            claude_payload(run_mcp_servers),
-        )
+    # Routed execute lanes use --strict-mcp-config with a narrow bundle that
+    # contains ONLY per-run servers, user-scope registrations (cm-services),
+    # and lane worktree .mcp.json servers. No other host-registered servers
+    # appear in the bundle, and none are loaded.
+    is_routed_execute = (
+        provider != NATIVE_PROVIDER
+        and mode == "execute"
+    )
+    # Artifact paths: initialised to None; assigned inside the try block;
+    # cleaned up in the finally block. All paths are None if no artifact needed.
+    run_config_path: Path | None = None
+    strict_mcp_config_path: Path | None = None
     try:
+        if run_mcp_servers:
+            runtime_dir = worktree_path.parent / ".side-lane-runtime" / "mcp"
+            run_config_path = write_ephemeral(
+                runtime_dir, f"{worktree_path.name}-mcp.json",
+                claude_payload(run_mcp_servers),
+            )
+        if is_routed_execute:
+            controlled_home = Path(os.environ.get("HOME", str(Path.home()))).expanduser()
+            strict_bundle = build_strict_mcp_bundle(
+                host="claude",
+                repo=repo_path,
+                worktree=worktree_path,
+                home=controlled_home,
+                run_servers=run_mcp_servers,
+                granted_capabilities=capabilities,
+            )
+            runtime_dir = worktree_path.parent / ".side-lane-runtime" / "mcp"
+            strict_mcp_config_path = write_strict_mcp_bundle(
+                runtime_dir, worktree_path.name, strict_bundle,
+            )
         return _launch_worker(
             executable=executable,
             repo_path=repo_path,
@@ -906,8 +1525,12 @@ def launch(
             runner=runner,
             readiness_runner=readiness_runner,
             read_roots=read_roots,
+            web_domains=web_domains,
             run_mcp_servers=run_mcp_servers,
             run_config_path=run_config_path,
+            report_only=report_only,
+            report_baseline=report_baseline,
+            strict_mcp_config_path=strict_mcp_config_path,
         )
     finally:
         if run_config_path is not None:
@@ -915,6 +1538,11 @@ def launch(
                 run_config_path.unlink()
             with suppress(OSError):
                 run_config_path.parent.rmdir()
+        if strict_mcp_config_path is not None:
+            with suppress(OSError):
+                strict_mcp_config_path.unlink()
+            with suppress(OSError):
+                strict_mcp_config_path.parent.rmdir()
 
 
 def _launch_worker(
@@ -934,24 +1562,13 @@ def _launch_worker(
     runner: Runner,
     readiness_runner: Runner,
     read_roots: Sequence[Path],
+    web_domains: Sequence[str],
     run_mcp_servers: "Mapping[str, McpRunServer] | None",
     run_config_path: Path | None,
+    report_only: bool = False,
+    report_baseline: report_stop_hook.ReportBaseline | None = None,
+    strict_mcp_config_path: Path | None = None,
 ) -> LaneResult:
-    command = build_command(
-        executable=executable,
-        repo=repo_path,
-        worktree=worktree_path,
-        provider=provider,
-        model=model,
-        provider_config=provider_config,
-        model_config=model_config,
-        prompt=prompt,
-        mode=mode,
-        capabilities=granted,
-        read_roots=read_roots,
-        mcp_config_path=run_config_path,
-        run_mcp_servers=run_mcp_servers,
-    )
     runtime_model, gateway, auth_method, billable = _route_metadata(
         provider, model, provider_config, model_config, mode
     )
@@ -980,9 +1597,36 @@ def _launch_worker(
             raise ClaudeAdapterError("timeout_seconds must be a positive integer")
         active_runner = _bounded_process if runner is None else runner
         active_readiness_runner = _bounded_process if readiness_runner is None else readiness_runner
+        if strict_mcp_config_path is not None:
+            strict_mcp_supported = _check_strict_mcp_support(
+                executable, active_readiness_runner, cwd=worktree_path, env=child_env,
+            )
+        else:
+            strict_mcp_supported = False
+        command = build_command(
+            executable=executable,
+            repo=repo_path,
+            worktree=worktree_path,
+            provider=provider,
+            model=model,
+            provider_config=provider_config,
+            model_config=model_config,
+            prompt=prompt,
+            mode=mode,
+            capabilities=granted,
+            read_roots=read_roots,
+            web_domains=web_domains,
+            mcp_config_path=run_config_path,
+            run_mcp_servers=run_mcp_servers,
+            report_only=report_only,
+            report_baseline=report_baseline,
+            strict_mcp_config_path=strict_mcp_config_path,
+            strict_mcp_support=strict_mcp_supported,
+        )
         _require_mcp_readiness(
             executable=executable, cwd=worktree_path, capabilities=granted,
             env=child_env, runner=active_readiness_runner, secret=secret,
+            strict_mcp_config_path=strict_mcp_config_path,
         )
         try:
             completed = active_runner(
@@ -1061,7 +1705,7 @@ def _launch_worker(
         stderr=stderr,
         availability=availability,
         capabilities=granted,
-        allowed_tools=allowed_tools(mode, granted),
+        allowed_tools=allowed_tools(mode, granted, web_domains),
         disallowed_tools=disallowed_tools(mode, granted),
         requested_model=model,
         # The transport requests this selector; it cannot attest to the

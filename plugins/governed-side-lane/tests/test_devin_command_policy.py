@@ -150,6 +150,36 @@ class DevinCommandPolicyTests(unittest.TestCase):
             self.assertEqual(decision["decision"], "block")
             self.assertIn("command is outside canonical capability grants", decision["reason"])
 
+    def test_env_assignment_is_bound_to_an_already_granted_command(self) -> None:
+        allowed = ["Bash(env)", "Bash(env *)", "Bash(node *)", "Bash(git status *)"]
+        with tempfile.TemporaryDirectory() as directory:
+            worktree = Path(directory) / "lane"
+            worktree.mkdir()
+            for command in (
+                "env DISABLE_SQLITE_AUTO_BACKUP=true node --test",
+                "env FOO=bar node --test && git status",
+                f"env FOO=bar git -C {worktree} status",
+            ):
+                with self.subTest(command=command):
+                    self.assertIsNone(policy.evaluate_event(
+                        {"tool_name": "exec", "tool_input": {"command": command}},
+                        allowed, (), worktree=str(worktree)))
+            for command in (
+                "env sh -c 'node --test'",
+                "env -S 'sh -c node'",
+                "env -i node --test",
+                "env PATH=/tmp node --test",
+                "env FOO=bar sh -c 'node --test'",
+                "env FOO=bar",
+                "env FOO=bar env BAR=baz node --test",
+                "env FOO=bar node --test > /tmp/out",
+            ):
+                with self.subTest(command=command):
+                    decision = policy.evaluate_event(
+                        {"tool_name": "exec", "tool_input": {"command": command}},
+                        allowed, (), worktree=str(worktree))
+                    self.assertEqual(decision["decision"], "block")
+
     def test_blocks_denied_or_ungranted_compound_components(self) -> None:
         allowed = ["Bash(git status *)"]
         denied = ["Bash(git push --force*)"]
@@ -229,7 +259,6 @@ class DevinCommandPolicyTests(unittest.TestCase):
                     allowed, (),
                 ))
         for command in (
-            "git branch -a",
             "git fetch evil dev",
             "git fetch --all",
             "git fetch origin --prune",

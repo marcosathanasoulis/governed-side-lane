@@ -47,6 +47,8 @@
       "routing_policy_contract": {
         "requested_selector": "example-pool-selector",
         "allowed_upstream_models": ["upstream-a/model-alpha", "upstream-b/model-beta"],
+        "policy_revision": "<operator-supplied-revision>",
+        "policy_fingerprint": "<operator-supplied-fingerprint>",
         "settings_precedence": "verified"
       },
       "notes": "Illustrative routed-provider shape only. A routed provider forwards the requested selector to a declared upstream pool it selects itself; every streamed attested model must fall inside allowed_upstream_models (missing, unknown, or out-of-pool attestation fails the run closed), and the receipt records the attested model set, never the selector alias as actual identity. A bare model id can collide across upstream providers, so attestation is model evidence only, never upstream provider identity. Deployment-specific base_url values, credential_service names, and exact upstream ids are private configuration and never belong in this public package; settings_precedence here shows the activation requirement, not a verification this file performs."

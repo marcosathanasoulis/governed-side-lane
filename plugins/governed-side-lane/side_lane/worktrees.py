@@ -437,6 +437,33 @@ def git_status(run: WorktreeRun, runner: Runner = subprocess.run) -> str:
     return _git(run.worktree, ["status", "--short", "--branch"], runner)
 
 
+#: Porcelain status code for a path git tracks nothing at. Every other code —
+#: `` M``, ``M ``, ``A ``, `` D``, ``R ``, ``UU`` — describes a change to a
+#: path git *does* track, which is a different fact about a lane than an
+#: untracked file that happens to share its directory.
+UNTRACKED_STATUS = "??"
+
+
+@dataclass(frozen=True)
+class ChangedPath:
+    """One path in a lane's git status, with git's own two-character code.
+
+    Path alone is not enough to judge a lane: an untracked scratch artifact
+    and a *tracked* file under the same prefix are one identical string to a
+    path-only API while being opposite facts. The status is the half that
+    tells them apart, so it is carried here rather than discarded at parse
+    time and re-guessed from the path.
+    """
+
+    status: str
+    path: str
+
+    @property
+    def untracked(self) -> bool:
+        """True when git tracks nothing at this path (porcelain ``??``)."""
+        return self.status == UNTRACKED_STATUS
+
+
 @dataclass(frozen=True)
 class LaneDelivery:
     """Whether a lane's work actually reached git.
@@ -445,10 +472,17 @@ class LaneDelivery:
     run then reports success for work that disappears with the worktree —
     observed three times in one session (2026-09-17). Exit status cannot see
     this; only the tree can.
+
+    ``uncommitted`` stays the path list every existing caller reads; ``changed``
+    carries the same paths with their statuses for the callers that must tell a
+    tracked change from an untracked addition. It is empty on a hand-built
+    instance, which is not the same as "every path is untracked" — a caller
+    that needs the status must fail closed when it is missing.
     """
 
     committed: bool
     uncommitted: tuple[str, ...]
+    changed: tuple[ChangedPath, ...] = ()
 
     @property
     def delivered(self) -> bool:
@@ -485,7 +519,7 @@ class LaneDelivery:
         )
 
 
-def _changed_paths(worktree: Path, runner: Runner) -> tuple[str, ...]:
+def changed_paths(worktree: Path, runner: Runner) -> tuple[ChangedPath, ...]:
     """Every path with uncommitted work, from NUL-delimited porcelain.
 
     `-z` rather than parsing text, for two reasons learned the hard way:
@@ -500,7 +534,8 @@ def _changed_paths(worktree: Path, runner: Runner) -> tuple[str, ...]:
       by a separate NUL-terminated field holding the ORIGINAL path — so it is
       consumed by position, never by pattern.
 
-    Paths are reported as git spells them, relative to the worktree root.
+    Paths are reported as git spells them, relative to the worktree root, each
+    with the status git reported for it.
     """
     result = runner(
         ["git", "-C", str(worktree), "status", "--porcelain", "-z"],
@@ -514,7 +549,7 @@ def _changed_paths(worktree: Path, runner: Runner) -> tuple[str, ...]:
             (result.stderr or result.stdout).strip() or "git status failed"
         )
     fields = [f for f in (result.stdout or "").split("\0") if f]
-    paths: list[str] = []
+    entries: list[ChangedPath] = []
     index = 0
     while index < len(fields):
         entry = fields[index]
@@ -522,17 +557,26 @@ def _changed_paths(worktree: Path, runner: Runner) -> tuple[str, ...]:
         if len(entry) < 4:
             continue
         status, path = entry[:2], entry[3:]
-        paths.append(path)
+        entries.append(ChangedPath(status, path))
         if "R" in status or "C" in status:
             index += 1  # the original path rides in its own field; skip it
-    return tuple(paths)
+    return tuple(entries)
+
+
+def _changed_paths(worktree: Path, runner: Runner) -> tuple[str, ...]:
+    """Every path with uncommitted work, as bare lane-relative paths."""
+    return tuple(entry.path for entry in changed_paths(worktree, runner))
 
 
 def lane_delivery(run: WorktreeRun, runner: Runner = subprocess.run) -> LaneDelivery:
     """Inspect the lane worktree for work that actually landed in git."""
     head = _git(run.worktree, ["rev-parse", "HEAD"], runner)
-    changed = _changed_paths(run.worktree, runner)
-    return LaneDelivery(committed=head != run.starting_commit, uncommitted=changed)
+    changed = changed_paths(run.worktree, runner)
+    return LaneDelivery(
+        committed=head != run.starting_commit,
+        uncommitted=tuple(entry.path for entry in changed),
+        changed=changed,
+    )
 
 
 def snapshot_source(repo: Path, runner: Runner = subprocess.run) -> frozenset[str]:
@@ -817,6 +861,170 @@ def verify_lane(
     )
 
 
+ASSIGNMENT_SCHEMA_VERSION = "1.0.0"
+
+
+def _runs_directory(run: WorktreeRun) -> Path:
+    """The per-repository directory holding this repository's run records.
+
+    Both the terminal audit and the assignment sidecar live here, so a reader
+    of either artifact finds the other by lane key without a second lookup.
+    """
+
+    result = subprocess.run(
+        ["git", "-C", str(run.repository), "rev-parse", "--git-dir"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=True,
+    )
+    git_dir = Path(result.stdout.strip())
+    if not git_dir.is_absolute():
+        git_dir = run.repository / git_dir
+    destination = git_dir / "side-lane-runs"
+    destination.mkdir(parents=True, exist_ok=True)
+    return destination
+
+
+def lane_record_key(run: WorktreeRun) -> str:
+    """The deterministic, path-safe key naming this lane's run records."""
+
+    return run.branch.replace("/", "-")
+
+
+def _publish_exclusive(path: Path, payload: str) -> None:
+    """Create ``path`` once, atomically, refusing to replace an existing file.
+
+    The payload lands in a same-directory temporary file that is flushed and
+    fsynced before being hard-linked into place, so a reader either sees no
+    file or sees the whole record — never a partial one. ``os.link`` is the
+    create-exclusive step: it raises ``FileExistsError`` rather than
+    overwriting, which is what makes an already-written record immutable.
+    """
+
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temporary, path)
+    finally:
+        os.unlink(temporary)
+
+
+def _read_existing_assignment(path: Path) -> Mapping[str, object]:
+    """Read a previously published assignment record, or fail closed."""
+
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise WorktreeError(
+            f"existing assignment record is unreadable; refusing to guess: {path}"
+        ) from exc
+    if not isinstance(existing, dict):
+        raise WorktreeError(f"existing assignment record is not an object: {path}")
+    return existing
+
+
+# Record fields describing one attempt rather than the assignment itself.
+# `assigned_at` is the instant the FIRST attempt was assigned — a faithful
+# retry must not move it — and `lane_worktree` is where that first attempt
+# ran. Everything else (task id, weight, disposition, rework lineage, the
+# configured route, the lane branch and repository) defines the assignment, and
+# a retry disagreeing on any of it is a different assignment for the same lane:
+# that must fail loudly rather than be folded into the first one.
+_ATTEMPT_FIELDS = frozenset({"assigned_at", "lane_worktree"})
+
+
+def _assignment_identity(record: Mapping[str, object]) -> dict[str, object]:
+    return {
+        key: value for key, value in record.items() if key not in _ATTEMPT_FIELDS
+    }
+
+
+@dataclass(frozen=True)
+class AssignmentRecord:
+    path: Path
+    sha256: str
+    reused: bool
+
+
+def write_assignment(
+    run: WorktreeRun,
+    *,
+    measurement: Mapping[str, object],
+    assigned_at: str,
+    planned: Mapping[str, object],
+) -> AssignmentRecord:
+    """Persist this lane's immutable assignment sidecar before the adapter runs.
+
+    ``measurement`` is the already-validated, metadata-only preassignment
+    (``side_lane.cli.load_measurement``): task id, host family, preassigned
+    weight, planning disposition, and the rework/parent lineage. ``assigned_at``
+    is the authoritative UTC instant this runner assigned the task. ``planned``
+    is the route identity this runner was *configured* with — the host,
+    provider, model, and gateway selected before any worker exists. That is
+    deliberately not the resolved identity: what a provider actually answered
+    with is recorded later, only in the terminal audit, so the two can be
+    compared instead of conflated.
+
+    The record is written beside the terminal audit under the same lane key and
+    is never rewritten. A retry that presents the same assignment reuses the
+    published file — and, with it, the original ``assigned_at`` — so no re-run
+    can move a task's assignment instant. A retry that presents a *different*
+    assignment raises instead of overwriting: the first assignment for a lane
+    is the one that stands. Which fields that comparison covers, and why, is
+    ``_ATTEMPT_FIELDS`` below.
+    """
+
+    record: dict[str, object] = {
+        "schema_version": ASSIGNMENT_SCHEMA_VERSION,
+        "task_id": measurement["task_id"],
+        "host_family": measurement["host_family"],
+        "preassigned_weight": measurement["preassigned_weight"],
+        "planning_disposition": measurement["planning_disposition"],
+        "rework": measurement["rework"],
+        "parent_task_id": measurement.get("parent_task_id"),
+        "assigned_at": assigned_at,
+        "planned_provider": planned["provider"],
+        "planned_model": planned["model"],
+        "planned_host": planned["host"],
+        "planned_gateway": planned["gateway"],
+        "lane_branch": run.branch,
+        "lane_worktree": str(run.worktree),
+        "repository": str(run.repository),
+    }
+    path = _runs_directory(run) / f"{lane_record_key(run)}.assignment.json"
+    payload = json.dumps(record, indent=2, sort_keys=True) + "\n"
+    try:
+        _publish_exclusive(path, payload)
+    except FileExistsError:
+        existing = _read_existing_assignment(path)
+        if _assignment_identity(existing) != _assignment_identity(record):
+            raise WorktreeError(
+                f"assignment conflict: {path} already records a different "
+                "assignment for this lane; refusing to overwrite it"
+            ) from None
+        # Digest the file as it actually exists: on a reuse the retained
+        # assigned_at makes those bytes differ from the payload just built.
+        return AssignmentRecord(
+            path, hashlib.sha256(path.read_bytes()).hexdigest(), True
+        )
+    except OSError as exc:
+        # Fail closed on anything else the filesystem refused. A worker must
+        # never start against an assignment this runner could not record, so
+        # this is a WorktreeError the caller turns into an aborted run rather
+        # than an unhandled traceback.
+        raise WorktreeError(
+            f"could not publish assignment record {path}: {exc}"
+        ) from exc
+    return AssignmentRecord(
+        path, hashlib.sha256(payload.encode("utf-8")).hexdigest(), False
+    )
+
+
 def write_audit(
     run: WorktreeRun,
     *,
@@ -837,9 +1045,11 @@ def write_audit(
     usage: dict | None = None,
     provider_artifact: str | None = None,
     read_roots: Sequence[str] = (),
+    web_domains: Sequence[str] = (),
     skill_catalog: "Sequence[Mapping[str, object]]" = (),
     run_mcp_servers: "Sequence[Mapping[str, object]]" = (),
     source_changes: Sequence[str] = (),
+    assignment: "Mapping[str, object] | None" = None,
 ) -> Path:
     """Persist one lane's run record outside its disposable worktree.
 
@@ -848,6 +1058,13 @@ def write_audit(
     additive: the field is always present as a list (empty when nothing was
     granted), so a reader can tell "no read root was requested" from "this
     record predates read roots".
+
+    ``web_domains`` records the exact public documentation hostnames the
+    coordinator granted through ``--web-domain`` (execute mode only), in the
+    canonical sorted order the rules were rendered from. It records the grant
+    the coordinator made; it is a permission-matching scope, not a network
+    sandbox, and neither an unlisted destination nor an origin's own redirect
+    is covered by it. Additive in the same way, so the schema stays 2.
 
     ``skill_catalog`` records the pinned skills materialized into the lane
     worktree for this run (execute mode only), each with name, version,
@@ -867,20 +1084,19 @@ def write_audit(
     before/after status comparison. It records the change, not who made it —
     an out-of-lane worker write and a concurrent human edit are
     indistinguishable here. Additive like the rest, schema stays 2.
+
+    ``assignment`` links the immutable assignment sidecar this run published
+    before its adapter started (its path, digest, task id, and schema version).
+    It is written on every outcome that reaches an audit — delivered, failed,
+    or unverified — so a failed run still points at what it was assigned. It is
+    ``null`` only when the run carried no measurement metadata at all, which
+    means this run is *explicitly unmeasured*; it does not mean a measurement
+    was attempted and lost, because a sidecar that cannot be published or that
+    conflicts aborts the run before any adapter starts. Additive in the same
+    way, so the schema version stays 2.
     """
-    result = subprocess.run(
-        ["git", "-C", str(run.repository), "rev-parse", "--git-dir"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=True,
-    )
-    git_dir = Path(result.stdout.strip())
-    if not git_dir.is_absolute():
-        git_dir = run.repository / git_dir
-    destination = git_dir / "side-lane-runs"
-    destination.mkdir(parents=True, exist_ok=True)
-    path = destination / f"{run.branch.replace('/', '-')}.json"
+    destination = _runs_directory(run)
+    path = destination / f"{lane_record_key(run)}.json"
     path.write_text(
         json.dumps(
             {
@@ -899,9 +1115,11 @@ def write_audit(
                 "repository": str(run.repository),
                 "worktree": str(run.worktree),
                 "read_roots": list(read_roots),
+                "web_domains": list(web_domains),
                 "skill_catalog": [dict(item) for item in skill_catalog],
                 "run_mcp_servers": [dict(item) for item in run_mcp_servers],
                 "source_changes": list(source_changes),
+                "assignment": dict(assignment) if assignment is not None else None,
                 "branch": run.branch,
                 "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
                 "exit_status": exit_status,

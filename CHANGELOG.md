@@ -1,5 +1,158 @@
 # Changelog
 
+## 0.4.43 - 2026-09-21
+
+- Authorize task-scoped `curl` HTTP debugging for execute lanes via `Bash(curl *)`. The grant is bounded by explicit task authority over target class, methods, and payloads; authenticated API calls are allowed only through existing account mechanisms; raw credentials, redirects, cloud metadata, and unapproved private targets remain prohibited. Review lanes still receive no `curl` allowlist. Add regression coverage for the execute/review boundary and Devin `Exec(curl)` rendering.
+
+## 0.4.42 - 2026-09-21
+
+- Disable native Claude auto-memory for Side Lane workers and explicitly keep host memory read-only, preserving approved context and tools. This does not sandbox manual filesystem writes.
+
+
+## 0.4.41 - 2026-09-21
+
+- Grant the exact read-only `gcp_run_job` tool under `gcloud-read` for named Cloud Run job metadata, while preserving the separate execution-listing tool and excluding unrelated capabilities and review mode.
+
+## 0.4.40 - 2026-09-21
+
+- Give every native Devin shell lane its absolute scratch-output path. Avoid observed native confirmation on equivalent relative redirects with nested `exec.workdir`, without changing permission rules or file containment.
+
+## 0.4.39 - 2026-09-21
+
+- Treat an exact gateway-read connector registration as presence-only staffing evidence while leaving authentication and target scope pending dispatch. Keep route capability qualification and live dispatch checks separate; exclude review lanes.
+
+
+## 0.4.38 - 2026-09-21
+
+- Make routed Claude MCP launch arguments parser-safe and validate readiness against the exact disposable per-run bundle instead of a potentially ignored dynamic `mcp get` configuration.
+
+## 0.4.37 - 2026-09-21
+
+- Add the optional `gateway-read` capability for the exact cm-services run status and report tools on Claude and Devin. Preserve server-side target-run grants, strict review exclusion, and presence-only capability evidence. Stop emitting cm-services startup instructions for unrelated graph or Slack grants.
+
+## 0.4.36 - 2026-09-21
+
+- Accept report-only delivery without requiring an implementation commit. Require a fresh report, successful worker and verification, and unchanged source checkout; reject unrelated lane changes, tracked scratch mutations, commits, and source renames into the report. Recheck integrity after verification and keep ordinary execute/review delivery unchanged.
+
+## 0.4.35 - 2026-09-21
+
+- Reject inherited unchanged reports in Claude report-only lanes by sharing a prelaunch content baseline between the Stop hook and final report check. Preserve historical reports in lane scratch without following preexisting preservation symlinks. This mechanical freshness check does not establish report quality or change the separate implementation delivery contract.
+
+## 0.4.34 - 2026-09-21
+
+- Separate a verified included subscription from unknown pricing. A route verified as covered by a subscription the user already pays has a known `$0` additional/marginal usage cost, distinct from an unknown price and from a zero-cost provider key, and it does not make every OAuth or hosted route free — coverage is route-specific and some are metered. A missing empirical median for an otherwise authorized task is measurement absence, not an unknown current price: report the history as unavailable without rewriting it to zero and without alerting or demanding new approval solely because it is missing.
+
+## 0.4.33 - 2026-09-21
+
+- Add explicit public documentation hostname grants for Claude and Devin execute workers, with input validation, native permission rules, and audit evidence. Strict review and unsupported hosts reject the grant.
+
+
+## 0.4.32 - 2026-09-21
+
+- Clarify that unknown empirical history or a missing median is measurement absence, not a hard gate, when existing explicit authority and a verified included subscription or current tariff with bounded expected usage cover the dispatch. Unknown costs are not reported as zero and do not prove a route is cheapest.
+
+
+## 0.4.31 - 2026-09-21
+
+- Fix research-routing references to clarify that an authorized bounded
+  source-research task may use an execute harness with exact route, capabilities,
+  read roots, and a brief or report-only output scope; read-only scope does not
+  mean strict review-mode-only. Preserve the strict review no-secret/no-MCP
+  contract where explicitly required, and never relabel an execute lane as a
+  sandbox.
+- Add the optional OmniRoute add-on guide, linking it from the README, the core
+  side-lane skill, and the Prompt it side-lane routing companion. Native and
+  direct routes remain fully usable without installing a gateway.
+- Add offline regression checks that require the updated research/execute
+  contract and the optional/no-gateway path to remain present in the public
+  package.
+
+## 0.4.30 - 2026-09-20
+
+- Fix the report Stop hook's bounded stdin read: the real Stop payload carries
+  a potentially large `last_assistant_message`, so the 8 KiB bound truncated
+  well-formed events mid-object and the repair round was silently skipped.
+  The bound is now 1 MiB, read in a loop until EOF or the bound, and input
+  beyond the bound is detected explicitly (limit + 1) and rejected with a
+  fixed diagnostic instead of parsing a truncated prefix.
+- Correct the documented stdin contract in the helper docstring and README:
+  the event payload also carries fields such as `session_id`,
+  `transcript_path`, `permission_mode`, and `last_assistant_message`; the hook
+  reads a bounded amount and ignores unknown fields.
+- Add regression coverage for ~20 KB realistic payloads, the exact-bound and
+  one-byte-over boundary, multibyte payloads measured in bytes not characters,
+  and no payload text ever reaching stdout or stderr.
+
+## 0.4.29 - 2026-09-20
+
+- Gate strict per-run MCP integration on explicit host-native `strict_mcp_support`:
+  `build_command` emits `--strict-mcp-config` only when the worker declares support,
+  and unsupported strict bundles fail closed before inference,
+  including providerless paths. Native execute and review behavior are unchanged.
+- Thread the actual worker `cwd` and child environment from `_launch_worker` into
+  `_check_strict_mcp_support`, so worker-context support detection is evaluated
+  against the runtime values the host session will see, not the coordinator's
+  pre-scrub environment.
+- Harden the per-run MCP runtime directory: `_secure_runtime_directory` rejects
+  symlinked targets and immediate parents, forces `0700` mode, and writes files
+  atomically with `0600`. Successfully created per-run files are cleaned up;
+  the runtime directory is removed when empty.
+- Preserve canonical server mapping, per-run config conflict detection, and native
+  execute/review lane semantics.
+- Add regression coverage for symlinked runtime paths, preexisting 0755 modes,
+  worker context probing, and strict bundle fail-closed behavior.
+
+## 0.4.28 - 2026-09-20
+
+- Keep already-approved delegated execution instructions last after read-root
+  guidance so workers execute their assignment without restarting coordination.
+- Isolate routed workers from the known coordinator Superpowers plugin in
+  ephemeral settings, preserving other plugins, hooks, MCP, and authentication.
+  Native execution and review behavior remain unchanged.
+
+## 0.4.27 - 2026-09-20
+
+- Add optional metadata-only `--measurement-file` for execute runs. The runner
+  validates its scalar types and vocabulary before launch, then atomically
+  preserves an immutable assignment beside the run audit before invoking the
+  worker. Terminal audits link the assignment; interruptions retain it.
+- Existing callers remain explicitly unmeasured. Execution success does not
+  imply coordinator acceptance or change delegation scoring.
+
+## 0.4.26 - 2026-09-20
+
+- Add explicit `--report-only` Claude execute runs with a required finite,
+  positive USD budget. A per-run Stop hook checks the actual worktree report
+  and requests one correction within the same invocation when it is missing
+  or invalid. The correction shares the original timeout and budget; it never
+  starts another worker or resumes a separate session.
+- Validate report-only artifacts before treating delivery as successful or
+  publishing a branch. Unsupported hosts and review mode reject the option;
+  ordinary execution retains its existing contract.
+
+## 0.4.25 - 2026-09-20
+
+- Harden native Devin `env` command handling: only literal task-scoped
+  assignments followed by an already-granted command are admitted; nested
+  launchers, shell forms, redirections, and assignment-only invocations fail
+  closed. Execute prompts now document the supported `env NAME=value command`
+  form.
+
+## 0.4.24 - 2026-09-20
+
+- Bound each native `Read` call in a routed Claude execute lane. A per-run
+  `PreToolUse` hook (`side_lane.routed_read_pagination`) rewrites an
+  unbounded read into an explicit `offset`/`limit` line range (200 lines by
+  default, overridable per run) and names the next range as continuation
+  guidance, so the remainder of the file stays reachable. The hook emits no
+  permission decision — every call continues through the normal permission
+  flow — and no capability, grant, or lane rule changes. Smaller explicit
+  reads, non-text paths (`.pdf`, `.ipynb`, images), other tools, and
+  malformed events pass through untouched; the hook config and merged
+  settings are written 0600 into the disposable per-run config directory, so
+  inherited `PreToolUse` entries survive and the real user home is never
+  modified.
+
 ## 0.4.23 - 2026-09-19
 
 - Add the `asana-read` and `drive-read` execute capabilities for the fixed
