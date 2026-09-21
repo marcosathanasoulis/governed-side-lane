@@ -272,6 +272,7 @@ class ToolPolicyTests(unittest.TestCase):
                 "mcp__cm-services__gcp_logs",
                 "mcp__cm-services__gcp_run_services",
                 "mcp__cm-services__gcp_run_jobs",
+                "mcp__cm-services__gcp_run_job",
                 "mcp__cm-services__gcp_scheduler_jobs",
                 "mcp__cm-services__gcp_functions",
                 "mcp__cm-services__gcp_billing_mtd",
@@ -311,6 +312,38 @@ class ToolPolicyTests(unittest.TestCase):
                 "mcp__cm-services__gateway_run_report",
             ),
         )
+
+    def test_gcloud_run_job_is_distinct_from_the_plural_execution_listing(self) -> None:
+        """The canonical record separates the two Cloud Run job reads.
+
+        ``gcp_run_job`` (singular) is job metadata for one named job; the
+        plural ``gcp_run_jobs`` stays the execution listing. The document must
+        state the read/argument shape and the exclusions, and both tool IDs
+        must remain exactly enumerated — the singular name is a prefix of the
+        plural, so the allowlist entries are compared as exact elements.
+        """
+        from side_lane.governance import tool_policy
+
+        rules = tool_policy().allowed["gcloud-read"]
+        self.assertIn("mcp__cm-services__gcp_run_job", rules)
+        self.assertIn("mcp__cm-services__gcp_run_jobs", rules)
+        self.assertFalse(any(rule.endswith("*") for rule in rules))
+        # The source wraps prose at a column, so compare on collapsed
+        # whitespace rather than against a line break in the document.
+        prompt = " ".join(lane_system_prompt("execute", Path("/tmp/repo")).split())
+        for phrase in (
+            "`gcp_run_job` reads the metadata of one Cloud Run job",
+            "job shortname",
+            "container images",
+            "condition state and reason",
+            "latest execution",
+            "execution count",
+            "never returns the full job spec",
+            "environment variables",
+            "free-text condition messages",
+            "`gcp_run_jobs`, which remains the execution listing",
+        ):
+            self.assertIn(phrase, prompt)
 
     def test_gateway_read_names_no_deployment_url_or_credential(self) -> None:
         """The Gateway grant is a capability boundary, not a deployment handle.

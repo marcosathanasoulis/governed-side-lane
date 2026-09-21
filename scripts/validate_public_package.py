@@ -9,7 +9,7 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_VERSION = "0.4.40"
+EXPECTED_VERSION = "0.4.41"
 PLUGIN = ROOT / "plugins" / "governed-side-lane"
 BANNED = (
     "credible" + "mind",

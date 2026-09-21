@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.41 - 2026-09-21
+
+- Grant the exact read-only `gcp_run_job` tool under `gcloud-read` for named Cloud Run job metadata, while preserving the separate execution-listing tool and excluding unrelated capabilities and review mode.
+
 ## 0.4.40 - 2026-09-21
 
 - Give every native Devin shell lane its absolute scratch-output path. Avoid observed native confirmation on equivalent relative redirects with nested `exec.workdir`, without changing permission rules or file containment.

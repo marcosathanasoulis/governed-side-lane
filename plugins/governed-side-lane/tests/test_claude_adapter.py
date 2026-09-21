@@ -1351,7 +1351,8 @@ class AllowedToolsTests(unittest.TestCase):
         drive = tuple(f"mcp__cm-services__{name}" for name in (
             "drive_file_info", "drive_sheet_tabs", "drive_sheet_get", "drive_doc_get"))
         gcp = tuple(f"mcp__cm-services__{name}" for name in (
-            "gcp_logs", "gcp_run_services", "gcp_run_jobs", "gcp_scheduler_jobs",
+            "gcp_logs", "gcp_run_services", "gcp_run_jobs", "gcp_run_job",
+            "gcp_scheduler_jobs",
             "gcp_functions", "gcp_billing_mtd", "gcp_billing_daily", "gcp_menu"))
         database = ("mcp__cm-services__postgres_select",)
         algolia = ("mcp__cm-services__algolia_get_settings",)
@@ -1385,6 +1386,44 @@ class AllowedToolsTests(unittest.TestCase):
         self.assertIn("cm-services startup", prompt)
         self.assertIn("mcp__cm-services__asana_get_task", prompt)
         self.assertNotIn("mcp__cm-services__drive_doc_get", prompt)
+
+    def test_gcloud_run_job_grant_is_exact_and_never_widens(self) -> None:
+        """The singular Cloud Run job-metadata read is granted by gcloud-read only.
+
+        ``mcp__cm-services__gcp_run_job`` is a strict prefix of its plural
+        sibling ``mcp__cm-services__gcp_run_jobs``, so every assertion here is
+        exact-element or token-exact. A substring test would pass on the plural
+        alone and prove nothing about the singular grant.
+        """
+        from side_lane.governance import tool_policy
+
+        singular = "mcp__cm-services__gcp_run_job"
+        plural = "mcp__cm-services__gcp_run_jobs"
+        base = claude.allowed_tools("execute", ())
+        granted = claude.allowed_tools("execute", ("gcloud-read",))
+        # The rendered grant is exactly the canonical allowlist for the
+        # capability (order included), so the singular tool cannot arrive
+        # through any other rule.
+        self.assertEqual(granted, base + tool_policy().allowed["gcloud-read"])
+        self.assertIn(singular, granted)
+        self.assertIn(plural, granted)
+        self.assertFalse(any(tool.endswith("*") for tool in granted))
+        self.assertFalse(any(tool.startswith("mcp__cm-services__") for tool in base))
+        # No unrelated capability's grant carries it, and it is not a wildcard.
+        for capability in ("asana-read", "drive-read", "database-read", "algolia-read",
+                           "contentful-read", "contentful-master-read", "gateway-read",
+                           "gitnexus", "codegraph", "shell", "workspace-write", "git-push"):
+            self.assertNotIn(singular, claude.allowed_tools("execute", (capability,)))
+        # Review mode never receives it, granted or not.
+        self.assertEqual(claude.allowed_tools("review", ("gcloud-read",)), ())
+        self.assertEqual(claude.disallowed_tools("review", ("gcloud-read",)), ())
+        # The startup instruction names it as its own backtick-delimited tool,
+        # which the plural's longer name cannot satisfy.
+        prompt = self.command("execute", ("gcloud-read",))[
+            self.command("execute", ("gcloud-read",)).index("--append-system-prompt") + 1]
+        self.assertIn("cm-services startup", prompt)
+        self.assertIn(f"`{singular}`", prompt)
+        self.assertIn(f"`{plural}`", prompt)
 
     def test_shell_or_workspace_write_adds_ordinary_dev_commands_not_push(self) -> None:
         for capability in ("shell", "workspace-write"):

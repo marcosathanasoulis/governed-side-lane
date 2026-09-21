@@ -125,11 +125,18 @@ backup is allowed, but no alternate GLM model is.
   the grant.
   With the `gcloud-read` capability, that same server may be called only
   through its read-only GCP operations `gcp_logs`, `gcp_run_services`,
-  `gcp_run_jobs`, `gcp_scheduler_jobs`, `gcp_functions`, `gcp_billing_mtd`,
-  `gcp_billing_daily`, and `gcp_menu`. With the `database-read` capability,
-  it may be called only through `postgres_select`; this is the distinct
-  read-only Postgres account and proxy. With the `algolia-read` capability,
-  only the MCP server registered exactly as `cm-services` may be called, and
+  `gcp_run_jobs`, `gcp_run_job`, `gcp_scheduler_jobs`, `gcp_functions`,
+  `gcp_billing_mtd`, `gcp_billing_daily`, and `gcp_menu`. The singular
+  `gcp_run_job` reads the metadata of one Cloud Run job named by a required
+  job shortname and answers with that job's name, container images,
+  create/update timestamps, condition state and reason, latest execution
+  name, and execution count; it never returns the full job spec, environment
+  variables, or free-text condition messages, and it is not a substitute for
+  the plural `gcp_run_jobs`, which remains the execution listing. With the
+  `database-read` capability, it may be called only through `postgres_select`;
+  this is the distinct read-only Postgres account and proxy. With the
+  `algolia-read` capability, only the MCP server registered exactly as
+  `cm-services` may be called, and
   only through its read-only Algolia tool `algolia_get_settings` (exact tool
   ID `mcp__cm-services__algolia_get_settings`). With the `contentful-read`
   capability, that same server may be called only through its read-only
@@ -410,6 +417,7 @@ from host registration files, never values.
 - `mcp__cm-services__gcp_logs`
 - `mcp__cm-services__gcp_run_services`
 - `mcp__cm-services__gcp_run_jobs`
+- `mcp__cm-services__gcp_run_job`
 - `mcp__cm-services__gcp_scheduler_jobs`
 - `mcp__cm-services__gcp_functions`
 - `mcp__cm-services__gcp_billing_mtd`
