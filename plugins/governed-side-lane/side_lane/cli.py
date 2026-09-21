@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import sys
 from typing import Any, Mapping, Sequence
 
@@ -421,8 +423,12 @@ def make_parser() -> argparse.ArgumentParser:
         "artifact rather than on implementation delivery, so no commit is "
         "required — a report-only lane that commits is refused instead, as is "
         "one leaving any file outside the report and the lane's git-excluded, "
-        "untracked .side-lane-scratch/ scratch tree (editing, staging, or "
-        "deleting a *tracked* path there is source work and is refused too). "
+        "untracked .side-lane-scratch/ scratch tree, plus — when playwright is "
+        "also granted — untracked browser-report artifacts at the lane root "
+        "under the namespace --report-deliverable documents (editing, staging, "
+        "or deleting a *tracked* path, including one at such a name, is source "
+        "work and is refused too). This option implies --report-deliverable and "
+        "adds the Claude-only in-loop repair to that same verdict. "
         "delivered for such a lane follows the whole run: the worker's exit "
         "status, the coordinator-checkout comparison, and the report verdict "
         "all have to hold. The branch is never published, the coordinator "
@@ -434,6 +440,26 @@ def make_parser() -> argparse.ArgumentParser:
         "lane still runs in execute mode and is not a sandbox. Add shell or "
         "workspace-write capabilities when the report generation/read tool needs "
         "to write artifacts. Ordinary execute and review lanes are unchanged",
+    )
+    run.add_argument(
+        "--report-deliverable",
+        action="store_true",
+        help="Execute lanes only, any host. Require SIDE_LANE_REPORT.md in the "
+        "lane worktree and judge the lane on that report artifact rather than on "
+        "implementation delivery: no commit is required, one that commits is "
+        "refused instead, and so is any file outside the report, the lane's "
+        "git-excluded untracked .side-lane-scratch/ scratch tree, and — when "
+        "this run also grants --capability playwright — untracked regular files "
+        "at the lane root matching SIDE_LANE_REPORT-<name>.(png|jpg|jpeg|webp|"
+        "yaml|yml|json|txt|md), at most 40 files and 20MiB each and 100MiB "
+        "total. Nothing else about the lane changes: the branch is never "
+        "published, the coordinator checkout is still checked for outside-lane "
+        "writes, and an unreadable lane still fails closed. Carries no spend "
+        "cap and no Stop hook — pass --report-only, which implies this option, "
+        "when the Claude in-loop repair and its finite positive max_budget_usd "
+        "guard are wanted. The report file is an output exception to ordinary "
+        "execute rules; the lane still runs in execute mode and is not a "
+        "sandbox. Ordinary execute and review lanes are unchanged",
     )
     run.add_argument(
         "--allow-no-commit",
@@ -1324,13 +1350,244 @@ REPORT_STATE_DETAIL = {
 }
 
 #: Lane-relative prefix a report-only lane may leave uncommitted besides the
-#: report artifact itself: the lane's git-excluded scratch tree, the
-#: governance-documented home for throwaway scripts, notes, intermediate
-#: output, and the screenshots a browser lane saves. Git normally never
-#: reports it, so this is a guard for the case where that exclusion is missing
-#: — the alternative is failing a lane over a path the rules told it to use.
-#: The prefix is only half the rule: see the status requirement below.
+#: report artifact and, when this run granted ``playwright``, the browser-report
+#: artifacts below: the lane's git-excluded scratch tree, the
+#: governance-documented home for throwaway scripts, notes, and intermediate
+#: output. Git normally never reports it, so this is a guard for the case where
+#: that exclusion is missing — the alternative is failing a lane over a path
+#: the rules told it to use. The prefix is only half the rule: see the status
+#: requirement below.
 REPORT_ONLY_SCRATCH_PREFIX = f"{SCRATCH_DIR_NAME}/"
+
+#: The browser-report artifact namespace, the same rule and the same caps the
+#: cloud worker's own collector applies. A report lane granted ``playwright``
+#: saves screenshots and page dumps at the lane root beside its report, and both
+#: halves of the pipeline have to agree on what an allowed artifact is: the
+#: cloud half's collector and this half's delivery verdict are fed by the same
+#: worker output. ``tests/fixtures/report_artifact_names.json`` carries the one
+#: accept/refuse table both halves assert against, so a change to the namespace
+#: or its caps on one side fails on the other instead of silently drifting.
+BROWSER_REPORT_ARTIFACT_RE = re.compile(
+    r"^SIDE_LANE_REPORT-[A-Za-z0-9_-]+\.(png|jpg|jpeg|webp|yaml|yml|json|txt|md)$"
+)
+BROWSER_ARTIFACT_MAX_FILES = 40
+BROWSER_ARTIFACT_MAX_BYTES = 20 * 1024 * 1024
+BROWSER_ARTIFACT_MAX_TOTAL_BYTES = 100 * 1024 * 1024
+
+
+def _is_browser_report_artifact_name(name: object) -> bool:
+    """True when ``name`` is exactly one allowed artifact name at the lane root.
+
+    One path component only: a name carrying a separator could name a file
+    outside the lane root, and this namespace's artifacts are root-level by
+    definition. ``fullmatch`` rather than ``search``, so a name with anything
+    before or after the pattern — a prefix path, a trailing space, a newline —
+    is refused rather than silently trimmed into a match.
+    """
+
+    if not isinstance(name, str) or not name:
+        return False
+    if os.sep in name or "/" in name:
+        return False
+    return BROWSER_REPORT_ARTIFACT_RE.fullmatch(name) is not None
+
+
+def _plain_file_size(worktree: Path, relative: str) -> "int | None":
+    """Size of the plain file at a lane-relative path, or None.
+
+    None covers every way a path can fail to be the artifact it claims to be:
+    absent, a symlink, a directory, a FIFO, or anything else ``lstat`` does not
+    report as a regular file. Only what ``lstat`` confirmed is ever measured, so
+    a link at an artifact name can never point the accepted set at a file this
+    lane does not own, and a FIFO can never make the run block.
+    """
+
+    try:
+        info = os.lstat(worktree / relative)
+    except (OSError, ValueError):
+        return None
+    if not (stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode)):
+        return None
+    return info.st_size
+
+
+def _report_only_browser_artifacts(
+    worktree: Path, delivery: LaneDelivery, *, browser: bool
+) -> "frozenset[str]":
+    """The browser-report artifacts this run's own verdict may accept.
+
+    Empty unless this run granted ``playwright``: the namespace is that run's
+    exception, granted by this argv, and never a general pass on the lane root.
+    A candidate must be untracked — the status rule the scratch tree is held to,
+    for the same reason: a repository may track a file at a namespace name, and
+    git then reports a modification, staging, deletion, rename, or copy of it,
+    which is source work however it is named — must match the name rule exactly,
+    and must be a plain, non-symlink regular file at the lane root.
+
+    The caps bound the set in sorted order, so which of an over-long set falls
+    outside them is deterministic rather than dependent on git's output order:
+    the 41st file, and the file that would take the total past the aggregate
+    cap, are not this run's artifact and are refused as source work. A file over
+    the per-file cap is skipped and never counted.
+    """
+
+    if not browser:
+        return frozenset()
+    statuses = {entry.path: entry.status for entry in delivery.changed}
+    accepted: list[str] = []
+    total = 0
+    for path in sorted(delivery.uncommitted):
+        if statuses.get(path) != UNTRACKED_STATUS:
+            continue
+        if not _is_browser_report_artifact_name(path):
+            continue
+        if len(accepted) >= BROWSER_ARTIFACT_MAX_FILES:
+            break
+        size = _plain_file_size(worktree, path)
+        if size is None or size > BROWSER_ARTIFACT_MAX_BYTES:
+            continue
+        if total + size > BROWSER_ARTIFACT_MAX_TOTAL_BYTES:
+            break
+        accepted.append(path)
+        total += size
+    return frozenset(accepted)
+
+
+#: The safe-open primitives an accepted artifact is read through, resolved
+#: once at import. A ``None`` here means this build cannot open a path in a way
+#: that refuses a link and cannot block on a FIFO; that state fails closed
+#: (see :func:`_open_artifact`) instead of falling back to an unchecked open,
+#: and it is a state a test can reach by patching these two names.
+_ARTIFACT_NOFOLLOW_OPEN = getattr(os, "O_NOFOLLOW", None)
+_ARTIFACT_NONBLOCK_OPEN = getattr(os, "O_NONBLOCK", None)
+
+
+def _close_artifact(descriptor: int) -> None:
+    """Close an artifact descriptor, treating a failing close as nothing.
+
+    The read is the verdict. A descriptor that will not close must not become
+    an exception raised past a gate whose whole job is to answer ``None``.
+    """
+    try:
+        os.close(descriptor)
+    except OSError:
+        pass
+
+
+def _open_artifact(path: Path, info: os.stat_result) -> "int | None":
+    """An open descriptor for the artifact ``info`` describes, or ``None``.
+
+    ``O_NOFOLLOW`` refuses a link sitting in place of the file, and
+    ``O_NONBLOCK`` makes a read-only open of a FIFO return instead of waiting
+    for a writer, so a path swapped after the caller's ``lstat`` cannot be
+    followed, read, or blocked on. The descriptor is then checked against that
+    ``lstat``: a regular file whose device and inode are the checked file's.
+    That comparison is the identity check — ``fstat`` cannot report a link,
+    because the open has already resolved one or refused it, so refusing links
+    is ``O_NOFOLLOW``'s job and this check does not claim to do it.
+
+    ``None`` is the fail-closed answer, and it is also the answer where either
+    flag is unavailable: the fallback would be exactly the unchecked open this
+    function exists to prevent. The caller owns the descriptor.
+    """
+
+    if _ARTIFACT_NOFOLLOW_OPEN is None or _ARTIFACT_NONBLOCK_OPEN is None:
+        return None
+    try:
+        descriptor = os.open(
+            path, os.O_RDONLY | _ARTIFACT_NOFOLLOW_OPEN | _ARTIFACT_NONBLOCK_OPEN
+        )
+    except (OSError, ValueError):
+        return None
+    try:
+        opened = os.fstat(descriptor)
+    except (OSError, ValueError):
+        opened = None
+    if opened is not None and stat.S_ISREG(opened.st_mode) and (
+        (opened.st_dev, opened.st_ino) == (info.st_dev, info.st_ino)
+    ):
+        return descriptor
+    _close_artifact(descriptor)
+    return None
+
+
+def _artifact_identity(path: Path) -> "str | None":
+    """The whole-content identity of one accepted browser artifact, or None.
+
+    Deliberately *not* the report's own rule.
+    :func:`report_stop_hook.report_identity` samples a bounded prefix, which is
+    the right bargain for the report's freshness contract and the wrong one
+    here: an artifact is admitted up to ``BROWSER_ARTIFACT_MAX_BYTES``, so a
+    rewrite in place that keeps the length and lands past that sampled prefix
+    would leave the sample — and with it the whole ``--verify`` comparison —
+    unchanged. The report's own identity rule is untouched and still sampled;
+    only this namespace, which admits much larger files, is hashed whole.
+
+    Everything read is bounded by the same per-file cap that admitted the
+    artifact. ``lstat`` must first confirm a plain, non-symlink regular file at
+    or under the cap, and the file is then opened through
+    :func:`_open_artifact`, which refuses a link in place of the path, cannot
+    block on a FIFO, and must yield the very file that ``lstat`` described. A
+    link, a FIFO, a directory, an absent path, or a file over the cap is None
+    rather than a read of foreign or unbounded content, and so is a build that
+    cannot open a path that way — the read fails closed instead of falling
+    back to a name nothing has confirmed. ``fstat`` does not prove the path is
+    not a link; the descriptor check is the identity one, and ``O_NOFOLLOW``
+    is what refuses a link. The read stops at the cap plus one byte, so a file
+    that grows while it is being read is refused instead of streamed.
+    """
+
+    try:
+        info = os.lstat(path)
+    except (OSError, ValueError):
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return None
+    if info.st_size > BROWSER_ARTIFACT_MAX_BYTES:
+        return None
+    descriptor = _open_artifact(path, info)
+    if descriptor is None:
+        return None
+    try:
+        opened = os.fstat(descriptor)
+        if opened.st_size > BROWSER_ARTIFACT_MAX_BYTES:
+            return None
+        digest = hashlib.sha256()
+        remaining = BROWSER_ARTIFACT_MAX_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if remaining <= 0:
+            # It grew past the cap while being read, so this is a truncated
+            # look at it. An identity taken from a truncated read is not
+            # the file's.
+            return None
+    except (OSError, ValueError):
+        return None
+    finally:
+        # Every path out of the read releases the descriptor, the refusals
+        # included.
+        _close_artifact(descriptor)
+    return f"sha256:{digest.hexdigest()}:size:{opened.st_size}"
+
+
+def _artifact_identities(
+    worktree: Path, artifacts: "frozenset[str]"
+) -> tuple[tuple[str, "str | None"], ...]:
+    """``(path, identity)`` for each accepted artifact, in sorted order.
+
+    One function for both looks, so the state captured before ``--verify`` and
+    the state read after it are the same facts about the same paths: a before
+    side built any other way can never equal its after side, and the
+    comparison then refuses a lane whose artifacts the command did not touch.
+    """
+
+    return tuple(
+        (path, _artifact_identity(worktree / path)) for path in sorted(artifacts)
+    )
 
 
 def _report_only_lane_artifacts(
@@ -1355,18 +1612,25 @@ def _report_only_lane_artifacts(
 
 
 def _report_only_unexpected_paths(
-    delivery: LaneDelivery, report_artifacts: "frozenset[str]"
+    delivery: LaneDelivery,
+    report_artifacts: "frozenset[str]",
+    browser_artifacts: "frozenset[str]" = frozenset(),
 ) -> tuple[str, ...]:
     """Lane-relative paths a report-only lane left that are not its report.
 
-    Two entries are permitted, and each for its own reason:
+    Three entries are permitted, and each for its own reason:
 
     * the report artifact itself, untracked where the repository does not
       track it or modified where it does; rename/copy statuses are refused
       because they can conceal a different source path;
     * a path under the lane's scratch tree that git reports as *untracked*,
       which is the throwaway artifact the governance told the lane to write
-      there and which the runner's own exclusion normally hides entirely.
+      there and which the runner's own exclusion normally hides entirely;
+    * a browser-report artifact this run's own ``playwright`` grant made
+      allowed, as decided by :func:`_report_only_browser_artifacts` — that
+      function holds the name rule, the untracked-status requirement, the
+      plain-file requirement, and the caps, and returns only the paths that meet
+      all of them, so this rule never has to restate or second-guess them.
 
     The scratch exemption is deliberately not a prefix match on its own. A
     repository may track a file under that directory, and git reports a
@@ -1387,6 +1651,8 @@ def _report_only_unexpected_paths(
             status is not None and ("R" in status or "C" in status)
         ):
             continue
+        if path in browser_artifacts:
+            continue
         if (
             status is not None
             and status == UNTRACKED_STATUS
@@ -1404,26 +1670,31 @@ def _report_only_blocker(
     report_artifacts: "frozenset[str] | None",
     committed: bool,
     unexpected: Sequence[str],
+    report_deliverable_flag: str = "--report-only",
+    browser: bool = False,
 ) -> str | None:
-    """Why a report-only lane is not a delivery, or None when it is.
+    """Why a report lane is not a delivery, or None when it is.
 
     Report delivery is decided here, on the report artifact and the absence of
     source work, and never on the commit state an execute lane is judged by.
     The two are genuinely different deliverables: the worker is instructed to
     change no source and make no git change, so requiring a commit plus a clean
-    tree would reject the very lane this flag exists to accept — and
+    tree would reject the very lane this option exists to accept — and
     ``--allow-no-commit`` could not repair that, because the report file is
     itself one of the uncommitted paths that flag's condition excludes.
 
     Nothing is relaxed by the split. Source-checkout changes still fail the run
     (``LANE_SOURCE_MUTATED``), an unreadable lane still fails it
     (``LANE_DELIVERY_UNVERIFIED``), and a worker that commits, or that leaves
-    any file outside the report and scratch exceptions, is not delivered.
+    any file outside the report, the scratch tree, and this run's own browser
+    artifacts, is not delivered. ``report_deliverable_flag`` is the flag the
+    operator actually passed, so the sentence names the option they can look up;
+    the rule is the same one either way.
     """
 
     if report_state != "current":
         return (
-            f"--report-only lane produced no usable "
+            f"{report_deliverable_flag} lane produced no usable "
             f"{report_stop_hook.REPORT_NAME} at {report_path}: "
             f"{REPORT_STATE_DETAIL.get(report_state, 'the report could not be judged')}. "
             "The worker's completion prose is not the report. The lane's "
@@ -1431,17 +1702,18 @@ def _report_only_blocker(
         )
     if report_artifacts is None:
         return (
-            f"--report-only lane's report path {report_path} is not "
+            f"{report_deliverable_flag} lane's report path {report_path} is not "
             f"{report_stop_hook.REPORT_NAME} at the lane worktree root, so this "
             "run cannot tell the report apart from implementation work. Nothing "
             "was removed. The lane's worktree and audit are intact."
         )
     if committed:
         return (
-            "--report-only lane committed work, so it is not a report-only "
-            "outcome: the worker was told to make no git change, and a commit "
-            "also means a branch this run must not publish. Nothing was removed; "
-            "inspect the lane's commit on its branch before accepting it."
+            f"{report_deliverable_flag} lane committed work, so it is not a "
+            "report outcome: the worker was told to make no git change, and a "
+            "commit also means a branch this run must not publish. Nothing was "
+            "removed; inspect the lane's commit on its branch before accepting "
+            "it."
         )
     if unexpected:
         listed = "\n  ".join(unexpected[:20])
@@ -1450,22 +1722,36 @@ def _report_only_blocker(
             if len(unexpected) <= 20
             else f"\n  ... and {len(unexpected) - 20} more"
         )
+        permitted = (
+            f"untracked files in the lane's {SCRATCH_DIR_NAME}/ scratch tree"
+        )
+        if browser:
+            permitted += (
+                " or untracked browser-report artifacts at the lane root in the "
+                "namespace this run granted with --capability playwright"
+            )
+        artifacts_clause = (
+            ", or — for this run, which granted playwright — at the lane root "
+            "under the browser-report artifact name rule"
+            if browser
+            else ""
+        )
         return (
-            "report-only lane left changes that are not its report and are not "
-            f"untracked files in the lane's {SCRATCH_DIR_NAME}/ scratch tree:"
+            "report lane left changes that are not its report and are not "
+            f"{permitted}:"
             f"\n  {listed}{more}\n"
             "Screenshots and intermediate output belong in the lane's "
             f"git-excluded {SCRATCH_DIR_NAME}/ directory as new, untracked "
-            "files; editing or removing a *tracked* path is source work, and "
-            "source work needs an execute lane, not a report-only one. Nothing "
-            "was removed. The lane's worktree and audit are intact."
+            f"files{artifacts_clause}; editing or removing a *tracked* path is "
+            "source work, and source work needs an execute lane, not a report "
+            "one. Nothing was removed. The lane's worktree and audit are intact."
         )
     return None
 
 
 @dataclass(frozen=True)
 class _ReportOnlyState:
-    """The four facts a report-only verdict is made of, read from the tree.
+    """The facts a report verdict is made of, read from the tree.
 
     Taken twice in a run that verifies: once from the verdict's own inputs,
     and once immediately after the verification command, so that a command
@@ -1477,6 +1763,12 @@ class _ReportOnlyState:
     unexpected: tuple[str, ...]
     source_changes: tuple[str, ...]
     report_identity: "str | None"
+    #: ``(path, identity)`` for each accepted browser artifact, in sorted order,
+    #: where the identity is the whole file's (see :func:`_artifact_identity`).
+    #: A name set alone would absorb a rewrite in place — same path, same
+    #: untracked status, same size — so the identity is part of the compared
+    #: state, as it is for the report itself.
+    artifacts: tuple[tuple[str, "str | None"], ...] = ()
     #: Why the lane, or the coordinator checkout, could not be inspected at
     #: all. A failed look is a fact about the run, not an exception to raise
     #: past the verdict that has to report it.
@@ -1490,24 +1782,39 @@ def _report_only_state(
     report_artifacts: "frozenset[str]",
     repo: Path,
     source_baseline: "frozenset[str]",
+    *,
+    browser: bool = False,
 ) -> _ReportOnlyState:
-    """Read the report-only contract's inputs fresh from the real tree.
+    """Read the report contract's inputs fresh from the real tree.
 
     Never raises: an inspection that fails is one of the facts the caller has
     to map onto a contract, and swallowing it into a delivery is exactly the
     failure this state exists to prevent.
+
+    ``browser`` is this run's own namespace grant, passed through rather than
+    inherited from the earlier verdict: the accepted artifact set is re-decided
+    from the fresh tree, so an artifact the verification command added or
+    removed is the difference it is instead of a set this call assumes still
+    holds.
     """
 
     lane_error = None
     committed = False
     unexpected: tuple[str, ...] = ()
+    artifacts: tuple[tuple[str, "str | None"], ...] = ()
     try:
         delivery = lane_delivery(lane)
     except WorktreeError as exc:
         lane_error = str(exc)
     else:
         committed = delivery.committed
-        unexpected = _report_only_unexpected_paths(delivery, report_artifacts)
+        browser_artifacts = _report_only_browser_artifacts(
+            lane.worktree, delivery, browser=browser
+        )
+        unexpected = _report_only_unexpected_paths(
+            delivery, report_artifacts, browser_artifacts
+        )
+        artifacts = _artifact_identities(lane.worktree, browser_artifacts)
     source_error = None
     source_changes: tuple[str, ...] = ()
     try:
@@ -1525,6 +1832,7 @@ def _report_only_state(
         unexpected=unexpected,
         source_changes=source_changes,
         report_identity=identity,
+        artifacts=artifacts,
         lane_error=lane_error,
         source_error=source_error,
     )
@@ -1541,11 +1849,48 @@ def _report_only_verification_changes(
     delivery, and accepting the lane after it would report a state the run
     never judged. Every difference found here makes the lane not delivered,
     and nothing is removed to make the difference go away.
+
+    One entry is not a difference the command made: an accepted artifact whose
+    content this run could not read is refused here too, because identity
+    ``None`` on both sides compares equal and would otherwise accept, as
+    unchanged, an artifact nothing verified.
     """
 
     changes: list[str] = []
     if after.report_identity != before.report_identity:
         changes.append(f"it changed the run's report artifact at {report_path}")
+    # An accepted artifact is admitted by name and status, so an identity that
+    # could not be read — a link, a FIFO, or anything else the safe open
+    # refuses — is a hole the comparison below cannot see through: two
+    # unreadable identities are equal, and the lane would be accepted on an
+    # artifact this run never read. It is refused whichever look found it,
+    # including on both sides, and it is never reported as a change the
+    # verification command made.
+    unreadable = sorted(
+        {
+            path
+            for path, identity in before.artifacts + after.artifacts
+            if identity is None
+        }
+    )
+    if unreadable:
+        changes.append(
+            "the run's report artifacts at " + ", ".join(unreadable)
+            + " cannot be read as a plain file, so their content cannot be "
+            "verified"
+        )
+    elif after.artifacts != before.artifacts:
+        # Same path, same untracked status, same length: only the whole-content
+        # identity distinguishes a rewrite in place from the artifact the
+        # verdict accepted, and a name-set comparison — or a prefix sample of a
+        # file large enough to hold the change past that prefix — would absorb
+        # it silently.
+        named = sorted(
+            {path for path, _identity in before.artifacts + after.artifacts}
+        )
+        changes.append(
+            "it changed the run's report artifacts at " + ", ".join(named)
+        )
     if after.committed and not before.committed:
         changes.append("it committed work on the lane branch")
     for path in after.unexpected:
@@ -1586,6 +1931,36 @@ def _launch(
     # flag, and anything other than an explicit True means the opt-in was not
     # given, so no lane can be steered into report-only mode by accident.
     report_only = getattr(args, "report_only", False) is True
+    # The report is the deliverable. Two concerns were fused in one flag: that
+    # the report artifact is this lane's deliverable, and that a Claude Code
+    # Stop hook plus a USD cap buys one more turn to write it. Only the second
+    # is Claude's, and only the second bounds spend — so `--report-only`
+    # implies this and keeps its hook and its cap, while `--report-deliverable`
+    # selects the verdict alone. A report lane can then run on any host and on
+    # any route, including the provider-key routes that carry no
+    # `max_budget_usd` and the Devin/Codex hosts where no Stop hook exists.
+    report_deliverable = report_only or (
+        getattr(args, "report_deliverable", False) is True
+    )
+    # The flag the operator actually passed, so every operator-facing sentence
+    # names an option they can look up. `--report-only` implies the verdict, so
+    # a run carrying both is named for the flag that also bought the Stop hook.
+    report_flag = "--report-only" if report_only else "--report-deliverable"
+    if report_deliverable and "git-push" in set(args.capability):
+        # `git-push` is the only publication request this argv can express, and
+        # a report run never publishes: its deliverable is the report artifact in
+        # the lane worktree, and an accepted report lane has no commit to make
+        # remote-contained. Granting the worker a push the run will never
+        # exercise would hand out inert authority over a remote for no gain, so
+        # the combination is refused here — before the spend cap the
+        # `--report-only` repair requires, because no cap makes it honorable —
+        # and on `--report-only` and `--report-deliverable` alike.
+        raise SideLaneError(
+            "a report run never publishes, so it is not granted --capability "
+            "git-push: the lane's deliverable is its report artifact and it "
+            "makes no commit. Drop the capability, or run an ordinary execute "
+            "lane that publishes its branch."
+        )
     report_path: Path | None = None
     if report_only:
         if args.mode != "execute":
@@ -1595,10 +1970,23 @@ def _launch(
                 "--report-only is supported only on the claude host: the repair "
                 "is a Claude Code Stop hook inside the same invocation"
             )
+        # The cap is not a general report-lane rule: it is what the hook buys,
+        # so it is required exactly where the hook is armed. `--report-deliverable`
+        # alone carries no implicit spend cap.
         try:
             require_report_only_budget(model_config)
         except ClaudeAdapterError as exc:
             raise SideLaneError(str(exc)) from exc
+    if (
+        getattr(args, "report_deliverable", False) is True
+        and args.mode != "execute"
+    ):
+        # Same reason as every other execute-only option here: a review lane's
+        # argv is the strict read-only form, and a verdict it cannot reach would
+        # be a silent no-op the operator believes happened.
+        raise SideLaneError(
+            "--report-deliverable is supported only in execute mode"
+        )
     if args.capability and args.mode != "execute":
         raise SideLaneError("--capability is supported only in execute mode")
     if run_mcp_servers and args.mode != "execute":
@@ -1686,6 +2074,12 @@ def _launch(
         )
     executable = _require_host_executable(args.host)
     capabilities = tuple(sorted(set(args.capability)))
+    # This run's own exception, granted by this argv and never inherited from
+    # elsewhere: a report lane without `--capability playwright` gets no
+    # root-level artifact pass at all, and with it the namespace, the untracked
+    # status requirement, and the caps are the cloud worker's own — see
+    # BROWSER_REPORT_ARTIFACT_RE.
+    browser_report = report_deliverable and "playwright" in capabilities
     lane = create_worktree(
         repo, args.lane_name, worktree_root=getattr(args, "worktree_root", None)
     )
@@ -1705,7 +2099,7 @@ def _launch(
     secret: str | None = None
     report_baseline: report_stop_hook.ReportBaseline | None = None
     try:
-        if report_only:
+        if report_deliverable:
             # Run-bound freshness, captured before anything can write it: what
             # the fixed report path already holds. A lane worktree is added from
             # HEAD, so a repository that tracks SIDE_LANE_REPORT.md hands every
@@ -1715,7 +2109,9 @@ def _launch(
             # hook and the acceptance below compare against one recorded state.
             # The inherited file is copied into the lane's ignored scratch
             # (never the coordinator checkout, never deleted) so a worker
-            # overwriting it erases no history.
+            # overwriting it erases no history. A `--report-deliverable` lane
+            # needs this exactly as much as a `--report-only` one: it is the
+            # verdict's own input, not the hook's.
             try:
                 report_baseline = report_stop_hook.capture_report_baseline(
                     lane.worktree / report_stop_hook.REPORT_NAME,
@@ -1723,7 +2119,7 @@ def _launch(
                 )
             except report_stop_hook.UnsafeReportPath as exc:
                 raise SideLaneError(
-                    f"--report-only cannot start: {exc}. No honest per-run "
+                    f"{report_flag} cannot start: {exc}. No honest per-run "
                     "baseline can be taken from it; remove or replace it before "
                     "dispatching."
                 ) from exc
@@ -1967,7 +2363,7 @@ def _launch(
     report_state: str | None = None
     report_only_blocker: str | None = None
     report_path = lane.worktree / report_stop_hook.REPORT_NAME
-    if report_only:
+    if report_deliverable:
         if report_baseline is not None:
             report_path = report_baseline.report_path
         report_state = report_stop_hook.report_freshness_state(report_baseline)
@@ -1989,10 +2385,15 @@ def _launch(
         # what it says: whether the worker committed, and every path it left
         # uncommitted, both of which this decision reads.
         report_artifacts = _report_only_lane_artifacts(lane.worktree, report_path)
+        browser_artifacts = _report_only_browser_artifacts(
+            lane.worktree, delivery, browser=browser_report
+        )
         unexpected = (
             ()
             if report_artifacts is None
-            else _report_only_unexpected_paths(delivery, report_artifacts)
+            else _report_only_unexpected_paths(
+                delivery, report_artifacts, browser_artifacts
+            )
         )
         summary["report_only_unexpected_paths"] = list(unexpected)
         summary["report_only_committed"] = delivery.committed
@@ -2002,6 +2403,8 @@ def _launch(
             report_artifacts=report_artifacts,
             committed=delivery.committed,
             unexpected=unexpected,
+            report_deliverable_flag=report_flag,
+            browser=browser_report,
         )
     # 2026-09-17: a lane told to run the test suite ran it 18 times, saw
     # JSONDecodeError nine times, committed the failing tests anyway, and
@@ -2023,7 +2426,7 @@ def _launch(
     # lane is gated on — gating it on `delivery.delivered` made --verify a
     # silent no-op for that lane, which is exactly the "the operator believes
     # a check ran" failure this runner refuses elsewhere.
-    if report_only:
+    if report_deliverable:
         verify_eligible = (
             report_only_blocker is None
             and not result.returncode
@@ -2034,34 +2437,41 @@ def _launch(
         verify_eligible = delivery.delivered
     verify = None
     verification_changes: tuple[str, ...] = ()
-    if report_only:
+    if report_deliverable:
         summary["report_only_verification_changes"] = []
     if getattr(args, "verify", None) and verify_eligible:
         before = None
-        if report_only:
+        if report_deliverable:
             try:
                 report_identity = report_stop_hook.report_identity(report_path)
             except report_stop_hook.UnsafeReportPath:
                 report_identity = None
+            # The same facts the after state reads, taken from the inputs the
+            # verdict itself was reached on — including the accepted artifact
+            # identities, through the same helper. An identity-free before
+            # state can never equal an after state that carries them, so a
+            # report lane that left an artifact and ran a successful --verify
+            # was refused for a change the command had not made.
             before = _ReportOnlyState(
                 committed=delivery.committed,
                 unexpected=unexpected,
                 source_changes=tuple(source_changes or ()),
                 report_identity=report_identity,
+                artifacts=_artifact_identities(lane.worktree, browser_artifacts),
             )
         verify = verify_lane(lane, args.verify)
         summary["verified"] = verify.passed
         summary["verify_command"] = verify.command
         summary["verify_exit"] = verify.exit_code
         summary["verify_output"] = verify.output
-        if report_only:
+        if report_deliverable:
             # The command may have committed, left files, rewritten the report
             # the verdict was just reached on, or written into the coordinator
             # checkout. Re-read the tree instead of assuming it did not: the
             # lane that gets accepted must be the lane that was judged.
             after = _report_only_state(
                 lane, report_path, report_artifacts or frozenset(), repo,
-                source_baseline,
+                source_baseline, browser=browser_report,
             )
             verification_changes = _report_only_verification_changes(
                 before, after, report_path=report_path
@@ -2092,7 +2502,7 @@ def _launch(
     # Exit codes alone would not be enough — a consumer that reads the summary
     # never sees them. An execute lane's `delivered` stays exactly what it
     # was: the lane tree's own commit-plus-clean-tree answer.
-    if report_only:
+    if report_deliverable:
         delivered = (
             report_only_blocker is None
             and not result.returncode
@@ -2113,9 +2523,9 @@ def _launch(
         # reclaim the worktree later with its guards intact. A failed push is
         # reported, never fatal: the work is committed with or without the
         # remote, and failing here would be worse than today's behavior.
-        if report_only:
-            # Never published, with or without --no-publish: a report-only
-            # lane's deliverable is the report artifact in its worktree, and an
+        if report_deliverable:
+            # Never published, with or without --no-publish: a report lane's
+            # deliverable is the report artifact in its worktree, and an
             # accepted one has no commit on its branch to make remote-contained
             # (one that did commit is rejected above, so this cannot hide an
             # unpublished commit). Recorded explicitly, as --no-publish does,
@@ -2157,7 +2567,7 @@ def _launch(
         )
     if result.returncode:
         return result.returncode
-    if report_only and report_only_blocker is not None:
+    if report_deliverable and report_only_blocker is not None:
         # One feedback round was already spent inside the invocation; the lane
         # is still not an accepted report-only delivery — no report this run
         # wrote, a commit it was told not to make, or changes that are neither

@@ -88,28 +88,38 @@ use an absolute path under the lane's `.side-lane-scratch/` for temporary output
 and logs. Paths containing spaces are quoted in the generated example. This
 changes prompt guidance only; file containment and permission rules stay intact.
 
-## Report-only execute lanes (`--report-only`)
+## Report-deliverable execute lanes (`--report-deliverable`, `--report-only`)
 
 A worker can end its turn with exit 0, having navigated and saved its
 screenshots, and describe in prose a findings report it never wrote. Prose in
-a transcript is not an artifact, so `--report-only` makes
-`SIDE_LANE_REPORT.md` at the lane worktree root a checked precondition:
+a transcript is not an artifact, so `--report-deliverable` makes
+`SIDE_LANE_REPORT.md` at the lane worktree root a checked precondition and
+judges the lane on that report instead of on implementation delivery:
 
 ```bash
 side-lane run --host claude --mode execute --provider <p> --model <m> \
-  --lane-name <lane> --prompt-file <task> --report-only \
+  --lane-name <lane> --prompt-file <task> --report-deliverable \
   --capability shell
 ```
 
-It is deliberately narrow: Claude host, execute mode, and a finite positive
-`max_budget_usd` on the route (the USD cap and the repair must travel in the
-same command; no catalog or global budget change is involved). The `max_budget_usd`
+It is execute mode only and otherwise host-neutral: the verdict is a statement
+about the lane tree, so it is available on every host and every route,
+including the provider-key routes that carry no `max_budget_usd`.
+`--report-only` implies `--report-deliverable` and adds the Claude-only
+in-loop repair to the same verdict; it is deliberately narrow — Claude host,
+execute mode, and a finite positive `max_budget_usd` on the route (the USD cap
+and the repair must travel in the same command; no catalog or global budget
+change is involved). Only `--report-only` carries a spend gate: it is what the
+Stop hook buys, and `--report-deliverable` alone neither requires a cap nor
+arms a hook. The `max_budget_usd`
 value is a client-side estimate guard, not proof that the upstream server or
 account enforces the same cap; verify provider-side and account limits separately.
 Add `shell` or `workspace-write` capabilities when the report generation/read
 tool needs to write artifacts. Ordinary execute and review lanes are untouched,
-and the flag is rejected before a worktree, credential, or host executable is
-touched anywhere else.
+and either flag is rejected before a worktree, credential, or host executable is
+touched anywhere else. A report run also refuses `--capability git-push`
+outright: it never publishes, so the grant would be inert authority over a
+remote for a run that can never exercise it.
 
 **A report-only lane is judged on its report, not on implementation delivery.**
 Its worker is told to change no source and make no git change, so the execute
@@ -135,6 +145,19 @@ acceptance is therefore the report artifact plus the absence of source work:
   silently, because nothing uncommitted outside the report survives the
   worktree. A path whose status cannot be read fails closed rather than being
   exempted on its name;
+- **only when this run also granted `--capability playwright`**, the third
+  allowed home is a browser-report artifact at the lane root: an **untracked**,
+  regular, non-symlink file whose name matches
+  `SIDE_LANE_REPORT-<name>.<ext>` exactly — `<name>` from `[A-Za-z0-9_-]+` and
+  `<ext>` one of `png jpg jpeg webp yaml yml json txt md` — bounded to 40 files,
+  20 MiB each, and 100 MiB in total (files are counted in sorted name order, so
+  which ones fall outside a cap is deterministic). This is the same name rule
+  and the same caps the cloud worker's own artifact collector applies, pinned on
+  both sides by `tests/fixtures/report_artifact_names.json`, so the two halves
+  cannot disagree about what an allowed artifact is. Without that capability
+  there is **no** root-level exemption at all, and a file at such a name is
+  refused like any other; a *tracked* path at such a name — modified, staged,
+  added, deleted, renamed, or copied — is source work whatever it is called;
 - the coordinator checkout is still compared against its pre-dispatch
   baseline (exit `6`), an unreadable lane tree still fails closed (exit `4`),
   and a non-zero worker exit is still retained. `--verify` runs only when the
@@ -142,15 +165,22 @@ acceptance is therefore the report artifact plus the absence of source work:
   coordinator-checkout change, or a refused report — and never implies a
   commit;
 - a verification may not change what the run judged. The runner re-reads the
-  lane, the report identity, and the coordinator checkout after `--verify`
+  lane, the report identity, the accepted browser artifacts (re-decided from
+  the fresh tree, and compared by full-content identity as well as by path —
+  the report's own identity stays the sampled one it has always been), and the
+  coordinator checkout after `--verify`
   runs; a verification command that commits on the lane branch, leaves or
-  removes a lane file, rewrites the report artifact, or writes into the
+  removes a lane file, rewrites the report or an accepted browser artifact,
+  or writes into the
   coordinator checkout refuses the lane (exit `3`, with the checkout case also
-  recorded as a source mutation). Nothing is reverted or deleted to hide it —
-  the change is reported and the lane is refused.
+  recorded as a source mutation). An accepted artifact whose content cannot be
+  read as a plain file — a link, a FIFO, or anything else the safe open
+  refuses — is refused the same way and never treated as unchanged. Nothing is
+  reverted or deleted to hide it — the change is reported and the lane is
+  refused.
 
 The verdict above is the whole run's, not the report artifact's alone: for a
-report-only lane, `summary["delivered"]` is true only when the report verdict
+report lane, `summary["delivered"]` is true only when the report verdict
 holds **and** the worker exited 0 **and** the source check found nothing **and**
 the checkout is unchanged **and** any `--verify` both passed and changed
 nothing. Exit codes alone do not carry that — a consuming model qualification

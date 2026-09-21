@@ -34,6 +34,28 @@ def _only_summary(stdout: str) -> dict:
     return json.JSONDecoder().raw_decode(stdout[start:])[0]
 
 
+#: The execute adapter entry point each host's `run` branch calls. A lane is
+#: host-neutral when the same verdict is reached through whichever one it uses.
+HOST_LAUNCH_TARGETS = {
+    "claude": "side_lane.adapters.claude.launch",
+    "codex": "side_lane.adapters.codex.run_codex",
+    "devin": "side_lane.adapters.devin.launch",
+}
+
+#: The one accept/refuse table for the browser-report artifact namespace, shared
+#: with the cloud worker's collector: the runner's half asserts it against
+#: `cli.BROWSER_REPORT_ARTIFACT_RE` and the `BROWSER_ARTIFACT_MAX_*` caps, and
+#: the cloud counterpart asserts the same file against `pipeline`'s. A one-sided
+#: change to the namespace or its caps fails on the other side.
+REPORT_ARTIFACT_NAMES = (
+    Path(__file__).resolve().parent / "fixtures" / "report_artifact_names.json"
+)
+
+
+def _report_artifact_name_table() -> dict:
+    return json.loads(REPORT_ARTIFACT_NAMES.read_text(encoding="utf-8"))
+
+
 class SideLaneTests(unittest.TestCase):
     def setUp(self) -> None:
         # Keep host-executable resolution hermetic: a real override in the
@@ -2083,20 +2105,28 @@ class ReportOnlyCliTests(unittest.TestCase):
             approve_billable_route=False, worktree_root=None,
             allow_no_commit=False, no_publish=True, verify=None,
             read_root=[], mcp_config=None, report_only=True,
+            report_deliverable=False,
         )
         values.update(overrides)
         return mock.Mock(**values)
 
     @contextlib.contextmanager
     def _patched(self, repo, lane, launch, *, model_config=None, create=None,
-                 delivery=None, delivery_error=None):
+                 delivery=None, delivery_error=None, capability_evidence=None,
+                 launch_attr="side_lane.adapters.claude.launch",
+                 host_support=None):
         """The hermetic CLI environment: no host executable, git, or network.
 
         ``create`` replaces the worktree factory when a test wants the real one
         (the default is a mock returning ``lane``). ``delivery`` is the mocked
         lane tree verdict — the default is a lane that wrote its report and
         committed nothing, which is what a report-only worker is told to do —
-        and ``delivery_error`` makes the inspection itself fail. Yields the
+        and ``delivery_error`` makes the inspection itself fail.
+        ``capability_evidence`` replaces the host-inventory scan, which is the
+        only part of a ``--capability`` lane that needs a real host; a test that
+        grants one states the evidence it wants instead. ``launch_attr`` is the
+        adapter entry point the host's `run` branch calls, and ``host_support``
+        the support directory the Codex branch resolves. Yields the
         ``publish_lane_branch`` and ``dispose_clean_worktree`` mocks.
         """
 
@@ -2116,6 +2146,18 @@ class ReportOnlyCliTests(unittest.TestCase):
             else {"runtime_model": "claude-sonnet-5", "protocol": "native-claude",
                   "max_budget_usd": 2.5},
         )
+        capability_patch = (
+            contextlib.nullcontext() if capability_evidence is None
+            else mock.patch(
+                "side_lane.cli._capability_report",
+                return_value={"capability_evidence": capability_evidence},
+            )
+        )
+        host_support_patch = (
+            contextlib.nullcontext() if host_support is None
+            else mock.patch("side_lane.cli.host_support_dir",
+                            return_value=host_support)
+        )
         with (
             mock.patch("side_lane.cli.create_worktree",
                        **({"side_effect": create} if create is not None
@@ -2124,7 +2166,8 @@ class ReportOnlyCliTests(unittest.TestCase):
                        return_value="/opt/hosts/claude"),
             mock.patch("side_lane.cli.select_route", return_value=claude_route),
             mock.patch("side_lane.cli.require_native_oauth"),
-            mock.patch("side_lane.adapters.claude.launch", launch),
+            mock.patch(launch_attr, launch),
+            host_support_patch,
             mock.patch("side_lane.cli.lane_delivery", **delivery_patch),
             mock.patch("side_lane.cli.git_status", return_value="## task"),
             mock.patch("side_lane.cli.write_audit",
@@ -2132,13 +2175,15 @@ class ReportOnlyCliTests(unittest.TestCase):
             mock.patch("side_lane.cli.dispose_clean_worktree") as dispose,
             mock.patch("side_lane.cli.publish_lane_branch",
                        return_value="origin/side-lane/task-1") as publish,
+            capability_patch,
         ):
             yield publish, dispose
 
     def _drive(self, *, report_only=True, report=None, model_config=None,
                host="claude", mode="execute", no_publish=True,
                inherited_report=None, worker_writes=(), delivery=None,
-               delivery_error=None, returncode=0, allow_no_commit=False):
+               delivery_error=None, returncode=0, allow_no_commit=False,
+               report_deliverable=False, capability=(), capability_evidence=None):
         """Run _launch through a mocked Claude adapter; return what happened.
 
         ``inherited_report`` is written into the lane before the runner is
@@ -2162,11 +2207,11 @@ class ReportOnlyCliTests(unittest.TestCase):
         if delivery is None and delivery_error is None:
             delivery = (
                 LaneDelivery(committed=False, uncommitted=(self.REPORT_NAME,))
-                if report_only
+                if report_only or report_deliverable
                 else LaneDelivery(committed=True, uncommitted=())
             )
         result = LaneResult(
-            ("claude",), returncode, worktree, "claude", "claude", "native-claude",
+            (host,), returncode, worktree, host, "claude", "native-claude",
             "claude-sonnet-5", "oauth", False, "done", "",
         )
 
@@ -2183,14 +2228,19 @@ class ReportOnlyCliTests(unittest.TestCase):
         launch = mock.MagicMock(side_effect=fake_launch)
         with (
             self._patched(repo, lane, launch, model_config=model_config,
-                          delivery=delivery, delivery_error=delivery_error) as (
+                          delivery=delivery, delivery_error=delivery_error,
+                          capability_evidence=capability_evidence,
+                          launch_attr=HOST_LAUNCH_TARGETS[host],
+                          host_support=None if host == "claude" else "/opt/support") as (
                 publish, _dispose),
             contextlib.redirect_stdout(io.StringIO()) as output,
             contextlib.redirect_stderr(io.StringIO()) as errors,
         ):
             code = cli._launch(
                 self._args(report_only=report_only, host=host, mode=mode,
-                           no_publish=no_publish, allow_no_commit=allow_no_commit),
+                           no_publish=no_publish, allow_no_commit=allow_no_commit,
+                           report_deliverable=report_deliverable,
+                           capability=list(capability)),
                 cli.load_config(), repo, "Implement",
             )
         self.publish_lane = publish
@@ -2498,7 +2548,7 @@ class ReportOnlyCliTests(unittest.TestCase):
 
     def _real_lane(self, worker, *, args_overrides=None, tracked_report=None,
                    verify=None, verify_lane=None, source_mutations_error=None,
-                   tracked_scratch=None):
+                   tracked_scratch=None, capability_evidence=None):
         """Drive _launch over a real lane worktree and real git inspection.
 
         Only the host executable, the route, the adapter call, the audit write,
@@ -2566,6 +2616,13 @@ class ReportOnlyCliTests(unittest.TestCase):
             else mock.patch("side_lane.cli.source_mutations",
                             side_effect=source_mutations_error)
         )
+        capability_patch = (
+            contextlib.nullcontext() if capability_evidence is None
+            else mock.patch(
+                "side_lane.cli._capability_report",
+                return_value={"capability_evidence": capability_evidence},
+            )
+        )
         with (
             mock.patch("side_lane.cli.create_worktree", side_effect=capture),
             mock.patch("side_lane.cli._require_host_executable",
@@ -2577,6 +2634,7 @@ class ReportOnlyCliTests(unittest.TestCase):
                        return_value=repo / ".git" / "audit.json"),
             mock.patch("side_lane.cli.publish_lane_branch") as publish,
             source_patch,
+            capability_patch,
             patched_verify as verify_call,
             contextlib.redirect_stdout(io.StringIO()) as output,
             contextlib.redirect_stderr(io.StringIO()) as errors,
@@ -3111,3 +3169,741 @@ class ReportOnlyCliTests(unittest.TestCase):
         self.assertTrue(summary["delivered"])
         self.assertEqual(summary["report_only_unexpected_paths"], [])
         self.assertTrue((lane.worktree / screenshot).exists())
+
+    # --- the report deliverable without the Claude-only repair ---------------
+    #
+    # Two concerns were fused in one flag: "the report is the deliverable" and
+    # "a Stop hook plus a USD cap buys one more turn to write it". Only the
+    # second is Claude's, and only the second bounds spend.
+    # `--report-deliverable` selects the first alone, so a report lane can run
+    # on any host and on any route — including the provider-key routes that
+    # carry no `max_budget_usd`. `--report-only` implies it, so the Claude+cap
+    # path is byte-identical.
+
+    def test_parser_accepts_the_deliverable_flag(self) -> None:
+        args = cli.make_parser().parse_args([
+            "run", "--host", "devin", "--mode", "execute", "--provider", "claude",
+            "--model", "claude-sonnet-5", "--repo", ".", "--lane-name", "task",
+            "--prompt", "Research", "--report-deliverable",
+        ])
+        self.assertIs(args.report_deliverable, True)
+        self.assertIs(args.report_only, False)
+
+    def test_the_deliverable_flag_needs_no_budget_and_arms_no_hook(self) -> None:
+        """The verdict, without the cap or the hook that flag alone owns."""
+
+        code, stdout, errors, launch, _worktree = self._drive(
+            report_only=False, report_deliverable=True,
+            model_config={"runtime_model": "claude-sonnet-5",
+                          "protocol": "native-claude"},
+            report="# Findings\n- item\n")
+        self.assertEqual(code, 0, errors)
+        self.assertTrue(_only_summary(stdout)["delivered"])
+        self.assertIs(launch.call_args.kwargs["report_only"], False)
+
+    def test_the_deliverable_verdict_launches_on_every_host(self) -> None:
+        """Host-neutral: what a bare `--report-only` refuses codex/devin for is
+        the Stop hook, not the verdict."""
+
+        for host in sorted(HOST_LAUNCH_TARGETS):
+            with self.subTest(host=host):
+                code, stdout, errors, launch, _worktree = self._drive(
+                    host=host, report_only=False, report_deliverable=True,
+                    model_config={"runtime_model": "claude-sonnet-5",
+                                  "protocol": "native-claude"},
+                    report="# Findings\n- item\n")
+                self.assertEqual(code, 0, errors)
+                self.assertTrue(_only_summary(stdout)["delivered"])
+                if host != "claude":
+                    # No other adapter is even offered the opt-in.
+                    self.assertNotIn("report_only", launch.call_args.kwargs)
+
+    def test_report_only_still_requires_the_budget_the_hook_buys(self) -> None:
+        """The spend guard is unchanged, and it is the opt-in's own."""
+
+        base = {"runtime_model": "claude-sonnet-5", "protocol": "native-claude"}
+        code, _stdout, errors, _launch, _worktree = self._drive(
+            report_only=False, report_deliverable=True, model_config=base,
+            report="# Findings\n")
+        self.assertEqual(code, 0, errors)
+        with self.assertRaises(cli.SideLaneError) as caught:
+            self._drive(report_only=True, model_config=base, report="# Findings\n")
+        self.assertIn("max_budget_usd", str(caught.exception))
+
+    def test_report_only_still_selects_the_same_report_deliverable(self) -> None:
+        code, stdout, errors, launch, _worktree = self._drive(
+            report_only=True, report_deliverable=True, report="# Findings\n")
+        self.assertEqual(code, 0, errors)
+        self.assertTrue(_only_summary(stdout)["delivered"])
+        self.assertIs(launch.call_args.kwargs["report_only"], True)
+
+    def test_the_deliverable_flag_is_refused_in_review_mode(self) -> None:
+        repo = self.repo()
+        with (
+            mock.patch("side_lane.cli.create_worktree") as create,
+            mock.patch("side_lane.adapters.claude.launch") as launch,
+        ):
+            with self.assertRaises(cli.SideLaneError) as caught:
+                cli._launch(
+                    self._args(report_only=False, report_deliverable=True,
+                               mode="review"),
+                    cli.load_config(), repo, "Review")
+        self.assertIn("execute", str(caught.exception))
+        create.assert_not_called()
+        launch.assert_not_called()
+
+    def test_a_publication_request_on_a_report_run_is_refused(self) -> None:
+        """A report run never publishes, so it cannot be granted a push.
+
+        `git-push` is the argv's only publication request. A report lane leaves
+        an uncommitted artifact and no commit to make remote-contained, so the
+        grant would be inert authority handed to a worker for a run that will
+        never exercise it. Refused before a lane exists, on both flags.
+        """
+
+        for label, overrides in (
+            ("--report-only", {"report_only": True}),
+            ("--report-deliverable", {"report_deliverable": True}),
+        ):
+            with self.subTest(flag=label):
+                repo = self.repo()
+                values = {"report_only": False, "capability": ["git-push"]}
+                values.update(overrides)
+                with (
+                    mock.patch("side_lane.cli.create_worktree") as create,
+                    mock.patch("side_lane.adapters.claude.launch") as launch,
+                ):
+                    with self.assertRaises(cli.SideLaneError) as caught:
+                        cli._launch(self._args(**values), cli.load_config(),
+                                    repo, "Research")
+                self.assertIn("git-push", str(caught.exception))
+                create.assert_not_called()
+                launch.assert_not_called()
+
+    def test_a_deliverable_lane_is_never_published(self) -> None:
+        code, stdout, errors, _launch, _worktree = self._drive(
+            report_only=False, report_deliverable=True, no_publish=False,
+            model_config={"runtime_model": "claude-sonnet-5",
+                          "protocol": "native-claude"},
+            report="# Findings\n")
+        self.assertEqual(code, 0, errors)
+        summary = _only_summary(stdout)
+        self.assertTrue(summary["delivered"])
+        self.publish_lane.assert_not_called()
+        self.assertIsNone(summary["published"])
+
+    def test_a_deliverable_lane_that_commits_is_not_delivered(self) -> None:
+        code, stdout, errors, _launch, _worktree = self._drive(
+            report_only=False, report_deliverable=True, report="# Findings\n",
+            delivery=LaneDelivery(committed=True, uncommitted=()))
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        self.assertFalse(_only_summary(stdout)["delivered"])
+        self.assertIn("committed", errors)
+
+    def test_a_deliverable_lane_with_an_unusable_report_is_not_delivered(self) -> None:
+        for label, report in (("missing", None), ("blank", "  \n\t ")):
+            with self.subTest(label=label):
+                code, stdout, _errors, _launch, _worktree = self._drive(
+                    report_only=False, report_deliverable=True, report=report)
+                self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+                summary = _only_summary(stdout)
+                self.assertFalse(summary["delivered"])
+                self.assertEqual(summary["report_state"], "unusable")
+
+    def test_a_native_failure_cannot_be_a_deliverable_report(self) -> None:
+        """A written report does not excuse a non-zero worker exit."""
+
+        code, stdout, errors, _launch, _worktree = self._drive(
+            report_only=False, report_deliverable=True, returncode=7,
+            report="# Findings\n- item\n")
+        self.assertEqual(code, 7)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertEqual(summary["report_state"], "current")
+        self.assertEqual(errors, "")
+
+    # --- the browser-report artifact namespace -------------------------------
+    #
+    # A browser lane saves screenshots and page dumps at the lane root beside
+    # its report, and the cloud worker already admits exactly that set. The
+    # runner's verdict learned the same namespace, gated on the run's own
+    # `playwright` grant and bounded by the same name rule and the same caps, so
+    # the two halves cannot disagree about what an allowed artifact is. Without
+    # the capability there is no exemption at all: it is that run's exception,
+    # never a general root pass.
+
+    PLAYWRIGHT_EVIDENCE = {"playwright": {"state": "present", "basis": "test"}}
+
+    def _artifact_lane(self, worker, *, capability=("playwright",),
+                       deliverable=True, **kwargs):
+        """Drive a real lane with the browser namespace enabled or not."""
+
+        overrides = dict(kwargs.pop("args_overrides", {}))
+        overrides.setdefault("capability", list(capability))
+        overrides.setdefault("report_only", not deliverable)
+        overrides.setdefault("report_deliverable", deliverable)
+        return self._real_lane(
+            worker, args_overrides=overrides,
+            capability_evidence=(self.PLAYWRIGHT_EVIDENCE if capability else None),
+            **kwargs)
+
+    def test_the_namespace_predicate_matches_the_shared_contract_table(self) -> None:
+        """The runner's half of one table the cloud worker asserts too.
+
+        The fixture is the cross-repo anchor: changing the namespace or its caps
+        on one side leaves the other side's assertion failing, so the two halves
+        cannot drift apart the way they did before this repair.
+        """
+
+        table = _report_artifact_name_table()
+        self.assertEqual(cli.BROWSER_REPORT_ARTIFACT_RE.pattern, table["pattern"])
+        self.assertEqual(cli.BROWSER_ARTIFACT_MAX_FILES, table["max_files"])
+        self.assertEqual(cli.BROWSER_ARTIFACT_MAX_BYTES, table["max_bytes"])
+        self.assertEqual(cli.BROWSER_ARTIFACT_MAX_TOTAL_BYTES,
+                         table["max_total_bytes"])
+        for name in table["valid"]:
+            with self.subTest(name=name, verdict="valid"):
+                self.assertTrue(cli._is_browser_report_artifact_name(name), name)
+        for name in table["invalid"]:
+            with self.subTest(name=name, verdict="invalid"):
+                self.assertFalse(cli._is_browser_report_artifact_name(name), name)
+
+    def test_a_playwright_lane_may_leave_named_artifacts(self) -> None:
+        artifacts = (
+            "SIDE_LANE_REPORT-c1-authenticated-home.png",
+            "SIDE_LANE_REPORT-c1-authenticated-home.yml",
+            "SIDE_LANE_REPORT-network-nonstatic.txt",
+        )
+
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+            for name in artifacts:
+                (worktree / name).write_bytes(b"artifact\n")
+
+        for deliverable in (True, False):
+            with self.subTest(report_deliverable=deliverable):
+                code, stdout, errors, publish, _lane, _repo = self._artifact_lane(
+                    worker, deliverable=deliverable)
+                self.assertEqual(code, 0, errors)
+                summary = _only_summary(stdout)
+                self.assertTrue(summary["delivered"])
+                self.assertEqual(summary["report_only_unexpected_paths"], [])
+                self.assertEqual(summary["report_state"], "current")
+                publish.assert_not_called()
+
+    def test_without_the_playwright_grant_the_namespace_is_source_work(self) -> None:
+        """The capability is the gate, not the filenames."""
+
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+            (worktree / "SIDE_LANE_REPORT-c1-home.png").write_bytes(b"artifact\n")
+
+        code, stdout, errors, publish, _lane, _repo = self._artifact_lane(
+            worker, capability=())
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertEqual(summary["report_only_unexpected_paths"],
+                         ["SIDE_LANE_REPORT-c1-home.png"])
+        self.assertIn("SIDE_LANE_REPORT-c1-home.png", errors)
+        publish.assert_not_called()
+
+    def test_a_tracked_change_at_a_namespace_name_is_source_work(self) -> None:
+        """The exemption is the status, exactly as it is for scratch.
+
+        A repository may track a file at a namespace name. Git reports a
+        modification, staging, deletion, rename, or copy of a tracked path with
+        its own code rather than `??`, and accepting the name alone would let a
+        worker edit a tracked source file and still be accepted.
+        """
+
+        artifact = "SIDE_LANE_REPORT-c1-home.png"
+        for label, status in (
+            ("modified", " M"),
+            ("staged", "M "),
+            ("added to the index", "A "),
+            ("deleted", " D"),
+            ("renamed", "R "),
+            ("copied", "C "),
+        ):
+            with self.subTest(label=label):
+                code, stdout, stderr, _launch, _worktree = self._drive(
+                    report_only=False, report_deliverable=True,
+                    capability=("playwright",),
+                    capability_evidence=self.PLAYWRIGHT_EVIDENCE,
+                    worker_writes=((artifact, "artifact\n"),),
+                    report="# Findings\n", delivery=LaneDelivery(
+                        committed=False,
+                        uncommitted=(self.REPORT_NAME, artifact),
+                        changed=(ChangedPath(UNTRACKED, self.REPORT_NAME),
+                                 ChangedPath(status, artifact)),
+                    ))
+                self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+                summary = _only_summary(stdout)
+                self.assertFalse(summary["delivered"])
+                self.assertEqual(summary["report_only_unexpected_paths"], [artifact])
+                self.assertIn(artifact, stderr)
+
+    def test_a_symlinked_artifact_is_refused(self) -> None:
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+            scratch = worktree / ".side-lane-scratch"
+            scratch.mkdir(exist_ok=True)
+            (scratch / "real.png").write_bytes(b"png\n")
+            (worktree / "SIDE_LANE_REPORT-linked.png").symlink_to(
+                scratch / "real.png")
+
+        code, stdout, _errors, _publish, _lane, _repo = self._artifact_lane(worker)
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertEqual(summary["report_only_unexpected_paths"],
+                         ["SIDE_LANE_REPORT-linked.png"])
+
+    def test_an_artifact_over_the_byte_cap_is_refused(self) -> None:
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+            with (worktree / "SIDE_LANE_REPORT-huge.png").open("wb") as handle:
+                handle.truncate(cli.BROWSER_ARTIFACT_MAX_BYTES + 1)
+
+        code, stdout, _errors, _publish, _lane, _repo = self._artifact_lane(worker)
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        self.assertEqual(_only_summary(stdout)["report_only_unexpected_paths"],
+                         ["SIDE_LANE_REPORT-huge.png"])
+
+    def test_the_file_count_and_aggregate_caps_bound_the_namespace(self) -> None:
+        """Over either cap the exception stops applying, and only at the bound.
+
+        Names are ordered, so which of an over-long set falls outside the cap is
+        deterministic: the 41st of 41 files, and the 6th 20 MiB file — the one
+        that would take the total past 100 MiB. Everything up to the cap is
+        still this run's artifact and the lane is refused for the rest.
+        """
+
+        cases = (
+            ("file count", 41, 1),
+            ("aggregate bytes", 6, cli.BROWSER_ARTIFACT_MAX_BYTES),
+        )
+        for label, count, size in cases:
+            with self.subTest(label=label):
+                names = [
+                    "SIDE_LANE_REPORT-%02d.png" % index for index in range(count)
+                ]
+
+                def worker(worktree, _repo, names=tuple(names), size=size):
+                    self._write_report(worktree)
+                    for name in names:
+                        with (worktree / name).open("wb") as handle:
+                            handle.truncate(size)
+
+                code, stdout, _errors, _publish, _lane, _repo = (
+                    self._artifact_lane(worker))
+                self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+                self.assertEqual(
+                    _only_summary(stdout)["report_only_unexpected_paths"],
+                    [names[-1]])
+
+    def test_a_fresh_report_is_still_required_beside_the_artifacts(self) -> None:
+        def worker(worktree, _repo):
+            (worktree / "SIDE_LANE_REPORT-c1-home.png").write_bytes(b"artifact\n")
+
+        code, stdout, errors, publish, _lane, _repo = self._artifact_lane(worker)
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertEqual(summary["report_state"], "unusable")
+        self.assertIn(self.REPORT_NAME, errors)
+        publish.assert_not_called()
+
+    def test_an_inherited_report_beside_artifacts_is_still_stale(self) -> None:
+        def worker(worktree, _repo):
+            (worktree / "SIDE_LANE_REPORT-c1-home.png").write_bytes(b"artifact\n")
+
+        code, stdout, _errors, _publish, _lane, _repo = self._artifact_lane(
+            worker, tracked_report=self.INHERITED)
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertEqual(summary["report_state"], "stale")
+
+    def test_verify_that_rewrites_an_artifact_is_refused(self) -> None:
+        """Artifact identity is rechecked after `--verify`, like report state.
+
+        A rewrite in place leaves the path and its untracked status exactly as
+        they were, so a name-set comparison would absorb it silently and accept
+        a lane the run never judged.
+        """
+
+        artifact = "SIDE_LANE_REPORT-c1-home.png"
+
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+            (worktree / artifact).write_bytes(b"png\n")
+
+        code, stdout, errors, _publish, _lane, _repo = self._artifact_lane(
+            worker, verify="printf 'rewritten by verify\\n' > " + artifact)
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        summary = _only_summary(stdout)
+        self.assertTrue(summary["verified"])
+        self.assertFalse(summary["delivered"])
+        self.assertEqual(len(summary["report_only_verification_changes"]), 1)
+        self.assertIn("report artifacts",
+                      summary["report_only_verification_changes"][0])
+        self.assertIn("--verify changed what this report-only run had judged",
+                      errors)
+
+    @unittest.skipUnless(
+        hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_NONBLOCK"),
+        "requires safe artifact-open primitives",
+    )
+    def test_verify_that_leaves_an_artifact_alone_still_delivers(self) -> None:
+        """A successful `--verify` does not itself fail an artifact lane.
+
+        The before state used to be built without the accepted artifact
+        identities the after state carries, so the two could never be equal:
+        every lane that left a browser artifact and ran a `--verify` that
+        touched nothing was refused for a change the command had not made.
+        """
+
+        artifact = "SIDE_LANE_REPORT-c1-home.png"
+
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+            (worktree / artifact).write_bytes(b"png\n")
+
+        code, stdout, errors, _publish, _lane, _repo = self._artifact_lane(
+            worker, verify="printf 'verify ok\\n'")
+        self.assertEqual(code, 0, errors)
+        summary = _only_summary(stdout)
+        self.assertTrue(summary["verified"])
+        self.assertTrue(summary["delivered"])
+        self.assertEqual(summary["report_only_verification_changes"], [])
+
+    def test_an_accepted_artifact_nobody_could_read_is_unverifiable(self) -> None:
+        """An unreadable artifact is refused, not accepted as unchanged.
+
+        The comparison is between two identities, and two unreadable ones are
+        equal: without the refusal this state would be read as "the command
+        changed nothing" and the lane accepted on an artifact no look in the
+        run could read. A ``None`` on one side only is no better — the run
+        still cannot say what it judged — so every mixed and matching pair is
+        refused rather than one of them slipping past as a difference that
+        happened to be noticed.
+        """
+
+        artifact = "SIDE_LANE_REPORT-c1-home.png"
+        report_path = Path("/lane") / report_stop_hook.REPORT_NAME
+        read_identity = "sha256:read:size:4"
+
+        def state(identity):
+            return cli._ReportOnlyState(
+                committed=False,
+                unexpected=(),
+                source_changes=(),
+                report_identity="sha256:report:size:1",
+                artifacts=((artifact, identity),),
+            )
+
+        for label, before_identity, after_identity in (
+            ("unreadable in both looks", None, None),
+            ("unreadable before only", None, read_identity),
+            ("unreadable after only", read_identity, None),
+        ):
+            with self.subTest(label=label):
+                changes = cli._report_only_verification_changes(
+                    state(before_identity), state(after_identity),
+                    report_path=report_path,
+                )
+                self.assertEqual(len(changes), 1, changes)
+                self.assertIn("cannot be read as a plain file", changes[0])
+                self.assertIn(artifact, changes[0])
+        with self.subTest(label="read and unchanged in both looks"):
+            self.assertEqual(
+                cli._report_only_verification_changes(
+                    state(read_identity), state(read_identity),
+                    report_path=report_path,
+                ),
+                (),
+            )
+
+    def test_a_build_that_cannot_open_safely_refuses_the_artifact_lane(self) -> None:
+        """No safe-open primitives means no artifact verdict, not a pass.
+
+        With the flags absent, every accepted artifact's identity is ``None``
+        in both looks, so this is the end-to-end shape of the unverifiable
+        state above: the artifact is admitted by name, status, and size, and
+        no read of it is possible. The lane is refused and the summary carries
+        the reason rather than a delivery this run never judged.
+        """
+
+        artifact = "SIDE_LANE_REPORT-c1-home.png"
+
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+            (worktree / artifact).write_bytes(b"png\n")
+
+        with mock.patch.object(cli, "_ARTIFACT_NOFOLLOW_OPEN", None):
+            code, stdout, errors, _publish, _lane, _repo = self._artifact_lane(
+                worker, verify="printf 'verify ok\\n'")
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        summary = _only_summary(stdout)
+        self.assertTrue(summary["verified"])
+        self.assertFalse(summary["delivered"])
+        changes = summary["report_only_verification_changes"]
+        self.assertEqual(len(changes), 1, changes)
+        self.assertIn("cannot be read as a plain file", changes[0])
+        self.assertIn(artifact, changes[0])
+        self.assertIn("--verify changed what this report-only run had judged",
+                      errors)
+
+    @unittest.skipUnless(
+        hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_NONBLOCK"),
+        "requires safe artifact-open primitives",
+    )
+    def test_a_same_length_rewrite_past_the_sampled_prefix_is_refused(self) -> None:
+        """The artifact identity reads the whole admitted file, not a prefix.
+
+        The report's own identity rule samples a bounded prefix, which is the
+        right bargain for the report and the wrong one for this namespace: an
+        artifact is admitted up to ``BROWSER_ARTIFACT_MAX_BYTES``, so a rewrite
+        in place that keeps the length and lands past that prefix leaves a
+        sampled identity — and a whole name-set comparison — unchanged, and the
+        lane would be accepted on a state the run never judged. Hashing the
+        whole admitted file is what distinguishes the two, and the identical
+        accepted artifact beside it is what proves the refusal is the change
+        and not the size.
+        """
+
+        artifact = "SIDE_LANE_REPORT-c1-long.png"
+        offset = report_stop_hook.MAX_IDENTITY_BYTES
+        self.assertLess(offset, cli.BROWSER_ARTIFACT_MAX_BYTES)
+
+        def worker(worktree, _repo):
+            self._write_report(worktree)
+            with (worktree / artifact).open("wb") as handle:
+                handle.truncate(cli.BROWSER_ARTIFACT_MAX_BYTES)
+
+        def rewrite(path):
+            return (
+                "python3 -c \"f=open('%s','r+b');f.seek(%d);f.write(b'X');"
+                "f.close()\"" % (path, offset)
+            )
+
+        for label, verify, delivered in (
+            ("rewritten in place past the sampled prefix", rewrite(artifact), False),
+            ("untouched at the artifact cap", "printf 'verify ok\\n'", True),
+        ):
+            with self.subTest(label=label):
+                code, stdout, errors, _publish, _lane, _repo = self._artifact_lane(
+                    worker, verify=verify)
+                summary = _only_summary(stdout)
+                self.assertTrue(summary["verified"])
+                self.assertEqual(summary["delivered"], delivered, errors)
+                self.assertEqual(
+                    code, 0 if delivered else cli.LANE_NOT_DELIVERED, errors)
+                changes = summary["report_only_verification_changes"]
+                if delivered:
+                    self.assertEqual(changes, [])
+                else:
+                    self.assertEqual(len(changes), 1)
+                    self.assertIn("report artifacts", changes[0])
+                    self.assertIn(artifact, changes[0])
+                    self.assertIn("--verify changed what this report-only run "
+                                  "had judged", errors)
+
+    def test_a_browser_report_lane_that_mutates_the_checkout_still_fails(self) -> None:
+        def worker(worktree, repo):
+            self._write_report(worktree)
+            (worktree / "SIDE_LANE_REPORT-c1-home.png").write_bytes(b"artifact\n")
+            (repo / "stray-report.md").write_text("outside the lane\n",
+                                                  encoding="utf-8")
+
+        code, stdout, errors, _publish, _lane, _repo = self._artifact_lane(worker)
+        self.assertEqual(code, cli.LANE_SOURCE_MUTATED)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertEqual(summary["source_changes"], ["stray-report.md"])
+        self.assertIn("stray-report.md", errors)
+
+
+class ArtifactIdentitySafeOpenTests(unittest.TestCase):
+    """``_artifact_identity`` reads the file ``lstat`` confirmed, or nothing.
+
+    The path can be swapped between the caller's ``lstat`` and the open — that
+    is the whole reason the look cannot be ``open(path, "rb")`` — so these
+    tests drive the swap for real: the name is replaced after the stat was
+    taken, and only the patched ``lstat`` still describes the file that was
+    there. What the open then does with the swapped name is the subject.
+    """
+
+    def setUp(self) -> None:
+        self.directory = Path(tempfile.mkdtemp(prefix="artifact-safe-open-"))
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.artifact = self.directory / "SIDE_LANE_REPORT-c1-home.png"
+
+    def _stale_lstat(self, info):
+        """The ``lstat`` a caller took, for a name that has changed since."""
+
+        return mock.patch.object(cli.os, "lstat", return_value=info)
+
+    def _recording_open(self, seen, *, require):
+        """``os.open`` that records its flags, and refuses a dangerous one.
+
+        The refusal is what keeps this test from hanging the suite: a real
+        read-only open of a FIFO without the safe flag waits for a writer, so
+        a regression that drops the flag has to fail here instead of blocking.
+        """
+
+        real_open = os.open
+
+        def open_with_flags(path, flags, *args, **kwargs):
+            seen.append(flags)
+            if not all(flags & flag for flag in require):
+                raise AssertionError(
+                    f"os.open called without {require!r}: {flags!r} would "
+                    "follow a swapped link or block on a swapped FIFO"
+                )
+            return real_open(path, flags, *args, **kwargs)
+
+        return mock.patch.object(cli.os, "open", side_effect=open_with_flags)
+
+    @unittest.skipUnless(
+        hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_NONBLOCK"),
+        "requires safe artifact-open primitives",
+    )
+    def test_a_symlink_swapped_in_after_lstat_is_not_followed(self) -> None:
+        """The swapped name is refused, never read through to its target.
+
+        ``lstat`` confirmed the plain file that was there; by the time the
+        open runs, the name is a link to a file this lane did not deliver. An
+        identity for that file would be an identity of foreign content.
+        """
+
+        self.artifact.write_bytes(b"artifact\n")
+        info = os.lstat(self.artifact)
+        elsewhere = self.directory / "elsewhere.png"
+        elsewhere.write_bytes(b"content this lane did not deliver\n")
+        self.artifact.unlink()
+        self.artifact.symlink_to(elsewhere)
+
+        seen: list[int] = []
+        with self._stale_lstat(info), self._recording_open(
+            seen, require=(os.O_NOFOLLOW,)
+        ):
+            self.assertIsNone(cli._artifact_identity(self.artifact))
+        self.assertEqual(len(seen), 1)
+
+    @unittest.skipUnless(
+        hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_NONBLOCK") and hasattr(os, "mkfifo"),
+        "requires safe artifact-open primitives",
+    )
+    def test_a_fifo_swapped_in_after_lstat_neither_blocks_nor_is_read(self) -> None:
+        """A swapped FIFO is refused without waiting for a writer.
+
+        The read-only open of a FIFO is the operation that blocks, so the flag
+        that prevents it is required here, and the descriptor that comes back
+        is a FIFO rather than the regular file ``lstat`` described.
+        """
+
+        self.artifact.write_bytes(b"artifact\n")
+        info = os.lstat(self.artifact)
+        self.artifact.unlink()
+        os.mkfifo(self.artifact)
+
+        seen: list[int] = []
+        with self._stale_lstat(info), self._recording_open(
+            seen, require=(os.O_NOFOLLOW, os.O_NONBLOCK)
+        ):
+            self.assertIsNone(cli._artifact_identity(self.artifact))
+        self.assertEqual(len(seen), 1)
+
+    def test_open_flags_this_build_lacks_fail_closed(self) -> None:
+        """Without either safe flag the artifact is not opened at all.
+
+        The fallback is the unchecked ``open`` this helper replaces — it would
+        follow the swapped name — so an absent flag has to mean ``None``
+        rather than an open with whatever is left.
+        """
+
+        self.artifact.write_bytes(b"artifact\n")
+        for name in ("_ARTIFACT_NOFOLLOW_OPEN", "_ARTIFACT_NONBLOCK_OPEN"):
+            with self.subTest(missing=name):
+                with mock.patch.object(cli, name, None), mock.patch.object(
+                    cli.os, "open",
+                    side_effect=AssertionError("opened without the safe flags"),
+                ):
+                    self.assertIsNone(cli._artifact_identity(self.artifact))
+
+    @unittest.skipUnless(
+        hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_NONBLOCK"),
+        "requires safe artifact-open primitives",
+    )
+    def test_the_descriptor_must_be_the_file_lstat_was_taken_of(self) -> None:
+        """Same content is not the same file: the descriptor is identity-checked.
+
+        The check is the device and inode ``lstat`` reported, so a name that
+        now points at another file — even one holding the same bytes — is not
+        what the caller judged and cannot be what it read.
+        """
+
+        self.artifact.write_bytes(b"artifact\n")
+        other = self.directory / "same-bytes.png"
+        other.write_bytes(b"artifact\n")
+
+        self.assertIsNone(cli._open_artifact(self.artifact, os.lstat(other)))
+        descriptor = cli._open_artifact(self.artifact, os.lstat(self.artifact))
+        self.assertIsNotNone(descriptor)
+        if descriptor is not None:
+            os.close(descriptor)
+
+    @unittest.skipUnless(
+        hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_NONBLOCK"),
+        "requires safe artifact-open primitives",
+    )
+    def test_the_descriptor_is_closed_when_the_checked_file_is_not_what_opened(
+        self,
+    ) -> None:
+        """The refusal path releases the descriptor it opened.
+
+        The close is recorded and the descriptor is then shown to be closed,
+        so a leak — the one thing a fail-closed open path must not do — cannot
+        pass as a mere ``None``.
+        """
+
+        self.artifact.write_bytes(b"artifact\n")
+        other = self.directory / "other.png"
+        other.write_bytes(b"other\n")
+        closed: list[int] = []
+        real_close = os.close
+
+        def record(descriptor):
+            closed.append(descriptor)
+            return real_close(descriptor)
+
+        with mock.patch.object(cli.os, "close", side_effect=record):
+            self.assertIsNone(cli._open_artifact(self.artifact, os.lstat(other)))
+        self.assertEqual(len(closed), 1)
+        with self.assertRaises(OSError):
+            os.fstat(closed[0])
+
+    @unittest.skipUnless(
+        hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_NONBLOCK"),
+        "requires safe artifact-open primitives",
+    )
+    def test_an_unchanged_artifact_keeps_one_identity_and_a_rewrite_another(
+        self,
+    ) -> None:
+        """The identity is the whole file, so unchanged is equal and changed is not.
+
+        The report's own identity samples a prefix; this one does not, because
+        the namespace admits files larger than that sample.
+        """
+
+        self.artifact.write_bytes(b"artifact\n")
+        first = cli._artifact_identity(self.artifact)
+        self.assertEqual(first, cli._artifact_identity(self.artifact))
+        self.assertTrue(first.startswith("sha256:"))
+        self.assertTrue(first.endswith(":size:9"))
+
+        self.artifact.write_bytes(b"Artifact\n")
+        self.assertNotEqual(first, cli._artifact_identity(self.artifact))

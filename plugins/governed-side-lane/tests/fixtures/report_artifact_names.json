@@ -1,0 +1,40 @@
+{
+  "description": "One accept/refuse table for the browser-report artifact namespace, shared by the runner's report verdict and the cloud worker's collector. The namespace is `SIDE_LANE_REPORT-<safe-name>.<ext>` at the lane root: a report run granted `playwright` may leave those files untracked beside its report, and nothing else changes about the report contract. `pattern`, `max_files`, `max_bytes`, and `max_total_bytes` are here, not in either side's source, so a change to the namespace or its caps fails on both sides until both agree: the runner asserts them against `cli.BROWSER_REPORT_ARTIFACT_RE` and the `BROWSER_ARTIFACT_MAX_*` constants, and the cloud counterpart asserts them against `pipeline._BROWSER_REPORT_ARTIFACT_RE` and `pipeline._BROWSER_ARTIFACT_MAX_*`.",
+  "pattern": "^SIDE_LANE_REPORT-[A-Za-z0-9_-]+\\.(png|jpg|jpeg|webp|yaml|yml|json|txt|md)$",
+  "max_files": 40,
+  "max_bytes": 20971520,
+  "max_total_bytes": 104857600,
+  "valid": [
+    "SIDE_LANE_REPORT-screenshot-1.png",
+    "SIDE_LANE_REPORT-c1-authenticated-home.png",
+    "SIDE_LANE_REPORT-c2-terminal-before-reload.png",
+    "SIDE_LANE_REPORT-network-nonstatic.txt",
+    "SIDE_LANE_REPORT-trace.yml",
+    "SIDE_LANE_REPORT-data.yaml",
+    "SIDE_LANE_REPORT-har.json",
+    "SIDE_LANE_REPORT-notes.md",
+    "SIDE_LANE_REPORT-shot.jpg",
+    "SIDE_LANE_REPORT-shot.jpeg",
+    "SIDE_LANE_REPORT-shot.webp",
+    "SIDE_LANE_REPORT-a_b-c.png"
+  ],
+  "invalid": [
+    "SIDE_LANE_REPORT.md",
+    "SIDE_LANE_REPORT-.png",
+    "SIDE_LANE_REPORT-foo.exe",
+    "SIDE_LANE_REPORT-foo.har",
+    "SIDE_LANE_REPORT-foo.zip",
+    "SIDE_LANE_REPORT-foo.PNG",
+    "SIDE_LANE_REPORT-foo..png",
+    "SIDE_LANE_REPORT-foo.",
+    "SIDE_LANE_REPORT-f o.png",
+    "SIDE_LANE_REPORT-shot.png ",
+    "SIDE_LANE_REPORT-shot.png\n",
+    "SIDE_LANE_REPORT-sub/dir.png",
+    "SIDE_LANE_REPORT-/../../etc/passwd",
+    "SIDE_LANE_REPORT-foo.png/bar",
+    "side_lane_report-foo.png",
+    "not-the-prefix.png",
+    ""
+  ]
+}

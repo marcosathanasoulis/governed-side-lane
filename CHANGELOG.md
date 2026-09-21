@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.44 - 2026-09-21
+
+- Add execute-only `--report-deliverable` for fresh, uncommitted reports across worker hosts. Preserve the separate Claude `--report-only` budget and Stop-hook contract, source-change checks, native failures, and no-publication behavior.
+- Permit the exact bounded browser-report artifact namespace only with the Playwright capability. Verify complete admitted artifact contents with safe file opening and fail closed for unreadable identities; preserve tracked-file, commit, count, and size guards.
+
 ## 0.4.43 - 2026-09-21
 
 - Authorize task-scoped `curl` HTTP debugging for execute lanes via `Bash(curl *)`. The grant is bounded by explicit task authority over target class, methods, and payloads; authenticated API calls are allowed only through existing account mechanisms; raw credentials, redirects, cloud metadata, and unapproved private targets remain prohibited. Review lanes still receive no `curl` allowlist. Add regression coverage for the execute/review boundary and Devin `Exec(curl)` rendering.
