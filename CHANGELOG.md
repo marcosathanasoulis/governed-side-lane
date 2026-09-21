@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.38 - 2026-09-21
+
+- Make routed Claude MCP launch arguments parser-safe and validate readiness against the exact disposable per-run bundle instead of a potentially ignored dynamic `mcp get` configuration.
+
 ## 0.4.37 - 2026-09-21
 
 - Add the optional `gateway-read` capability for the exact cm-services run status and report tools on Claude and Devin. Preserve server-side target-run grants, strict review exclusion, and presence-only capability evidence. Stop emitting cm-services startup instructions for unrelated graph or Slack grants.

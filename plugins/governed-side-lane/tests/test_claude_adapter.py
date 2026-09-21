@@ -542,6 +542,134 @@ class ClaudeAdapterTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("demo@local", result.stdout)
 
+    def test_strict_command_uses_parser_safe_mcp_config_form(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            command = claude.build_command(
+                executable="claude", repo=repo, worktree=lane, provider="omniroute",
+                model="kimi-k2.6", provider_config={"gateway": "omniroute-router", "auth_method": "provider-key", "billable": True, "base_url": "https://omniroute.example"},
+                model_config={"runtime_model": "kimi-k2.6", "protocol": "anthropic-compatible", "qualification": {"verified": True, "verified_on": "2026-09-21", "source": "test"}, "routing_policy_contract": {"requested_selector": "kimi-k2.6", "allowed_upstream_models": ["kimi-k2.6"], "settings_precedence": "verified"}},
+                prompt="task", capabilities=("gateway-read",),
+                strict_mcp_config_path=root / "strict.json", strict_mcp_support=True,
+            )
+        index = command.index("--strict-mcp-config")
+        self.assertEqual(command[index + 1], f"--mcp-config={root / 'strict.json'}")
+
+    def test_strict_readiness_cleans_temp_registry_when_bundle_install_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundle = root / "broken.json"
+            bundle.write_text("{}", encoding="utf-8")
+            probe_dir = root / "probe"
+            with mock.patch.object(claude.tempfile, "mkdtemp", return_value=str(probe_dir)), \
+                 mock.patch.object(claude, "_install_strict_readiness_config", side_effect=claude.ClaudeAdapterError("broken bundle")), \
+                 mock.patch.object(claude.shutil, "rmtree") as cleanup:
+                with self.assertRaisesRegex(claude.ClaudeAdapterError, "broken bundle"):
+                    claude._require_mcp_readiness(
+                        executable="claude", cwd=root, capabilities=("gateway-read",),
+                        env={}, runner=SUPPORTS_STRICT_MCP, strict_mcp_config_path=bundle,
+                    )
+            cleanup.assert_called_once_with(probe_dir, ignore_errors=True)
+
+    def test_strict_readiness_fake_cli_rejects_invalid_bundle_despite_global_server(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_dir = root / "config"
+            config_dir.mkdir()
+            (config_dir / ".claude.json").write_text(
+                json.dumps({"mcpServers": {"cm-services": {"command": "global-server"}}}),
+                encoding="utf-8",
+            )
+            fake = root / "fake-claude"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                "if sys.argv[1:] == ['--help']:\n"
+                " print('--strict-mcp-config')\n"
+                " raise SystemExit(0)\n"
+                "cfg = json.load(open(os.path.join(os.environ['CLAUDE_CONFIG_DIR'], '.claude.json')))\n"
+                "servers = cfg.get('mcpServers', {})\n"
+                "if len(sys.argv) >= 4 and sys.argv[1:4] == ['mcp', 'get', 'cm-services'] and 'cm-services' in servers:\n"
+                " print('cm-services:')\n"
+                " print('  Status: Connected')\n"
+                "else:\n"
+                " print('cm-services:')\n"
+                " print('  Status: Failed')\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            empty_bundle = root / "empty.json"
+            empty_bundle.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+            claude._install_strict_readiness_config(config_dir, empty_bundle)
+            claude._strict_mcp_executable_cache.pop(str(fake), None)
+            with self.assertRaisesRegex(claude.ClaudeAdapterError, "not ready before worker launch"):
+                claude._require_mcp_readiness(
+                    executable=str(fake), cwd=root, capabilities=("gateway-read",),
+                    env={"CLAUDE_CONFIG_DIR": str(config_dir)}, runner=claude._bounded_process,
+                    strict_mcp_config_path=empty_bundle,
+                )
+
+    def test_strict_readiness_fake_cli_accepts_valid_exact_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_dir = root / "config"
+            config_dir.mkdir()
+            (config_dir / ".claude.json").write_text(
+                json.dumps({"mcpServers": {"cm-services": {"command": "global-server"}}}),
+                encoding="utf-8",
+            )
+            fake = root / "fake-claude"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                "if sys.argv[1:] == ['--help']:\n"
+                " print('--strict-mcp-config')\n"
+                " raise SystemExit(0)\n"
+                "cfg = json.load(open(os.path.join(os.environ['CLAUDE_CONFIG_DIR'], '.claude.json')))\n"
+                "servers = cfg.get('mcpServers', {})\n"
+                "if sys.argv[1:4] == ['mcp', 'get', 'cm-services'] and servers.get('cm-services', {}).get('command') == 'exact-server':\n"
+                " print('cm-services:')\n"
+                " print('  Status: Connected')\n"
+                "else:\n"
+                " print('cm-services:')\n"
+                " print('  Status: Failed')\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            bundle = root / "exact.json"
+            bundle.write_text(json.dumps({"mcpServers": {"cm-services": {"command": "exact-server"}}}), encoding="utf-8")
+            claude._install_strict_readiness_config(config_dir, bundle)
+            claude._strict_mcp_executable_cache.pop(str(fake), None)
+            claude._require_mcp_readiness(
+                executable=str(fake), cwd=root, capabilities=("gateway-read",),
+                env={"CLAUDE_CONFIG_DIR": str(config_dir)}, runner=claude._bounded_process,
+                strict_mcp_config_path=bundle,
+            )
+
+    def test_strict_readiness_uses_exact_disposable_bundle_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_dir = root / "config"
+            config_dir.mkdir()
+            (config_dir / ".claude.json").write_text(
+                json.dumps({"mcpServers": {"cm-services": {"command": "global-server"}}}),
+                encoding="utf-8",
+            )
+            bundle_path = root / "strict.json"
+            exact = {"mcpServers": {"cm-services": {"command": "exact-server"}}}
+            bundle_path.write_text(json.dumps(exact), encoding="utf-8")
+            claude._install_strict_readiness_config(config_dir, bundle_path)
+            self.assertEqual(json.loads((config_dir / ".claude.json").read_text())["mcpServers"], exact["mcpServers"])
+            probe = mock.Mock(return_value=subprocess.CompletedProcess(
+                [], 0, "cm-services:\n  Status: ✔ Connected\n", ""))
+            claude._require_mcp_readiness(
+                executable="claude", cwd=root, capabilities=("gateway-read",),
+                env={"CLAUDE_CONFIG_DIR": str(config_dir)}, runner=probe,
+                strict_mcp_config_path=bundle_path,
+            )
+            self.assertEqual(probe.call_args.args[0], ["claude", "mcp", "get", "cm-services"])
+
     def test_playwright_execute_approves_only_the_requested_project_server(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

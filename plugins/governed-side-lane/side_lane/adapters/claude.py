@@ -1189,7 +1189,7 @@ def build_command(
             # to prevent loading of any inherited MCP registrations. The bundle
             # already contains the per-run servers, user-scope registrations
             # (cm-services), and lane worktree .mcp.json servers.
-            command.extend(("--strict-mcp-config", "--mcp-config", str(strict_mcp_config_path)))
+            command.extend(("--strict-mcp-config", f"--mcp-config={strict_mcp_config_path}"))
         elif mcp_config_path is not None:
             # Native execute lane: additive per-run MCP registration --
             # --strict-mcp-config is deliberately NOT passed, so every existing
@@ -1229,6 +1229,35 @@ def build_command(
     return command
 
 
+def _install_strict_readiness_config(
+    config_dir: Path, bundle_path: Path,
+) -> None:
+    """Replace the disposable Claude registry with the exact routed bundle.
+
+    Claude 2.1.278 treats ``--mcp-config`` as variadic for the ``mcp get``
+    subcommand and can therefore ignore a dynamic bundle while reporting a
+    user-global server as connected.  The routed config directory is already
+    per-run and disposable; putting the validated bundle in its ``.claude.json``
+    gives the readiness probe an exact, isolated registry without touching the
+    user's config or performing a model call.
+    """
+    try:
+        bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ClaudeAdapterError("strict MCP bundle is not readable JSON") from exc
+    if not isinstance(bundle, dict) or not isinstance(bundle.get("mcpServers"), dict):
+        raise ClaudeAdapterError("strict MCP bundle must contain an mcpServers object")
+    config_path = config_dir / ".claude.json"
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ClaudeAdapterError("disposable Claude config is not valid JSON") from exc
+    if not isinstance(config, dict):
+        raise ClaudeAdapterError("disposable Claude config must be an object")
+    config["mcpServers"] = bundle["mcpServers"]
+    _write_private_json(config_path, config)
+
+
 def _require_mcp_readiness(
     *, executable: str, cwd: Path, capabilities: Capabilities,
     env: Mapping[str, str], runner: Runner, secret: str | None = None,
@@ -1254,54 +1283,64 @@ def _require_mcp_readiness(
             "a routed execute lane that requires the strict MCP bundle cannot launch"
         )
 
-    for server in _required_mcp_servers(capabilities):
+    readiness_env = dict(env)
+    readiness_config_dir: Path | None = None
+    try:
         if cli_supports_strict and strict_mcp_config_path is not None:
-            # Use the exact granted strict bundle for the probe — this is the
-            # configuration that will actually be active during the run.
-            command = [
-                executable,
-                "--strict-mcp-config", "--mcp-config", str(strict_mcp_config_path),
-                "mcp", "get", server,
-            ]
-        elif server == "cm-services":
-            # The fixed user-global cm-services server is not a project .mcp.json
-            # entry, so it is probed by bare name across scopes.
-            command = [executable, "mcp", "get", server]
-        else:
-            # Probe the requested server with explicit project approval.  This
-            # is required for project .mcp.json servers such as playwright and
-            # matches the per-launch ``enabledMcpjsonServers`` approval.
-            settings = json.dumps(
-                {"enabledMcpjsonServers": [server]}, separators=(",", ":"), sort_keys=True
+            # Use a private exact-bundle registry for every strict caller,
+            # including direct billable providers that do not use the routed home.
+            readiness_config_dir = Path(tempfile.mkdtemp(prefix=".side-lane-mcp-readiness-"))
+            _install_strict_readiness_config(readiness_config_dir, strict_mcp_config_path)
+            readiness_env["CLAUDE_CONFIG_DIR"] = str(readiness_config_dir)
+        for server in _required_mcp_servers(capabilities):
+            if cli_supports_strict and strict_mcp_config_path is not None:
+                # The exact bundle has already been installed in the disposable
+                # CLAUDE_CONFIG_DIR.  Do not pass --mcp-config to `mcp get`: that
+                # option is variadic and the CLI may consume the subcommand as
+                # additional filenames, or silently fall back to user-global state.
+                command = [executable, "mcp", "get", server]
+            elif server == "cm-services":
+                # The fixed user-global cm-services server is not a project .mcp.json
+                # entry, so it is probed by bare name across scopes.
+                command = [executable, "mcp", "get", server]
+            else:
+                # Probe the requested server with explicit project approval.  This
+                # is required for project .mcp.json servers such as playwright and
+                # matches the per-launch ``enabledMcpjsonServers`` approval.
+                settings = json.dumps(
+                    {"enabledMcpjsonServers": [server]}, separators=(",", ":"), sort_keys=True
+                )
+                command = [executable, "--settings", settings, "mcp", "get", server]
+            try:
+                completed = runner(
+                    command,
+                    timeout=MCP_READINESS_TIMEOUT_SECONDS,
+                    cwd=cwd,
+                    env=readiness_env,
+                    stdin=subprocess.DEVNULL,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise ClaudeAdapterError(f"could not check {server} MCP readiness: {_redact(exc, secret)}") from None
+            stdout = str(getattr(completed, "stdout", "") or "")
+            connected = any(
+                re.search(r"^\s*Status:\s*[^\w]*Connected\s*$", ANSI_ESCAPE.sub("", line), re.I)
+                for line in stdout.splitlines()
             )
-            command = [executable, "--settings", settings, "mcp", "get", server]
-        try:
-            completed = runner(
-                command,
-                timeout=MCP_READINESS_TIMEOUT_SECONDS,
-                cwd=cwd,
-                env=dict(env),
-                stdin=subprocess.DEVNULL,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise ClaudeAdapterError(f"could not check {server} MCP readiness: {_redact(exc, secret)}") from None
-        stdout = str(getattr(completed, "stdout", "") or "")
-        connected = any(
-            re.search(r"^\s*Status:\s*[^\w]*Connected\s*$", ANSI_ESCAPE.sub("", line), re.I)
-            for line in stdout.splitlines()
-        )
-        if int(completed.returncode) != 0 or not connected:
-            status = next(
-                (ANSI_ESCAPE.sub("", line).strip() for line in stdout.splitlines()
-                 if "status:" in line.lower()),
-                "status unavailable",
-            )
-            raise ClaudeAdapterError(
-                f"required MCP server {server!r} is not ready before worker launch ({_redact(status, secret)})"
-            )
+            if int(completed.returncode) != 0 or not connected:
+                status = next(
+                    (ANSI_ESCAPE.sub("", line).strip() for line in stdout.splitlines()
+                     if "status:" in line.lower()),
+                    "status unavailable",
+                )
+                raise ClaudeAdapterError(
+                    f"required MCP server {server!r} is not ready before worker launch ({_redact(status, secret)})"
+                )
+    finally:
+        if readiness_config_dir is not None:
+            shutil.rmtree(readiness_config_dir, ignore_errors=True)
 
 
 def _redact(value: object, secret: str | None) -> str:
@@ -1318,25 +1357,40 @@ def validate_against_capabilities(
     runner: Runner,
     secret: str | None = None,
 ) -> None:
-    """Verify all servers in the strict bundle can be loaded by the CLI.
+    """Verify bundle servers through a private exact registry snapshot.
 
-    Probes each unique server in the bundle with ``--strict-mcp-config`` to
-    confirm it resolves. Raises ``ClaudeAdapterError`` if any server fails.
+    This helper is retained for callers that validate a bundle before launch;
+    it deliberately does not pass ``--mcp-config`` to ``mcp get`` because the
+    CLI option is variadic and may ignore the dynamic file.
     """
     if not strict_mcp_config_path.exists():
         return
-    bundle = json.loads(strict_mcp_config_path.read_text(encoding="utf-8"))
-    servers = bundle.get("mcpServers") or {}
-    for server_name in servers:
-        cmd = [executable, "--strict-mcp-config",
-               "--mcp-config", str(strict_mcp_config_path),
-               "mcp", "get", server_name]
-        result = runner(cmd, cwd=str(cwd), env=env, secret=secret)
-        if result.returncode != 0:
-            raise ClaudeAdapterError(
-                f"required MCP server {server_name!r} is not available: "
-                f"{result.stdout.strip()!r}"
+    readiness_dir = Path(tempfile.mkdtemp(prefix=".side-lane-mcp-validate-"))
+    try:
+        _install_strict_readiness_config(readiness_dir, strict_mcp_config_path)
+        bundle = json.loads(strict_mcp_config_path.read_text(encoding="utf-8"))
+        servers = bundle.get("mcpServers") or {}
+        if not isinstance(servers, dict):
+            raise ClaudeAdapterError("strict MCP bundle must contain an mcpServers object")
+        probe_env = dict(env)
+        probe_env["CLAUDE_CONFIG_DIR"] = str(readiness_dir)
+        for server_name in servers:
+            result = runner(
+                [executable, "mcp", "get", server_name],
+                cwd=str(cwd), env=probe_env, secret=secret,
             )
+            stdout = str(getattr(result, "stdout", "") or "")
+            connected = any(
+                re.search(r"^\s*Status:\s*[^\w]*Connected\s*$", ANSI_ESCAPE.sub("", line), re.I)
+                for line in stdout.splitlines()
+            )
+            if result.returncode != 0 or not connected:
+                raise ClaudeAdapterError(
+                    f"required MCP server {server_name!r} is not available: "
+                    f"{_redact(stdout.strip(), secret)!r}"
+                )
+    finally:
+        shutil.rmtree(readiness_dir, ignore_errors=True)
 
 
 def launch(
