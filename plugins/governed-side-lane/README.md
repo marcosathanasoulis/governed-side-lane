@@ -105,22 +105,45 @@ a report-only outcome is not treated as a source commit or push. Ordinary execut
 and review lanes are untouched, and the flag is rejected before a worktree,
 credential, or host executable is touched anywhere else.
 
-Two checks enforce it. Inside the same invocation, a Claude Code `Stop`
-command hook — this package's own stdlib helper, invoked through the run's
-process-local `--settings` payload with a shell-quoted absolute path — reads
-the fixed report path from its own argument, never from hook stdin, and blocks
-one stop when the report is missing, empty, whitespace-only, a symlink, or not
-a regular file. The hook's stdin event JSON carries `hook_event_name`, `cwd`,
-and `stop_hook_active` alongside fields such as `session_id`,
-`transcript_path`, `permission_mode`, and `last_assistant_message`, the last
-of which can be large; the hook reads a bounded amount and ignores unknown
-fields. The block hands the same model loop a reason to write the real
-report; `stop_hook_active` then lets the next stop through, bounding the
-feedback to one round. No saved settings file, user hook, permission, or
-inherited hook is written, replaced, or disabled. After the worker exits, the
-runner applies the same rule as its own acceptance gate and exits
-`3` (`LANE_NOT_DELIVERED`) if the report is still unusable, so completion prose
-can never be recorded as an accepted delivery.
+Two checks enforce one run-bound freshness rule on one path. `SIDE_LANE_REPORT.md`
+counts only when it differs from what the runner recorded at that path before
+the worker started. A lane worktree is added from HEAD, so a repository that
+tracks `SIDE_LANE_REPORT.md` hands every new lane a complete-looking report no
+worker wrote; path, non-emptiness, and a recent mtime cannot tell that inherited
+file from a real delivery, and an unrelated commit or an empty session would
+otherwise be enough to accept the lane. So, before the worker starts, the runner
+records the SHA-256 of a bounded prefix plus the full size of whatever is at the
+fixed path (`None` when nothing is there), copies a preexisting report into the
+lane's git-excluded `.side-lane-scratch/report-inherited/` so replacing it
+erases no history, and refuses to launch at all when the path is a symlink,
+FIFO, socket, device, or directory — nothing is ever followed, opened, moved, or
+deleted to make a lane start. One recorded object drives both checks: it travels
+with the path in the run's own `--settings` payload, which is process argv fixed
+by the parent rather than a file inside the worker's writable tree, so the hook
+and the acceptance gate cannot drift onto different rules.
+
+Inside the same invocation, a Claude Code `Stop` command hook — this package's
+own stdlib helper, invoked through that `--settings` payload with a shell-quoted
+absolute path — blocks one stop when the report is missing, empty,
+whitespace-only, a symlink, not a regular file, or unchanged from what the lane
+started with. It takes the path and the run baseline from its own argument,
+never from hook stdin, and reads the event JSON (`hook_event_name`, `cwd`,
+`stop_hook_active` alongside fields such as `session_id`, `transcript_path`,
+`permission_mode`, and `last_assistant_message`, the last of which can be large)
+under a bounded read, ignoring unknown fields. The block hands the same model
+loop a reason to write the real report; `stop_hook_active` then lets the next
+stop through, bounding the feedback to one round. An event it cannot trust
+(malformed settings, no run baseline, oversized or unparsable stdin) is allowed
+with a diagnostic — a hook must not wedge a worker — because the runner's
+post-run acceptance is authoritative and fails closed without a baseline. No
+saved settings file, user hook, permission, or inherited hook is written,
+replaced, or disabled. After the worker exits, the runner applies the same rule
+and exits `3` (`LANE_NOT_DELIVERED`) if the report is not this run's own, and the
+summary names the reason (`report_state`: `current`, `stale`, `unusable`, or
+`unverified`) alongside `report_preexisting` and any `report_preserved` copy, so
+completion prose can never be recorded as an accepted delivery. A run that
+rewrites the inherited file, or writes any report when the lane started without
+one, is unaffected.
 
 Scope of the claim: the hook is a quality gate on the lane's own artifact, not
 a sandbox — the same-user harness is not an OS boundary, and the run's existing

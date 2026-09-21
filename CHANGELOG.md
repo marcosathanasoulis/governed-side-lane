@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.35 - 2026-09-21
+
+- Reject inherited unchanged reports in Claude report-only lanes by sharing a prelaunch content baseline between the Stop hook and final report check. Preserve historical reports in lane scratch without following preexisting preservation symlinks. This mechanical freshness check does not establish report quality or change the separate implementation delivery contract.
+
 ## 0.4.34 - 2026-09-21
 
 - Separate a verified included subscription from unknown pricing. A route verified as covered by a subscription the user already pays has a known `$0` additional/marginal usage cost, distinct from an unknown price and from a zero-cost provider key, and it does not make every OAuth or hosted route free — coverage is route-specific and some are metered. A missing empirical median for an otherwise authorized task is measurement absence, not an unknown current price: report the history as unavailable without rewriting it to zero and without alerting or demanding new approval solely because it is missing.

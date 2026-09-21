@@ -110,7 +110,9 @@ SUPPORTED_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 MCP_READINESS_TIMEOUT_SECONDS = 20
 # Report-only execute lanes (`--report-only`) get one deterministic Stop hook
 # inside the same invocation. The filename and action are fixed here; a worker
-# never chooses its own acceptance path.
+# never chooses its own acceptance path, and the hook is armed with the run
+# baseline the runner captured before the worker started, so a report the
+# worktree already contained at HEAD is not mistaken for this run's.
 REPORT_ONLY_REPORT_NAME = "SIDE_LANE_REPORT.md"
 REPORT_ONLY_HOOK_TIMEOUT_SECONDS = 10
 # Process-local controls for routed runs. Compaction starts below the
@@ -914,18 +916,18 @@ def _merge_stop_hook(settings: object, command: str) -> dict[str, Any]:
     return merged
 
 
-def report_only_hook_command(report_path: Path) -> str:
+def report_only_hook_command(baseline: report_stop_hook.ReportBaseline) -> str:
     """Shell-quote the trusted helper invocation that guards one run's stop.
 
     The command is built from the current interpreter, this package's own
-    helper module, and the fixed report path — never from model input or hook
-    stdin. ``shlex.join`` quotes it so a worktree path containing spaces,
-    quotes, or shell metacharacters survives as one argv.
+    helper module, and the run baseline the runner captured — never from model
+    input or hook stdin. ``shlex.join`` quotes it so a worktree path containing
+    spaces, quotes, or shell metacharacters survives as one argv.
     """
 
     helper = Path(report_stop_hook.__file__).resolve()
     settings = json.dumps(
-        {"report_path": str(report_path)}, separators=(",", ":"), sort_keys=True
+        report_stop_hook.hook_settings(baseline), separators=(",", ":"), sort_keys=True
     )
     return shlex.join((sys.executable, str(helper), "--settings", settings))
 
@@ -934,6 +936,31 @@ def report_only_report_path(worktree: Path) -> Path:
     """The one report path a report-only lane is judged on."""
 
     return worktree / REPORT_ONLY_REPORT_NAME
+
+
+def _report_only_baseline(
+    worktree: Path, baseline: report_stop_hook.ReportBaseline | None
+) -> report_stop_hook.ReportBaseline:
+    """The run baseline the Stop hook is armed with.
+
+    The runner captures this before the worker starts and passes it down, so
+    the hook and the runner's post-run acceptance compare against the same
+    recorded state. A direct caller that omits it captures here instead, which
+    is still before any process starts and therefore the same rule.
+
+    An unsafe preexisting path fails closed before a model runs: no honest
+    baseline can be taken from a symlink, FIFO, socket, device, or directory,
+    and silently treating the path as empty would let such an entry stand in
+    for a delivery.
+    """
+    if baseline is not None:
+        return baseline
+    try:
+        return report_stop_hook.capture_report_baseline(
+            report_only_report_path(worktree)
+        )
+    except report_stop_hook.UnsafeReportPath as exc:
+        raise ClaudeAdapterError(f"report-only cannot start: {exc}") from exc
 
 
 def require_report_only_budget(model_config: Mapping[str, Any]) -> str:
@@ -961,7 +988,7 @@ def _per_launch_settings(
     mode: str,
     base_url: str | None = None,
     capabilities: Capabilities = (),
-    report_only_report: Path | None = None,
+    report_only_baseline: report_stop_hook.ReportBaseline | None = None,
 ) -> str:
     """Return nonsecret settings that outrank user/project/local settings.
 
@@ -987,13 +1014,15 @@ def _per_launch_settings(
         if base_url is not None:
             settings["env"]["ANTHROPIC_BASE_URL"] = base_url.rstrip("/")
         settings["alwaysThinkingEnabled"] = True
-    if report_only_report is not None:
+    if report_only_baseline is not None:
         # Process-local only: this hook rides the run's own --settings payload,
         # so no saved settings file, user hook, or permission is written,
         # replaced, or disabled. Inherited hooks keep loading from their own
-        # setting sources alongside this one.
+        # setting sources alongside this one. The run baseline travels in the
+        # same payload, so the hook judges the report against the state this
+        # run started from rather than accepting a file it inherited.
         settings = _merge_stop_hook(
-            settings, report_only_hook_command(report_only_report))
+            settings, report_only_hook_command(report_only_baseline))
     return json.dumps(settings, separators=(",", ":"), sort_keys=True)
 
 
@@ -1040,6 +1069,7 @@ def build_command(
     mcp_config_path: str | Path | None = None,
     run_mcp_servers: "Mapping[str, Any] | None" = None,
     report_only: bool = False,
+    report_baseline: report_stop_hook.ReportBaseline | None = None,
     strict_mcp_config_path: str | Path | None = None,
     strict_mcp_support: bool | None = None,
 ) -> list[str]:
@@ -1052,10 +1082,14 @@ def build_command(
         # The hook rides the execute lane's own argv and settings; a review
         # lane's argv is the strict read-only form and must stay byte-identical.
         raise ClaudeAdapterError("report-only is execute mode only for the Claude host")
+    armed_baseline: report_stop_hook.ReportBaseline | None = None
     if report_only:
         # Fail before the model, not after: the opt-in only makes sense if the
         # Stop hook and the USD cap are both in this one command.
         require_report_only_budget(model_config)
+        # Captured before the worker exists, so the hook can tell this run's
+        # report from one the worktree already contained at HEAD.
+        armed_baseline = _report_only_baseline(worktree_path, report_baseline)
     if read_roots and mode != "execute":
         # A review lane's argv is the strict read-only form; a granted read
         # root cannot be added to it without either assuming the plan-mode
@@ -1124,8 +1158,7 @@ def build_command(
                 "--settings",
                 _per_launch_settings(
                     provider, runtime_model, mode, provider_config.get("base_url"),
-                    capabilities,
-                    report_only_report_path(worktree_path) if report_only else None,
+                    capabilities, armed_baseline,
                 ),
             )
         )
@@ -1312,6 +1345,7 @@ def launch(
     web_domains: Sequence[str] = (),
     run_mcp_servers: "Mapping[str, McpRunServer] | None" = None,
     report_only: bool = False,
+    report_baseline: report_stop_hook.ReportBaseline | None = None,
 ) -> LaneResult:
     if web_domains and mode != "execute":
         # Adapter-level fail-closed mirror of the build_command guard: `launch`
@@ -1394,6 +1428,7 @@ def launch(
             run_mcp_servers=run_mcp_servers,
             run_config_path=run_config_path,
             report_only=report_only,
+            report_baseline=report_baseline,
             strict_mcp_config_path=strict_mcp_config_path,
         )
     finally:
@@ -1430,6 +1465,7 @@ def _launch_worker(
     run_mcp_servers: "Mapping[str, McpRunServer] | None",
     run_config_path: Path | None,
     report_only: bool = False,
+    report_baseline: report_stop_hook.ReportBaseline | None = None,
     strict_mcp_config_path: Path | None = None,
 ) -> LaneResult:
     runtime_model, gateway, auth_method, billable = _route_metadata(
@@ -1482,6 +1518,7 @@ def _launch_worker(
             mcp_config_path=run_config_path,
             run_mcp_servers=run_mcp_servers,
             report_only=report_only,
+            report_baseline=report_baseline,
             strict_mcp_config_path=strict_mcp_config_path,
             strict_mcp_support=strict_mcp_supported,
         )

@@ -38,6 +38,7 @@ from side_lane.adapters.codex import CodexAdapterError
 from side_lane.adapters.devin import DevinAdapterError
 from side_lane.worktrees import (
     ASSIGNMENT_SCHEMA_VERSION,
+    SCRATCH_DIR_NAME,
     AssignmentRecord,
     WorktreeError,
     create_worktree,
@@ -1246,6 +1247,20 @@ LANE_VERIFY_FAILED = 5
 #: source checkout for an accepted lane.
 LANE_SOURCE_MUTATED = 6
 
+# Operator wording for the report-only gate's outcome. ``report_freshness_state``
+# returns the key; "current" never reaches this table because it is the only
+# state that is delivered.
+REPORT_STATE_DETAIL = {
+    "unusable": (
+        "it is missing, empty, whitespace-only, or not a plain file"
+    ),
+    "stale": (
+        "the file there is unchanged from what the lane already contained when "
+        "it started, so this run did not write it"
+    ),
+    "unverified": "no run baseline was captured, so nothing can be claimed about it",
+}
+
 
 def _launch(
     args: argparse.Namespace, config: Mapping[str, Any], repo: Path, prompt: str,
@@ -1384,7 +1399,30 @@ def _launch(
     skill_catalog: list[dict[str, object]] = []
     assignment: AssignmentRecord | None = None
     secret: str | None = None
+    report_baseline: report_stop_hook.ReportBaseline | None = None
     try:
+        if report_only:
+            # Run-bound freshness, captured before anything can write it: what
+            # the fixed report path already holds. A lane worktree is added from
+            # HEAD, so a repository that tracks SIDE_LANE_REPORT.md hands every
+            # new lane a complete-looking report no worker wrote, and an
+            # unrelated commit or an empty session would then satisfy the gate.
+            # Captured here, rather than in the adapter, so the in-loop Stop
+            # hook and the acceptance below compare against one recorded state.
+            # The inherited file is copied into the lane's ignored scratch
+            # (never the coordinator checkout, never deleted) so a worker
+            # overwriting it erases no history.
+            try:
+                report_baseline = report_stop_hook.capture_report_baseline(
+                    lane.worktree / report_stop_hook.REPORT_NAME,
+                    preserve_dir=lane.worktree / SCRATCH_DIR_NAME,
+                )
+            except report_stop_hook.UnsafeReportPath as exc:
+                raise SideLaneError(
+                    f"--report-only cannot start: {exc}. No honest per-run "
+                    "baseline can be taken from it; remove or replace it before "
+                    "dispatching."
+                ) from exc
         if args.mode == "execute":
             # `--skill` is declared by the `run` subparser, like `--verify`
             # and `--no-publish` below, so read it the same tolerant way.
@@ -1466,6 +1504,7 @@ def _launch(
                 web_domains=web_domains,
                 run_mcp_servers=run_mcp_servers,
                 report_only=report_only,
+                report_baseline=report_baseline,
             )
         else:
             from side_lane.adapters.devin import launch
@@ -1612,16 +1651,33 @@ def _launch(
 
     summary["committed"] = delivery.committed
     summary["uncommitted"] = list(delivery.uncommitted)
-    # The runner's own look at the report, on the same rule the in-loop Stop
-    # hook applies. A report-only lane is not delivered until this acceptance
-    # precondition passes; this decision must precede both publication and the
-    # summary so a committed branch cannot be mistaken for an accepted lane.
+    # The runner's own look at the report, on the same rule — and against the
+    # same baseline — the in-loop Stop hook applied. A report is only this
+    # run's artifact when it differs from what the worktree already held at
+    # lane start: non-emptiness and a recent mtime cannot distinguish a real
+    # delivery from a report the repository carried at HEAD. A report-only lane
+    # is not delivered until this acceptance precondition passes; this decision
+    # must precede both publication and the summary so a committed branch
+    # cannot be mistaken for an accepted lane.
     report_present: bool | None = None
+    report_state: str | None = None
+    report_path = lane.worktree / report_stop_hook.REPORT_NAME
     if report_only:
-        report_path = lane.worktree / report_stop_hook.REPORT_NAME
-        report_present = report_stop_hook.report_is_valid(report_path)
+        if report_baseline is not None:
+            report_path = report_baseline.report_path
+        report_state = report_stop_hook.report_freshness_state(report_baseline)
+        report_present = report_state == "current"
         summary["report_present"] = report_present
+        summary["report_state"] = report_state
         summary["report_path"] = str(report_path)
+        summary["report_preexisting"] = bool(
+            report_baseline is not None and report_baseline.preexisting
+        )
+        summary["report_preserved"] = (
+            None
+            if report_baseline is None or report_baseline.preserved_path is None
+            else str(report_baseline.preserved_path)
+        )
     summary["delivered"] = delivery.delivered and (
         not report_only or report_present is True
     )
@@ -1681,17 +1737,18 @@ def _launch(
         return result.returncode
     if report_only and not report_present:
         # One feedback round was already spent inside the invocation; the
-        # report is still not there. A lane that wrote its work but no report
-        # is not an accepted delivery, and the exit code says so rather than
-        # leaving an operator to read the prose. Nothing was removed: the
+        # report is still not this run's. A lane that wrote its work but no
+        # report is not an accepted delivery, and the exit code says so rather
+        # than leaving an operator to read the prose. Nothing was removed: the
         # lane's commit, worktree, and audit are all intact. The outer GCF
         # consumer's own report collection stays authoritative for source
         # changes, containment, sizes, and scrubbing.
         print(
             f"side-lane: --report-only lane produced no usable "
-            f"{report_stop_hook.REPORT_NAME} at {report_path}; the worker's "
-            "completion prose is not the report. The lane's commit and audit "
-            "are intact.",
+            f"{report_stop_hook.REPORT_NAME} at {report_path}: "
+            f"{REPORT_STATE_DETAIL.get(report_state, 'the report could not be judged')}. "
+            "The worker's completion prose is not the report. The lane's commit "
+            "and audit are intact.",
             file=sys.stderr,
         )
         return LANE_NOT_DELIVERED

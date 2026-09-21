@@ -1562,6 +1562,99 @@ class ReportOnlyModeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.strip(), b"")
 
+    # --- the hook is armed with this run's baseline ---------------------------
+
+    def test_opt_in_hook_carries_the_baseline_of_a_preexisting_report(self) -> None:
+        """A lane added from HEAD inherits whatever HEAD tracked at that path."""
+        inherited = "# Inherited from a prior task\n\nFindings: plausible.\n"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            (lane / self.REPORT_NAME).write_text(inherited, encoding="utf-8")
+            command = self.command(repo, lane, report_only=True)
+            settings = json.loads(self.hook_argv(command)[3])
+            self.assertEqual(
+                settings[report_stop_hook.FRESHNESS_KEY][
+                    report_stop_hook.BASELINE_IDENTITY_KEY],
+                report_stop_hook.report_identity(
+                    (lane / self.REPORT_NAME).resolve()),
+            )
+            # The inherited file is preserved in the lane's ignored scratch
+            # before any worker can overwrite it.
+            preserved = (
+                lane / report_stop_hook.SCRATCH_DIR_NAME
+                / report_stop_hook.PRESERVED_DIR_NAME / self.REPORT_NAME
+            )
+            self.assertEqual(preserved.read_text(encoding="utf-8"), inherited)
+            self.assertEqual(
+                (lane / self.REPORT_NAME).read_text(encoding="utf-8"), inherited)
+
+            # Armed with that baseline, the untouched inherited report satisfies
+            # nothing: the hook asks for this run's own report.
+            result = self._run_installed_hook(command, {
+                "hook_event_name": "Stop", "cwd": str(repo), "stop_hook_active": False})
+
+            # Rewriting it does.
+            (lane / self.REPORT_NAME).write_text(
+                "# Findings\n- this run's own finding\n", encoding="utf-8")
+            rewritten = self._run_installed_hook(command, {
+                "hook_event_name": "Stop", "cwd": str(repo), "stop_hook_active": False})
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(
+            json.loads(result.stdout.decode("utf-8"))["decision"], "block")
+        self.assertEqual(rewritten.returncode, 0)
+        self.assertEqual(rewritten.stdout.strip(), b"")
+
+    def test_explicit_run_baseline_is_what_the_hook_judges(self) -> None:
+        """The runner's captured state wins over a fresh look at the lane."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            report = lane / self.REPORT_NAME
+            # The run started before that file existed, which is the ordinary
+            # case: nothing was at the path, so any valid report is this run's.
+            baseline = report_stop_hook.capture_report_baseline(report)
+            self.assertIsNone(baseline.identity)
+            report.write_text("# Findings\n- item\n", encoding="utf-8")
+            command = self.command(repo, lane, report_only=True,
+                                   report_baseline=baseline)
+            settings = json.loads(self.hook_argv(command)[3])
+            self.assertIsNone(
+                settings[report_stop_hook.FRESHNESS_KEY][
+                    report_stop_hook.BASELINE_IDENTITY_KEY])
+            result = self._run_installed_hook(command, {
+                "hook_event_name": "Stop", "cwd": str(repo), "stop_hook_active": False})
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), b"")
+
+    def test_unsafe_preexisting_report_path_is_refused_before_the_model(self) -> None:
+        for label in ("symlink", "directory"):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+                report = lane / self.REPORT_NAME
+                if label == "symlink":
+                    (lane / "real.md").write_text("# Findings\n", encoding="utf-8")
+                    report.symlink_to(lane / "real.md")
+                else:
+                    report.mkdir()
+                runner = mock.Mock(
+                    return_value=subprocess.CompletedProcess([], 0, "done", ""))
+                with self.assertRaises(claude.ClaudeAdapterError) as caught:
+                    claude.launch(
+                        executable="claude", repo=repo, worktree=lane, provider="claude",
+                        model="claude-sonnet-5", provider_config=self.native,
+                        model_config=self.native_model_config(max_budget_usd=2.5),
+                        prompt="task", mode="execute", env={"PATH": "/bin"},
+                        runner=runner, report_only=True,
+                        readiness_runner=SUPPORTS_STRICT_MCP,
+                    )
+                self.assertIn(label, str(caught.exception))
+                runner.assert_not_called()
+                # Nothing was removed or replaced to make the lane launchable.
+                self.assertTrue(report.is_symlink() if label == "symlink"
+                                else report.is_dir())
+
     def test_installed_hook_is_shell_safe_for_awkward_worktree_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "lane with 'quotes' & $(spaces)"

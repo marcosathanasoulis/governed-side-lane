@@ -3,12 +3,13 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
 from unittest import mock
 
-from side_lane import cli
+from side_lane import cli, report_stop_hook
 from side_lane.results import LaneResult
 from side_lane.worktrees import LaneDelivery, VerifyResult, WorktreeError
 
@@ -2015,29 +2016,14 @@ class ReportOnlyCliTests(unittest.TestCase):
         values.update(overrides)
         return mock.Mock(**values)
 
-    def _drive(self, *, report_only=True, report=None, model_config=None,
-               host="claude", mode="execute", no_publish=True):
-        """Run _launch through a mocked Claude adapter; return what happened.
+    @contextlib.contextmanager
+    def _patched(self, repo, lane, launch, *, model_config=None, create=None):
+        """The hermetic CLI environment: no host executable, git, or network.
 
-        ``report`` is written into the lane worktree by the fake adapter, the
-        way a worker would, so the real post-run gate is what is under test.
+        ``create`` replaces the worktree factory when a test wants the real one
+        (the default is a mock returning ``lane``). Yields the
+        ``publish_lane_branch`` and ``dispose_clean_worktree`` mocks.
         """
-
-        repo = self.repo()
-        worktree = repo / "execute-worktree"
-        lane = mock.Mock(worktree=worktree, branch="side-lane/task-1")
-        result = LaneResult(
-            ("claude",), 0, worktree, "claude", "claude", "native-claude",
-            "claude-sonnet-5", "oauth", False, "done", "",
-        )
-
-        def fake_launch(*_args, **_kwargs):
-            if report is not None:
-                worktree.mkdir(parents=True, exist_ok=True)
-                (worktree / self.REPORT_NAME).write_text(report, encoding="utf-8")
-            return result
-
-        launch = mock.MagicMock(side_effect=fake_launch)
         claude_route = (
             {"gateway": "native-claude", "auth_method": "oauth", "billable": False},
             model_config if model_config is not None
@@ -2045,10 +2031,12 @@ class ReportOnlyCliTests(unittest.TestCase):
                   "max_budget_usd": 2.5},
         )
         with (
+            mock.patch("side_lane.cli.create_worktree",
+                       **({"side_effect": create} if create is not None
+                          else {"return_value": lane})),
             mock.patch("side_lane.cli._require_host_executable",
                        return_value="/opt/hosts/claude"),
             mock.patch("side_lane.cli.select_route", return_value=claude_route),
-            mock.patch("side_lane.cli.create_worktree", return_value=lane),
             mock.patch("side_lane.cli.require_native_oauth"),
             mock.patch("side_lane.adapters.claude.launch", launch),
             mock.patch("side_lane.cli.lane_delivery",
@@ -2056,9 +2044,51 @@ class ReportOnlyCliTests(unittest.TestCase):
             mock.patch("side_lane.cli.git_status", return_value="## task"),
             mock.patch("side_lane.cli.write_audit",
                        return_value=repo / ".git" / "audit.json"),
-            mock.patch("side_lane.cli.dispose_clean_worktree"),
+            mock.patch("side_lane.cli.dispose_clean_worktree") as dispose,
             mock.patch("side_lane.cli.publish_lane_branch",
                        return_value="origin/side-lane/task-1") as publish,
+        ):
+            yield publish, dispose
+
+    def _drive(self, *, report_only=True, report=None, model_config=None,
+               host="claude", mode="execute", no_publish=True,
+               inherited_report=None, worker_writes=()):
+        """Run _launch through a mocked Claude adapter; return what happened.
+
+        ``inherited_report`` is written into the lane before the runner is
+        called, the way a lane added from a HEAD that tracks
+        ``SIDE_LANE_REPORT.md`` arrives with a report no worker wrote.
+        ``worker_writes`` are other files the fake worker creates, and
+        ``report`` is the report the fake worker writes — the way a worker
+        would — so the real post-run gate is what is under test.
+        """
+
+        repo = self.repo()
+        worktree = repo / "execute-worktree"
+        if inherited_report is not None:
+            worktree.mkdir(parents=True, exist_ok=True)
+            (worktree / self.REPORT_NAME).write_text(
+                inherited_report, encoding="utf-8")
+        lane = mock.Mock(worktree=worktree, branch="side-lane/task-1")
+        result = LaneResult(
+            ("claude",), 0, worktree, "claude", "claude", "native-claude",
+            "claude-sonnet-5", "oauth", False, "done", "",
+        )
+
+        def fake_launch(*_args, **_kwargs):
+            worktree.mkdir(parents=True, exist_ok=True)
+            for name, content in worker_writes:
+                path = worktree / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            if report is not None:
+                (worktree / self.REPORT_NAME).write_text(report, encoding="utf-8")
+            return result
+
+        launch = mock.MagicMock(side_effect=fake_launch)
+        with (
+            self._patched(repo, lane, launch, model_config=model_config) as (
+                publish, _dispose),
             contextlib.redirect_stdout(io.StringIO()) as output,
             contextlib.redirect_stderr(io.StringIO()) as errors,
         ):
@@ -2189,3 +2219,156 @@ class ReportOnlyCliTests(unittest.TestCase):
             report_only=False, report=None)
         self.assertEqual(code, 0)
         self.assertNotIn("report_present", _only_summary(stdout))
+
+    # --- the report must be this run's, not the lane's inheritance -----------
+    #
+    # A repository that tracks SIDE_LANE_REPORT.md hands every lane added from
+    # HEAD a complete-looking report no worker wrote, and the pre-repair gate
+    # (nonempty regular file at the fixed path) accepted it. An unrelated
+    # commit or an empty session was then enough to call a lane delivered.
+
+    INHERITED = "# Findings from a previous task\n\n- plausible-looking claim\n"
+
+    def test_inherited_report_with_an_unrelated_change_is_not_delivered(self) -> None:
+        code, stdout, stderr, _launch, _worktree = self._drive(
+            inherited_report=self.INHERITED,
+            worker_writes=(("src/change.py", "print('unrelated')\n"),),
+            report=None, no_publish=False,
+        )
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        summary = _only_summary(stdout)
+        self.assertFalse(summary["delivered"])
+        self.assertEqual(summary["report_present"], False)
+        self.assertEqual(summary["report_state"], "stale")
+        self.assertEqual(summary["report_preexisting"], True)
+        self.assertNotIn("published", summary)
+        self.publish_lane.assert_not_called()
+        self.assertIn("unchanged", stderr)
+
+    def test_inherited_report_restored_by_the_worker_is_still_stale(self) -> None:
+        # `git checkout -- .` puts the inherited bytes back; a baseline that
+        # only quarantined the file would let that restore re-open the hole.
+        code, stdout, _stderr, _launch, _worktree = self._drive(
+            inherited_report=self.INHERITED, report=self.INHERITED)
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        self.assertEqual(_only_summary(stdout).get("report_state"), "stale")
+
+    def test_worker_written_report_is_accepted_over_the_inherited_one(self) -> None:
+        code, stdout, _stderr, _launch, worktree = self._drive(
+            inherited_report=self.INHERITED,
+            report="# Findings\n\n- what this run actually measured\n")
+        self.assertEqual(code, 0)
+        summary = _only_summary(stdout)
+        self.assertEqual(summary["report_present"], True)
+        self.assertEqual(summary["report_state"], "current")
+        # It is the lane's report that counts, not the preserved copy.
+        self.assertEqual(summary["report_path"], str(worktree / self.REPORT_NAME))
+
+    def test_inherited_report_is_preserved_in_lane_scratch_and_left_in_place(self) -> None:
+        code, stdout, _stderr, _launch, worktree = self._drive(
+            inherited_report=self.INHERITED, report=None)
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED)
+        preserved = (worktree / ".side-lane-scratch" / "report-inherited"
+                     / self.REPORT_NAME)
+        self.assertEqual(_only_summary(stdout).get("report_preserved"),
+                         str(preserved))
+        # The historical file is copied, never moved, modified, or deleted.
+        self.assertEqual(preserved.read_text(encoding="utf-8"), self.INHERITED)
+        self.assertEqual((worktree / self.REPORT_NAME).read_text(encoding="utf-8"),
+                         self.INHERITED)
+
+    def test_preserved_history_is_never_silently_overwritten(self) -> None:
+        # Two runs over one lane keep the earliest inherited bytes.
+        worktree = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, worktree, ignore_errors=True)
+        report = worktree / self.REPORT_NAME
+        report.write_text(self.INHERITED, encoding="utf-8")
+        report_stop_hook.capture_report_baseline(report)
+        report.write_text("# rewritten by a later run\n", encoding="utf-8")
+        second = report_stop_hook.capture_report_baseline(report)
+        self.assertEqual(second.preserved_path.read_text(encoding="utf-8"),
+                         self.INHERITED)
+
+    def test_real_lane_inheriting_a_tracked_report_is_not_delivered(self) -> None:
+        """End-to-end on a real git worktree: the defect this repair closes.
+
+        The repository tracks SIDE_LANE_REPORT.md at HEAD, so the lane created
+        for this run starts with a complete-looking report no worker wrote. An
+        unrelated commit in the lane must not make that an accepted delivery.
+        """
+        repo = self.repo()
+        (repo / self.REPORT_NAME).write_text(self.INHERITED, encoding="utf-8")
+        git = ["git", "-c", "user.email=dev@example.com", "-c", "user.name=Dev"]
+        # Lane creation requires a clean coordinator checkout; the report is
+        # tracked at HEAD, which is exactly how a lane comes to inherit one.
+        subprocess.run(git + ["-C", str(repo), "add", "-A"],
+                       check=True, capture_output=True)
+        subprocess.run(git + ["-C", str(repo), "commit", "-m", "prior task report"],
+                       check=True, capture_output=True)
+
+        created: list = []
+        real_create = cli.create_worktree
+
+        def capture(*args, **kwargs):
+            lane = real_create(*args, **kwargs)
+            created.append(lane)
+            return lane
+
+        def fake_launch(*_args, **_kwargs):
+            worktree = created[0].worktree
+            (worktree / "unrelated.py").write_text("print('x')\n", encoding="utf-8")
+            subprocess.run(git + ["-C", str(worktree), "add", "unrelated.py"],
+                           check=True, capture_output=True)
+            subprocess.run(git + ["-C", str(worktree), "commit", "-m", "unrelated work"],
+                           check=True, capture_output=True)
+            return LaneResult(
+                ("claude",), 0, worktree, "claude", "claude", "native-claude",
+                "claude-sonnet-5", "oauth", False, "done", "",
+            )
+
+        launch = mock.MagicMock(side_effect=fake_launch)
+        with (
+            self._patched(repo, None, launch, create=capture) as (_publish, _dispose),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+            contextlib.redirect_stderr(io.StringIO()) as errors,
+        ):
+            code = cli._launch(self._args(), cli.load_config(), repo, "Implement")
+
+        # The lane really did inherit the tracked report.
+        lane = created[0]
+        self.assertEqual((lane.worktree / self.REPORT_NAME).read_text(encoding="utf-8"),
+                         self.INHERITED)
+        self.assertEqual(code, cli.LANE_NOT_DELIVERED, errors.getvalue())
+        summary = _only_summary(output.getvalue())
+        self.assertFalse(summary["delivered"])
+        self.assertEqual(summary["report_state"], "stale")
+        # ...and its history survived the run in the lane's ignored scratch.
+        preserved = Path(summary["report_preserved"])
+        self.assertEqual(preserved.read_text(encoding="utf-8"), self.INHERITED)
+        self.assertEqual(preserved.parent.parent.parent, lane.worktree)
+
+    def test_unsafe_preexisting_report_path_fails_closed_before_the_worker(self) -> None:
+        for label in ("symlink", "directory"):
+            with self.subTest(label=label):
+                repo = self.repo()
+                worktree = repo / "execute-worktree"
+                worktree.mkdir(parents=True)
+                report = worktree / self.REPORT_NAME
+                if label == "symlink":
+                    (worktree / "real.md").write_text(
+                        "# Findings\n", encoding="utf-8")
+                    report.symlink_to(worktree / "real.md")
+                else:
+                    report.mkdir()
+                lane = mock.Mock(worktree=worktree, branch="side-lane/task-1")
+                launch = mock.MagicMock()
+                with self._patched(repo, lane, launch) as (_publish, dispose):
+                    with self.assertRaises(cli.SideLaneError) as caught:
+                        cli._launch(self._args(), cli.load_config(), repo, "Implement")
+                self.assertIn(label, str(caught.exception))
+                launch.assert_not_called()
+                # The lane is still disposed of; nothing was unlinked or
+                # replaced to make the report path inspectable.
+                self.assertEqual(dispose.call_count, 1)
+                self.assertTrue(report.is_symlink() if label == "symlink"
+                                else report.is_dir())
