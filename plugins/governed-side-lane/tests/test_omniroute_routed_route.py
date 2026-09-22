@@ -17,9 +17,17 @@ from unittest import mock
 from side_lane.adapters import claude
 from side_lane import routing
 
-SUPPORTS_STRICT_MCP = mock.Mock(
-    return_value=subprocess.CompletedProcess([], 0, "--strict-mcp-config", "")
-)
+def SUPPORTS_STRICT_MCP(command: list, **kwargs: object) -> subprocess.CompletedProcess:
+    """Fake readiness runner for a CLI that advertises --strict-mcp-config.
+
+    The support probe hands the runner real regular-file stdout/stderr sinks
+    and reads them back after exit, so the flag must be written into the sink
+    file — merely returning it in ``CompletedProcess.stdout`` is not honored.
+    """
+    sink = kwargs.get("stdout")
+    if hasattr(sink, "write"):
+        sink.write(b"--strict-mcp-config\n")
+    return subprocess.CompletedProcess(command, 0, "", "")
 
 SELECTOR = "example-pool-selector"
 POOL = ["upstream-a/model-alpha", "upstream-b/model-beta"]
@@ -161,10 +169,6 @@ class RoutedRouteValidationTests(unittest.TestCase):
 
 
 class RoutedLaunchTests(unittest.TestCase):
-    def setUp(self):
-        claude._strict_mcp_executable_cache["claude"] = True
-
-
     def repo(self, root, name):
         path = root / name
         path.mkdir()

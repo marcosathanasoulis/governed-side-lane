@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.47 - 2026-09-22
+
+- Capture strict-MCP CLI help in secure temporary files to avoid observed truncated pipe output. Preserve the exact bundle and required flag, bound the help read, distinguish inconclusive probes from unsupported CLIs, and reuse one fresh support verdict per launch.
+
+- 
+
 ## 0.4.46 - 2026-09-22
 
 - Add the execute-only `omniroute-read` capability: the coordinator's validated `--mcp-config` run file may register the per-run streamable-HTTP server named `omniroute` (bearer referenced by env name only), granting exactly the observed read-only tool IDs `mcp__omniroute__omniroute_get_health`, `omniroute_list_models_catalog`, `omniroute_list_combos`, `omniroute_get_combo_metrics`, `omniroute_simulate_route`, `omniroute_check_quota`, `omniroute_get_session_snapshot`, `omniroute_cost_report`, and `omniroute_tool_search`. No server-wide wildcard; other capabilities and review mode are unchanged.

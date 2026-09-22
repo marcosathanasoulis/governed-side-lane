@@ -10,17 +10,22 @@ from side_lane.adapters import claude
 from side_lane.qualification import qualify_claude
 from side_lane.redaction import MARKER, redact_provider_secret
 
-SUPPORTS_STRICT_MCP = mock.Mock(
-    return_value=subprocess.CompletedProcess([], 0, "--strict-mcp-config", "")
-)
+def SUPPORTS_STRICT_MCP(command: list, **kwargs: object) -> subprocess.CompletedProcess:
+    """Fake readiness runner for a CLI that advertises --strict-mcp-config.
+
+    The support probe hands the runner real regular-file stdout/stderr sinks
+    and reads them back after exit, so the flag must be written into the sink
+    file — merely returning it in ``CompletedProcess.stdout`` is not honored.
+    """
+    sink = kwargs.get("stdout")
+    if hasattr(sink, "write"):
+        sink.write(b"--strict-mcp-config\n")
+    return subprocess.CompletedProcess(command, 0, "", "")
 
 SECRET = 'sk-synthetic-9aBcDeF0123456789qRsTuVwX'
 
 
 class RedactionTests(unittest.TestCase):
-    def setUp(self):
-        claude._strict_mcp_executable_cache["claude"] = True
-
     def test_known_fragments_and_masks(self):
         cases = [SECRET, SECRET[:13], SECRET[-12:], SECRET[13:25],
                  SECRET[:13] + '...', '...' + SECRET[-12:],

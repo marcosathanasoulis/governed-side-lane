@@ -12,16 +12,20 @@ from unittest import mock
 from side_lane import cli, report_stop_hook
 from side_lane.adapters import claude
 
-SUPPORTS_STRICT_MCP = mock.Mock(
-    return_value=subprocess.CompletedProcess([], 0, "--strict-mcp-config", "")
-)
+def SUPPORTS_STRICT_MCP(command: list, **kwargs: object) -> subprocess.CompletedProcess:
+    """Fake readiness runner for a CLI that advertises --strict-mcp-config.
+
+    The support probe hands the runner real regular-file stdout/stderr sinks
+    and reads them back after exit, so the flag must be written into the sink
+    file — merely returning it in ``CompletedProcess.stdout`` is not honored.
+    """
+    sink = kwargs.get("stdout")
+    if hasattr(sink, "write"):
+        sink.write(b"--strict-mcp-config\n")
+    return subprocess.CompletedProcess(command, 0, "", "")
 
 
 class ClaudeAdapterTests(unittest.TestCase):
-    def setUp(self):
-        claude._strict_mcp_executable_cache["claude"] = True
-
-
     native = {"gateway": "native-claude", "auth_method": "oauth", "billable": False}
     glm = {"gateway": "direct-zai", "auth_method": "provider-key", "billable": True, "base_url": "https://api.z.ai/api/anthropic"}
 
@@ -734,7 +738,6 @@ class ClaudeAdapterTests(unittest.TestCase):
             empty_bundle = root / "empty.json"
             empty_bundle.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
             claude._install_strict_readiness_config(config_dir, empty_bundle)
-            claude._strict_mcp_executable_cache.pop(str(fake), None)
             with self.assertRaisesRegex(claude.ClaudeAdapterError, "not ready before worker launch"):
                 claude._require_mcp_readiness(
                     executable=str(fake), cwd=root, capabilities=("gateway-read",),
@@ -772,7 +775,6 @@ class ClaudeAdapterTests(unittest.TestCase):
             bundle = root / "exact.json"
             bundle.write_text(json.dumps({"mcpServers": {"cm-services": {"command": "exact-server"}}}), encoding="utf-8")
             claude._install_strict_readiness_config(config_dir, bundle)
-            claude._strict_mcp_executable_cache.pop(str(fake), None)
             claude._require_mcp_readiness(
                 executable=str(fake), cwd=root, capabilities=("gateway-read",),
                 env={"CLAUDE_CONFIG_DIR": str(config_dir)}, runner=claude._bounded_process,
@@ -798,7 +800,7 @@ class ClaudeAdapterTests(unittest.TestCase):
             claude._require_mcp_readiness(
                 executable="claude", cwd=root, capabilities=("gateway-read",),
                 env={"CLAUDE_CONFIG_DIR": str(config_dir)}, runner=probe,
-                strict_mcp_config_path=bundle_path,
+                strict_mcp_config_path=bundle_path, strict_mcp_support=True,
             )
             self.assertEqual(probe.call_args.args[0], ["claude", "mcp", "get", "cm-services"])
 
@@ -1057,10 +1059,6 @@ class ClaudeAdapterTests(unittest.TestCase):
 
 
 class FirstPartyAnthropicKeyRouteTests(unittest.TestCase):
-    def setUp(self):
-        claude._strict_mcp_executable_cache["claude"] = True
-
-
     provider = {"gateway": "direct-anthropic", "auth_method": "provider-key", "billable": True,
                 "base_url": "https://api.anthropic.com"}
 
@@ -1615,10 +1613,6 @@ class AllowedToolsTests(unittest.TestCase):
 
 
 class ReportOnlyModeTests(unittest.TestCase):
-    def setUp(self):
-        claude._strict_mcp_executable_cache["claude"] = True
-
-
     """`--report-only` adds a same-invocation Stop hook and nothing else.
 
     The opt-in exists because a cloud worker navigated, saved its screenshot,
@@ -2018,7 +2012,6 @@ class HostMemoryReadOnlyTests(unittest.TestCase):
               "kimi": "k3-256k", "omniroute": "routed-selector"}
 
     def setUp(self) -> None:
-        claude._strict_mcp_executable_cache["claude"] = True
         self.providers = {"claude": self.native, "glm": self.glm,
                           "kimi": self.kimi, "omniroute": self.omniroute}
 

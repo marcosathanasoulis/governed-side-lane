@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Any, Callable, Mapping, Sequence, Union
+from typing import Any, BinaryIO, Callable, Mapping, Sequence, Union
 from urllib.parse import urlparse
 
 from side_lane import report_stop_hook, routed_read_pagination
@@ -293,46 +293,114 @@ def _effective_mcp_registrations(
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
-# Per-executable cache: does this executable accept --strict-mcp-config?
-# Populated once per executable identity on first probe.  The key is the
-# executable string as passed to the adapter; the value is True if the
-# installed CLI supports the flag.
-_strict_mcp_executable_cache: dict[str, bool] = {}
+STRICT_MCP_PROBE_TIMEOUT_SECONDS = 10
+# ``_bounded_process`` converts an exceeded timeout into exit code 124 with
+# this marker appended to stderr.  The probe only tests for the marker; the
+# stderr text itself is never echoed into an error, so a credential that
+# happened to reach the child's stderr cannot leak through the report.
+_BOUNDED_TIMEOUT_MARKER = "worker timed out"
+# The help probe captures the child's stdout/stderr into secure regular
+# temporary files, never pipes.  The coordinator's instrumented probes of the
+# real launcher child context observed an ordinary ``claude --help`` exit 0
+# after writing only the first 1024-byte chunk to a PIPE (of a 21401-byte
+# help text), so a flag scan of piped output misread a supported CLI as
+# unsupported; the same context with regular-file sinks captured the full
+# text (docs/evidence/strict-mcp-probe-repair-20260922/).  The capture is
+# read back bounded — one byte past this cap proves it oversized — and an
+# oversized or unreadable capture is inconclusive, never "unsupported".
+STRICT_MCP_PROBE_READ_CAP_BYTES = 256 * 1024
+
+
+def _read_probe_capture(capture: "BinaryIO") -> str | None:
+    """Return the decoded probe capture, or ``None`` when unsafe to scan.
+
+    Reads at most ``STRICT_MCP_PROBE_READ_CAP_BYTES + 1`` bytes after the
+    child has exited.  A capture that exceeds the cap or cannot be read back
+    is rejected so the caller reports an inconclusive probe rather than
+    scanning truncated output.
+    """
+    try:
+        capture.seek(0)
+        captured = capture.read(STRICT_MCP_PROBE_READ_CAP_BYTES + 1)
+    except (OSError, ValueError):
+        return None
+    if len(captured) > STRICT_MCP_PROBE_READ_CAP_BYTES:
+        return None
+    return captured.decode("utf-8", errors="replace")
 
 
 def _check_strict_mcp_support(
     executable: str, runner: Runner,
     *, cwd: Path, env: "Mapping[str, str]",
+    secret: str | None = None,
 ) -> bool:
-    """Return True if the installed CLI accepts ``--strict-mcp-config``.
+    """Return whether the installed CLI accepts ``--strict-mcp-config``.
 
     Probed in the actual worker working directory and environment rather
-    than the coordinator's ``Path.cwd()`` or ``os.environ``.  Cached per
-    executable identity after the first probe.  A missing or broken
-    executable is cached as False so the check is not retried.
+    than the coordinator's ``Path.cwd()`` or ``os.environ``, with the
+    child's stdout/stderr captured to secure regular temporary files rather
+    than a pipe — a piped ``--help`` was observed truncating to one chunk on
+    a clean exit 0 in this exact context, which a flag scan then misreads
+    as "unsupported".  Only a completed ``--help`` (exit 0) is a definitive
+    answer: the flag's presence in the full capture confirms support and
+    its absence means the installed CLI is too old.  Every other outcome —
+    a nonzero exit, a timeout, a spawn failure, or a capture that cannot be
+    read back bounded — is an inconclusive probe and raises
+    ``ClaudeAdapterError`` with a sanitized reason instead of being
+    mislabeled "unsupported".  Nothing is cached: the probe is one cheap
+    ``--help`` call, a transient failure fails only the current launch, and
+    the next launch re-probes whatever binary the executable then resolves
+    to (the installed path is a versioned shim).
     """
 
-    if executable in _strict_mcp_executable_cache:
-        return _strict_mcp_executable_cache[executable]
-
-    result = False
+    reason: str | None = None
     try:
-        completed = runner(
-            [executable, "--help"],
-            timeout=10,
-            cwd=cwd,
-            env=dict(env),
-            stdin=subprocess.DEVNULL,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        result = completed.returncode == 0 and "--strict-mcp-config" in completed.stdout
-    except (OSError, subprocess.SubprocessError):
-        result = False
-
-    _strict_mcp_executable_cache[executable] = result
-    return result
+        # TemporaryFile objects are unlinked-on-create regular files: the
+        # child inherits the descriptors, the runner contract is unchanged
+        # (subprocess.run and _bounded_process both accept file sinks), and
+        # closing them removes the capture deterministically.  stderr is
+        # captured but never read back — it exists only so the child cannot
+        # block on an undrained pipe and no stderr text reaches a report.
+        with tempfile.TemporaryFile(prefix="side-lane-help-out-") as stdout_file, \
+                tempfile.TemporaryFile(prefix="side-lane-help-err-") as stderr_file:
+            try:
+                completed = runner(
+                    [executable, "--help"],
+                    timeout=STRICT_MCP_PROBE_TIMEOUT_SECONDS,
+                    cwd=cwd,
+                    env=dict(env),
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                reason = f"timed out after {STRICT_MCP_PROBE_TIMEOUT_SECONDS}s"
+            except (OSError, subprocess.SubprocessError) as exc:
+                reason = f"could not start ({_redact(exc, secret)})"
+            else:
+                if int(completed.returncode) != 0:
+                    reason = (
+                        f"timed out after {STRICT_MCP_PROBE_TIMEOUT_SECONDS}s"
+                        if _BOUNDED_TIMEOUT_MARKER
+                        in str(getattr(completed, "stderr", "") or "")
+                        else f"exited with status {int(completed.returncode)}"
+                    )
+                else:
+                    help_text = _read_probe_capture(stdout_file)
+                    if help_text is None:
+                        reason = (
+                            "produced unreadable or oversized output "
+                            f"(limit {STRICT_MCP_PROBE_READ_CAP_BYTES} bytes)"
+                        )
+                    else:
+                        return "--strict-mcp-config" in help_text
+    except OSError as exc:
+        reason = f"could not start ({_redact(exc, secret)})"
+    raise ClaudeAdapterError(
+        f"could not confirm {executable} --strict-mcp-config support: "
+        f"--help probe {reason}"
+    )
 PLAYWRIGHT_STARTUP_INSTRUCTION = """\
 
 
@@ -1343,6 +1411,7 @@ def _require_mcp_readiness(
     *, executable: str, cwd: Path, capabilities: Capabilities,
     env: Mapping[str, str], runner: Runner, secret: str | None = None,
     strict_mcp_config_path: Path | None = None,
+    strict_mcp_support: bool | None = None,
 ) -> None:
     """Health-check capability-required MCP servers before starting a model.
 
@@ -1351,18 +1420,24 @@ def _require_mcp_readiness(
     validates the same configuration that will be active during the run.
     """
 
-    # Probe the installed CLI once per executable to determine whether it supports
-    # --strict-mcp-config.  This avoids inferring support from the flag's presence
-    # in the command build (which is a contract claim, not a runtime fact).
-    cli_supports_strict = _check_strict_mcp_support(
-        executable, runner, cwd=cwd, env=env,
-    )
-
-    if strict_mcp_config_path is not None and not cli_supports_strict:
-        raise ClaudeAdapterError(
-            f"{executable} does not support --strict-mcp-config; "
-            "a routed execute lane that requires the strict MCP bundle cannot launch"
-        )
+    # --strict-mcp-config support is only needed when a strict bundle will be
+    # passed; a lane without one must not fail on a probe it never depended
+    # on.  ``strict_mcp_support`` carries the verdict the launch path already
+    # probed, so the same answer is used end to end rather than asking the
+    # CLI again seconds later and possibly getting a different transient
+    # result.  This is a runtime fact check, not a contract claim inferred
+    # from the command build.
+    if strict_mcp_config_path is not None:
+        if strict_mcp_support is None:
+            strict_mcp_support = _check_strict_mcp_support(
+                executable, runner, cwd=cwd, env=env, secret=secret,
+            )
+        if strict_mcp_support is not True:
+            raise ClaudeAdapterError(
+                f"{executable} does not support --strict-mcp-config; "
+                "a routed execute lane that requires the strict MCP bundle cannot launch"
+            )
+    cli_supports_strict = strict_mcp_support is True
 
     readiness_env = dict(env)
     readiness_config_dir: Path | None = None
@@ -1648,6 +1723,7 @@ def _launch_worker(
         if strict_mcp_config_path is not None:
             strict_mcp_supported = _check_strict_mcp_support(
                 executable, active_readiness_runner, cwd=worktree_path, env=child_env,
+                secret=secret,
             )
         else:
             strict_mcp_supported = False
@@ -1675,6 +1751,7 @@ def _launch_worker(
             executable=executable, cwd=worktree_path, capabilities=granted,
             env=child_env, runner=active_readiness_runner, secret=secret,
             strict_mcp_config_path=strict_mcp_config_path,
+            strict_mcp_support=strict_mcp_supported,
         )
         try:
             completed = active_runner(
