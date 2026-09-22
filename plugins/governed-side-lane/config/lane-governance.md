@@ -100,6 +100,24 @@ backup is allowed, but no alternate GLM model is.
   the exact granted tool names; if the tools are absent, named differently,
   or the server reports an authentication failure, stop and report that exact
   state instead of substituting another tool or claiming a read happened.
+- With the `omniroute-read` capability, only the per-run MCP server
+  registered exactly as `omniroute` — delivered through the coordinator's
+  validated `--mcp-config` run file, whose bearer credential is referenced
+  by env name, never a value — may be called, and only through its
+  read-only tools `omniroute_get_health`, `omniroute_list_models_catalog`,
+  `omniroute_list_combos`, `omniroute_get_combo_metrics`,
+  `omniroute_simulate_route`, `omniroute_check_quota`,
+  `omniroute_get_session_snapshot`, `omniroute_cost_report`, and
+  `omniroute_tool_search` (exact tool IDs `mcp__omniroute__<name>`). The
+  account is read-only by construction: it
+  carries no mutation scopes and no inference or routing authority — model
+  and provider selection stay with the dispatcher — so anything mutating is
+  unavailable by design. Registration is presence evidence only —
+  authentication and a live read remain unproven until the worker observes
+  the exact granted tool names; if the tools are absent, named differently,
+  or the server reports an authentication failure, stop and report that
+  exact state instead of substituting another tool or claiming a read
+  happened.
 - With the `asana-read` capability, only the MCP server registered exactly
   as `cm-services` may be called, and only through its read-only Asana
   tools `asana_get_task`, `asana_get_project`, and
@@ -254,7 +272,7 @@ coordinator's review of the resulting diff before anything is merged or
 pushed onward. Do not describe the allowlist as preventing those actions.
 
 MCP capability grants are exact per-tool IDs, never a server-wide wildcard.
-A capability whose server arrives per run (`aws-read`) names its exact server
+A capability whose server arrives per run (`aws-read`, `omniroute-read`) names its exact server
 registration in the Execute-mode rules above, delivered through the
 coordinator's validated `--mcp-config` run file; a host-registered capability
 (`slack-read`, the graph and browser connectors) names its registration in the
@@ -345,7 +363,7 @@ from host registration files, never values.
 - `Bash(terraform validate *)`
 - `Bash(terraform version)`
 
-### playwright, gitnexus, codegraph, slack-read, aws-read, asana-read, drive-read
+### playwright, gitnexus, codegraph, slack-read, aws-read, omniroute-read, asana-read, drive-read
 
 - `WaitForMcpServers`
 
@@ -417,6 +435,18 @@ from host registration files, never values.
 - `mcp__aws__aws___retrieve_skill`
 - `mcp__aws__aws___list_regions`
 - `mcp__aws__aws___get_regional_availability`
+
+### omniroute-read
+
+- `mcp__omniroute__omniroute_get_health`
+- `mcp__omniroute__omniroute_list_models_catalog`
+- `mcp__omniroute__omniroute_list_combos`
+- `mcp__omniroute__omniroute_get_combo_metrics`
+- `mcp__omniroute__omniroute_simulate_route`
+- `mcp__omniroute__omniroute_check_quota`
+- `mcp__omniroute__omniroute_get_session_snapshot`
+- `mcp__omniroute__omniroute_cost_report`
+- `mcp__omniroute__omniroute_tool_search`
 
 ### asana-read
 

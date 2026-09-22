@@ -26,6 +26,7 @@ CAPABILITY_MCP_SERVERS: dict[str, str] = {
     "slack-read": "slack",
     # remote per-run servers
     "aws-read": "aws",
+    "omniroute-read": "omniroute",
 }
 
 #: Capabilities whose servers are registered in the worker host's user-global MCP
@@ -71,4 +72,4 @@ CM_SERVICES_CAPABILITIES = frozenset(
 
 #: Capabilities whose servers are delivered as validated per-run remote
 #: streamable-HTTP registrations (not from user config).
-RUN_CONFIG_CAPABILITIES = frozenset({"aws-read"})
+RUN_CONFIG_CAPABILITIES = frozenset({"aws-read", "omniroute-read"})

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.46 - 2026-09-22
+
+- Add the execute-only `omniroute-read` capability: the coordinator's validated `--mcp-config` run file may register the per-run streamable-HTTP server named `omniroute` (bearer referenced by env name only), granting exactly the observed read-only tool IDs `mcp__omniroute__omniroute_get_health`, `omniroute_list_models_catalog`, `omniroute_list_combos`, `omniroute_get_combo_metrics`, `omniroute_simulate_route`, `omniroute_check_quota`, `omniroute_get_session_snapshot`, `omniroute_cost_report`, and `omniroute_tool_search`. No server-wide wildcard; other capabilities and review mode are unchanged.
+
 ## 0.4.45 - 2026-09-21
 
 - Allow an optional per-model OmniRoute execute client compaction budget (`autocompact_window_tokens`, integer 100000–1000000). Absent/null keeps 100k; output remains 16384. Other providers and review are unchanged. This operational budget is not a vendor-capacity claim.

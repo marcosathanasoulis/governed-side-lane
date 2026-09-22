@@ -19,6 +19,7 @@ from unittest import mock
 
 from side_lane import mcp_run_config as mrc
 from side_lane.adapters import claude, codex, devin
+from side_lane.governance import tool_policy
 
 GCF_SHAPED = {
     "mcpServers": {
@@ -33,6 +34,24 @@ GCF_SHAPED = {
 SERVERS = {"aws": mrc.McpRunServer(
     name="aws", url="https://bridge.example.invalid/mcp",
     headers=(("Authorization", "Bearer", "CLAUDE_TAG_AWS_MCP_TOKEN"),),
+)}
+
+# The `omniroute-mcp` account's sibling shape: same contract as the aws
+# registration, distinct names throughout. The endpoint is a placeholder —
+# public fixtures never carry a real internal hostname.
+OMNIROUTE_SHAPED = {
+    "mcpServers": {
+        "omniroute": {
+            "type": "http",
+            "url": "https://omniroute.example.invalid/mcp",
+            "headers": {"Authorization": "Bearer ${CLAUDE_TAG_OMNIROUTE_MCP_TOKEN}"},
+        }
+    }
+}
+
+OMNIROUTE_SERVERS = {"omniroute": mrc.McpRunServer(
+    name="omniroute", url="https://omniroute.example.invalid/mcp",
+    headers=(("Authorization", "Bearer", "CLAUDE_TAG_OMNIROUTE_MCP_TOKEN"),),
 )}
 
 
@@ -80,6 +99,56 @@ class ValidationTests(unittest.TestCase):
                         mrc.load_run_mcp_config(write_config(root, {"mcpServers": {"aws": {
                             "type": "http", "url": url,
                             "headers": {"Authorization": "Bearer ${T}"}}}}, f"bad{index}.json"))
+
+    def test_accepts_the_omniroute_sibling_registration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            servers = mrc.load_run_mcp_config(
+                write_config(Path(directory), OMNIROUTE_SHAPED))
+        self.assertEqual(mrc.audit_names(servers), ("omniroute",))
+        server = servers["omniroute"]
+        self.assertEqual(server.url, "https://omniroute.example.invalid/mcp")
+        self.assertEqual(server.bearer_env(), "CLAUDE_TAG_OMNIROUTE_MCP_TOKEN")
+        # Capability narrowing mirrors aws-read: only the granted capability
+        # admits its server, and a merged document needs both grants.
+        mrc.validate_against_capabilities(servers, {"omniroute-read"})
+        with self.assertRaisesRegex(mrc.McpRunConfigError, "no granted capability"):
+            mrc.validate_against_capabilities(servers, {"aws-read"})
+        both = {**SERVERS, **OMNIROUTE_SERVERS}
+        mrc.validate_against_capabilities(both, {"aws-read", "omniroute-read"})
+        with self.assertRaisesRegex(mrc.McpRunConfigError, "no granted capability"):
+            mrc.validate_against_capabilities(both, {"aws-read"})
+
+    def test_omniroute_codex_delivery_carries_url_and_env_name_only(self) -> None:
+        self.assertIn(
+            'mcp_servers.omniroute.url="https://omniroute.example.invalid/mcp"',
+            mrc.codex_overrides(OMNIROUTE_SERVERS))
+        self.assertIn(
+            'mcp_servers.omniroute.bearer_token_env_var="CLAUDE_TAG_OMNIROUTE_MCP_TOKEN"',
+            mrc.codex_overrides(OMNIROUTE_SERVERS))
+
+    def test_omniroute_read_grants_exactly_the_observed_read_tools(self) -> None:
+        # The canonical allowlist names the exact read-only tool IDs the
+        # server's live tools/list returned: no wildcard, no mutation or
+        # inference tool, and aws-read is unaffected.
+        granted = set(tool_policy().allowed["omniroute-read"])
+        self.assertEqual(granted - {"WaitForMcpServers"}, {
+            "mcp__omniroute__omniroute_get_health",
+            "mcp__omniroute__omniroute_list_models_catalog",
+            "mcp__omniroute__omniroute_list_combos",
+            "mcp__omniroute__omniroute_get_combo_metrics",
+            "mcp__omniroute__omniroute_simulate_route",
+            "mcp__omniroute__omniroute_check_quota",
+            "mcp__omniroute__omniroute_get_session_snapshot",
+            "mcp__omniroute__omniroute_cost_report",
+            "mcp__omniroute__omniroute_tool_search",
+        })
+        self.assertFalse(any(rule.endswith("*") for rule in granted))
+        tools = claude.allowed_tools("execute", ("omniroute-read",))
+        self.assertIn("mcp__omniroute__omniroute_tool_search", tools)
+        self.assertNotIn("mcp__omniroute__omniroute_create_combo", tools)
+        self.assertNotIn("mcp__omniroute__omniroute_route_request", tools)
+        self.assertNotIn("mcp__omniroute__*", tools)
+        self.assertEqual(claude.allowed_tools("review", ("omniroute-read",)), ())
 
     def test_codex_delivery_preserves_the_auth_scheme_or_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

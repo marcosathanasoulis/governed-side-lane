@@ -145,9 +145,10 @@ AUTO_MEMORY_DISABLED_VALUE = "1"
 # Exact MCP server names a granted capability maps to. ``slack-read`` maps to
 # the server registered as ``slack``; the canonical lane governance names the
 # registration, not the capability. The graph capabilities use their own exact
-# names. ``aws-read`` names the one server its per-run --mcp-config file may
-# register (side_lane.mcp_run_config); it never appears in
-# enabledMcpjsonServers because its registration is not a project .mcp.json
+# names. ``aws-read`` and ``omniroute-read`` each name the one server their
+# per-run --mcp-config file may register (side_lane.mcp_run_config); they
+# never appear in
+# enabledMcpjsonServers because their registration is not a project .mcp.json
 # entry. Every cm-services-family capability — asana, drive, gcloud,
 # database, algolia, contentful, and Gateway — maps to the fixed local stdio
 # server registered as ``cm-services`` in the worker host's user-global config

@@ -59,7 +59,8 @@ Validation (the single source is `side_lane/mcp_run_config.py`) rejects
 literal credentials, stdio entries, dirty URLs, and plaintext HTTP outside
 the exact loopback literals (`127.0.0.1`, `localhost`, `::1`). Every
 declared server name must map from a capability also passed with
-`--capability` (today `aws-read` → the server named `aws`); there is no
+`--capability` (today `aws-read` → the server named `aws`, `omniroute-read`
+→ `omniroute`); there is no
 server-wide wildcard and no blanket `mcp__*` grant. Each referenced env name
 must already be present and non-empty in the environment the worker child
 will run with, or the run fails closed before launch. `--read-root` is

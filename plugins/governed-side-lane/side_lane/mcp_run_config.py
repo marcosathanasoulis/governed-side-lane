@@ -4,7 +4,10 @@ The GCF worker (functions/sideLaneWorker/accounts.py, `aws-mcp` account)
 already writes a worker-native registration JSON under
 ``<worktree_root>/.side-lane/mcp/aws-mcp.json``: a real streamable-HTTP MCP
 server entry whose bearer token is referenced BY ENV NAME
-(``${CLAUDE_TAG_AWS_MCP_TOKEN}``), never as a value. Until now no host loaded
+(``${CLAUDE_TAG_AWS_MCP_TOKEN}``), never as a value. Its sibling
+`omniroute-mcp` account (2026-09-22) writes the same shape under
+``mcp/omniroute-mcp.json`` with the bearer referenced as
+``${CLAUDE_TAG_OMNIROUTE_MCP_TOKEN}``. Until now no host loaded
 that file. This module turns such a file into per-run MCP configuration for
 the three host CLIs, additively — existing user/project MCP registrations,
 their auth, ``CODEX_HOME``, and home settings are never replaced. Where a
@@ -546,7 +549,7 @@ def build_strict_mcp_bundle(
     """Assemble the narrow MCP bundle for a routed execute lane.
 
     Combines registrations from:
-      1. Per-run servers (aws-read via validated --mcp-config file)
+      1. Per-run servers (aws-read, omniroute-read via validated --mcp-config file)
       2. User-global config (USER_SCOPE_MCP_CAPABILITIES servers: cm-services, gitnexus,
          codegraph, playwright, slack — loaded from ~/.claude.json)
       3. Project entry in user config (matching repo path)
@@ -573,7 +576,7 @@ def build_strict_mcp_bundle(
     servers: dict[str, dict[str, object]] = {}
     capabilities_set = set(granted_capabilities)
 
-    # 1. Per-run servers (aws-read)
+    # 1. Per-run servers (aws-read, omniroute-read)
     if run_servers:
         for server in run_servers.values():
             servers[server.name] = {
