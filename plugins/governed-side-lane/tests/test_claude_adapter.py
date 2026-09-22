@@ -47,24 +47,6 @@ class ClaudeAdapterTests(unittest.TestCase):
                         )
                     self.assertEqual(worker.call_args.kwargs["timeout"], expected)
 
-    def test_bounded_process_accepts_subprocess_run_capture_kwargs(self) -> None:
-        completed = claude._bounded_process(
-            [sys.executable, "-c", "print('captured')"], timeout=5,
-            capture_output=True, check=False, text=True,
-        )
-        self.assertEqual(completed.returncode, 0)
-        self.assertEqual(completed.stdout.strip(), "captured")
-        self.assertEqual(completed.stderr, "")
-
-    def test_bounded_process_timeout_preserves_real_partial_output(self) -> None:
-        completed = claude._bounded_process(
-            [sys.executable, "-c", "import time; print('partial', flush=True); time.sleep(10)"],
-            timeout=0.1, capture_output=True, check=False, text=True,
-        )
-        self.assertEqual(completed.returncode, 124)
-        self.assertIn("partial", completed.stdout)
-        self.assertIn("process group stopped", completed.stderr)
-
     def repo(self, root: Path, name: str) -> Path:
         path = root / name
         path.mkdir()
@@ -1043,19 +1025,6 @@ class ClaudeAdapterTests(unittest.TestCase):
                 )
         self.assertEqual(result.availability, "temporarily-unavailable")
         runner.assert_called_once()
-
-    @mock.patch("side_lane.adapters.claude.os.killpg")
-    @mock.patch("side_lane.adapters.claude.subprocess.Popen")
-    def test_bounded_launch_timeout_stops_process_group(self, popen: mock.Mock,
-                                                        killpg: mock.Mock) -> None:
-        process = popen.return_value
-        process.pid = 77
-        process.communicate.side_effect = [subprocess.TimeoutExpired("claude", 1),
-                                           ("partial", "diagnostic")]
-        completed = claude._bounded_process(["claude"], timeout=1)
-        self.assertEqual(completed.returncode, 124)
-        killpg.assert_called_once_with(77, claude.signal.SIGTERM)
-
 
 
 class FirstPartyAnthropicKeyRouteTests(unittest.TestCase):

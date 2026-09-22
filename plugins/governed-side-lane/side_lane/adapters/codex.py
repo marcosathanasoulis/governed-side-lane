@@ -17,6 +17,15 @@ Two gateways are accepted, both selected purely from the provider config:
 Both routes run ``codex exec --json`` so the JSONL event stream can be read
 for the final ``turn.completed`` usage block; the raw stream stays in
 ``stdout`` unchanged apart from secret redaction.
+
+``timeout_seconds`` is opt-in on Codex routes: a route that does not set it
+launches with no process timeout at all (the historical behaviour), while a
+present value must be a positive integer and is enforced through the same
+canonical bounded lifecycle the Claude adapter uses — the worker's process
+group is stopped on POSIX hosts; Windows attempts an OS-native process-tree
+stop and falls back to direct-child termination with bounded output drain.
+The lane returns an exit-124 receipt naming the actual cleanup outcome and
+any captured partial stream.
 """
 
 from __future__ import annotations
@@ -27,6 +36,7 @@ from pathlib import Path
 import subprocess
 from typing import Any, Callable, Mapping, Sequence
 
+from side_lane.adapters.claude import _bounded_process
 from side_lane.credentials import scrub_backend_environment
 from side_lane.governance import lane_system_prompt
 from side_lane.hosts import with_support_dir
@@ -150,6 +160,31 @@ def _validate_worktree(path_value: Path | str) -> Path:
     if not path.is_dir() or not (path / ".git").exists():
         raise CodexAdapterError(f"path is not a Git worktree: {path}")
     return path
+
+
+def _resolve_timeout_seconds(model_config: Mapping[str, Any]) -> int | None:
+    """Return the configured worker timeout, or ``None`` when unset.
+
+    An absent ``timeout_seconds`` keeps the historical unbounded Codex launch
+    — no ``timeout`` kwarg reaches the runner at all. A present value must be
+    a positive integer; anything else fails closed before launch, matching
+    the Claude and Devin adapters.
+    """
+
+    if "timeout_seconds" not in model_config:
+        return None
+    timeout = model_config["timeout_seconds"]
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+        raise CodexAdapterError("timeout_seconds must be a positive integer")
+    return timeout
+
+
+def _timeout_stream_text(value: object) -> str:
+    """Decode a ``TimeoutExpired`` stream payload the way ``text=True`` would."""
+
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value if isinstance(value, str) else ""
 
 
 def build_child_env(inherited: Mapping[str, str]) -> dict[str, str]:
@@ -316,6 +351,7 @@ def run_codex(
     _runtime_model, gateway, auth_method, billable = _route_metadata(
         provider, model, provider_config, model_config, mode
     )
+    timeout = _resolve_timeout_seconds(model_config)
     if run_mcp_servers and mode != "execute":
         # Adapter-level fail-closed mirror of the build_codex_command guard;
         # run_codex may be called without going through that guard's inputs.
@@ -359,15 +395,41 @@ def run_codex(
         ensure_no_registration_conflicts(
             run_mcp_servers, "codex", worktree_path, env=child_env
         )
+    run_kwargs: dict[str, Any] = {
+        "cwd": worktree_path,
+        "env": child_env,
+        "stdin": subprocess.DEVNULL,
+        "text": True,
+        "capture_output": True,
+        "check": False,
+    }
+    active_runner = runner
+    if timeout is not None:
+        run_kwargs["timeout"] = timeout
+        if runner is subprocess.run:
+            # subprocess.run's own timeout kills only the direct child and
+            # raises; the canonical bounded lifecycle stops the worker —
+            # its whole process group on POSIX, its process tree where an
+            # OS-native tree stop exists (Windows taskkill /T /F), the
+            # process itself elsewhere — and returns a truthful exit-124
+            # receipt with the partial stream instead. An explicitly
+            # injected runner is still honored — it just receives the
+            # timeout kwarg.
+            active_runner = _bounded_process
     try:
-        completed = runner(
+        completed = active_runner(argv, **run_kwargs)
+    except subprocess.TimeoutExpired as exc:
+        if timeout is None:
+            raise  # Preserve the injected runner's historical absent-timeout contract.
+        # An injected runner that surfaces a raw timeout instead of the
+        # bounded receipt still yields one truthful result: exit 124 with
+        # the partial output it captured, redacted below like any other
+        # run. No cleanup claim is made beyond what that runner did.
+        completed = subprocess.CompletedProcess(
             argv,
-            cwd=worktree_path,
-            env=child_env,
-            stdin=subprocess.DEVNULL,
-            text=True,
-            capture_output=True,
-            check=False,
+            124,
+            _timeout_stream_text(exc.output),
+            _timeout_stream_text(exc.stderr) + "\nworker timed out",
         )
     except OSError as exc:
         raise CodexAdapterError(f"could not start Codex executable: {exc}") from exc

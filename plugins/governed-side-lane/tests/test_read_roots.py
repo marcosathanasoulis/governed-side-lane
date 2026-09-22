@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -22,6 +23,13 @@ from side_lane import cli, read_roots, worktrees
 from side_lane.adapters import claude, codex, devin
 from side_lane.results import LaneResult
 from side_lane.worktrees import LaneDelivery
+
+# Hermetic suite: an inherited SIDE_LANE_MODELS_PATH or
+# SIDE_LANE_ROUTING_CATALOG_PATH would silently re-point the config and
+# catalog defaults these tests exercise, so both are removed at import.
+# Tests that want an override set it explicitly (mock.patch.dict).
+for _var in ("SIDE_LANE_MODELS_PATH", "SIDE_LANE_ROUTING_CATALOG_PATH"):
+    os.environ.pop(_var, None)
 
 
 def rule_prefix(rule: str) -> str:

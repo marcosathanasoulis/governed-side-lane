@@ -1,9 +1,12 @@
+import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
+from side_lane.adapters import claude
 from side_lane.adapters import codex
 
 
@@ -213,6 +216,151 @@ class CodexApiKeyRouteTests(unittest.TestCase):
         self.assertEqual(result.stdout, "used [REDACTED_PROVIDER_KEY] ok")
         self.assertEqual(result.stderr, "err [REDACTED_PROVIDER_KEY]")
         self.assertNotIn("sk-test-123", " ".join(result.argv))
+
+
+class CodexTimeoutTests(unittest.TestCase):
+    """Opt-in ``timeout_seconds`` on Codex routes (parity with claude/devin)."""
+
+    provider = {"gateway": "native-codex", "auth_method": "oauth", "billable": False}
+    execute = {"runtime_model": "gpt-5.6-terra", "protocol": "native-codex"}
+
+    def repo(self, root: Path, name: str) -> Path:
+        path = root / name
+        path.mkdir()
+        (path / ".git").mkdir()
+        return path
+
+    def test_absent_timeout_passes_no_timeout_kwarg(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "ok", ""))
+            codex.run_codex(executable="codex", repo=repo, worktree=lane,
+                provider="openai", model="gpt-5.6-terra", provider_config=self.provider,
+                model_config=self.execute, prompt="task", env={"PATH": "/bin"}, runner=runner)
+        self.assertNotIn("timeout", runner.call_args.kwargs)
+
+    def test_absent_timeout_preserves_injected_runner_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            error = subprocess.TimeoutExpired("external-runner", 7)
+            runner = mock.Mock(side_effect=error)
+            with self.assertRaises(subprocess.TimeoutExpired) as raised:
+                codex.run_codex(executable="codex", repo=repo, worktree=lane,
+                    provider="openai", model="gpt-5.6-terra", provider_config=self.provider,
+                    model_config=self.execute, prompt="task", env={"PATH": "/bin"},
+                    runner=runner)
+            self.assertIs(raised.exception, error)
+            self.assertNotIn("timeout", runner.call_args.kwargs)
+
+    def test_configured_timeout_is_forwarded_to_an_injected_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "ok", ""))
+            result = codex.run_codex(executable="codex", repo=repo, worktree=lane,
+                provider="openai", model="gpt-5.6-terra", provider_config=self.provider,
+                model_config={**self.execute, "timeout_seconds": 2400}, prompt="task",
+                env={"PATH": "/bin"}, runner=runner)
+        self.assertEqual(runner.call_args.kwargs["timeout"], 2400)
+        self.assertEqual(result.returncode, 0)
+
+    def test_malformed_timeout_fails_closed_before_any_process_starts(self) -> None:
+        for bad in (0, -5, True, False, "600", 1.5, None):
+            with self.subTest(timeout_seconds=bad), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+                runner = mock.Mock()
+                with self.assertRaisesRegex(codex.CodexAdapterError, "positive integer"):
+                    codex.run_codex(executable="codex", repo=repo, worktree=lane,
+                        provider="openai", model="gpt-5.6-terra", provider_config=self.provider,
+                        model_config={**self.execute, "timeout_seconds": bad}, prompt="task",
+                        env={"PATH": "/bin"}, runner=runner)
+                runner.assert_not_called()
+
+    @unittest.skipUnless(os.name == "posix",
+        "the fake worker is a POSIX shell script and this asserts process-group cleanup")
+    def test_configured_timeout_bounds_the_default_runner_process_group(self) -> None:
+        """Real launch through the CLI's own seam: no runner is injected, so the
+        adapter's bounded lifecycle must stop the worker's whole process group —
+        a background child sharing that group must not outlive the kill and
+        write its sentinel. The receipt is exit 124 with the partial stream."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            sentinel = root / "orphan-wrote-this"
+            fake = root / "codex"
+            fake.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' '{\"type\":\"thread.started\",\"model\":\"gpt-5.6-terra\"}'\n"
+                f"(sleep 2; touch {sentinel}) &\n"
+                "sleep 30\n",
+                encoding="utf-8",
+            )
+            os.chmod(fake, 0o755)
+            started = time.monotonic()
+            result = codex.run_codex(executable=str(fake), repo=repo, worktree=lane,
+                provider="openai", model="gpt-5.6-terra", provider_config=self.provider,
+                model_config={**self.execute, "timeout_seconds": 1}, prompt="task",
+                env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")})
+            self.assertEqual(result.returncode, 124)
+            self.assertIn("worker timed out", result.stderr)
+            self.assertIn("process group stopped", result.stderr)
+            # The partial JSONL stream survived the kill and was still parsed.
+            self.assertEqual(result.resolved_model, "gpt-5.6-terra")
+            # Wait past the same-group child's 2s mark; group cleanup means it
+            # was SIGTERMed with its parent and never reaches the sentinel.
+            while time.monotonic() - started < 4:
+                time.sleep(0.1)
+            self.assertFalse(sentinel.exists(), "same-group child outlived the worker timeout")
+
+    def test_configured_timeout_stops_the_child_where_no_process_groups(self) -> None:
+        """Without POSIX process groups (Windows) the same default-runner seam
+        takes the Popen terminate/kill path — no ``killpg``, no new session.
+        ``_stop_process_tree`` is pinned off so the direct-child fallback is
+        what runs even on a real Windows host."""
+        process = mock.Mock()
+        process.pid = 77
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired("codex", 1), ("partial", "")]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            with mock.patch.object(claude, "_posix_process_groups", return_value=False), \
+                    mock.patch.object(claude, "_stop_process_tree", return_value=False), \
+                    mock.patch.object(claude.subprocess, "Popen",
+                                      return_value=process) as popen:
+                result = codex.run_codex(executable="codex", repo=repo, worktree=lane,
+                    provider="openai", model="gpt-5.6-terra", provider_config=self.provider,
+                    model_config={**self.execute, "timeout_seconds": 1}, prompt="task",
+                    env={"PATH": "/bin"})
+        self.assertNotIn("start_new_session", popen.call_args.kwargs)
+        process.terminate.assert_called_once_with()
+        process.kill.assert_not_called()
+        self.assertEqual(result.returncode, 124)
+        self.assertIn("worker timed out", result.stderr)
+        self.assertNotIn("process group stopped", result.stderr)
+
+    def test_injected_runner_timeout_expired_becomes_a_sanitized_receipt(self) -> None:
+        provider = {"gateway": "codex-api-key", "auth_method": "provider-key",
+            "billable": True, "credential_service": "example-side-lane-openai"}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            def raising_runner(argv, **kwargs):
+                raise subprocess.TimeoutExpired(
+                    argv, kwargs.get("timeout"), output="partial sk-test-123",
+                    stderr="err sk-test-123")
+            result = codex.run_codex(executable="codex", repo=repo, worktree=lane,
+                provider="openai-api-key", model="gpt-5.6-terra", provider_config=provider,
+                model_config={**self.execute, "timeout_seconds": 600}, prompt="task",
+                env={"PATH": "/bin"}, secret="sk-test-123", runner=raising_runner)
+        self.assertEqual(result.returncode, 124)
+        self.assertIn("worker timed out", result.stderr)
+        self.assertNotIn("sk-test-123", result.stdout)
+        self.assertNotIn("sk-test-123", result.stderr)
+        self.assertIn("[REDACTED_PROVIDER_KEY]", result.stdout)
 
 
 if __name__ == "__main__":

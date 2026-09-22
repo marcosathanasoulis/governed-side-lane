@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.48 - 2026-09-22
+
+- Enforce an explicitly configured Codex worker timeout while preserving absent-timeout behavior. Return a sanitized timeout receipt and retain the local worktree for coordinator recovery.
+- Bound Windows subprocess cleanup and output drain, use the native process-tree stop when available, and defer reader-owned pipe closure after capture is abandoned. Cover ordinary child processes with real lifecycle fixtures; escaped POSIX sessions remain outside this contract.
+
 ## 0.4.47 - 2026-09-22
 
 - Capture strict-MCP CLI help in secure temporary files to avoid observed truncated pipe output. Preserve the exact bundle and required flag, bound the help read, distinguish inconclusive probes from unsupported CLIs, and reuse one fresh support verdict per launch.

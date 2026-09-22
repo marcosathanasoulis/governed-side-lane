@@ -7,7 +7,6 @@ import os
 from contextlib import suppress
 from pathlib import Path
 import re
-import signal
 import shlex
 import subprocess
 import sys
@@ -15,6 +14,7 @@ import tempfile
 from typing import Any, Callable, Mapping, Sequence
 
 from side_lane import devin_command_policy
+from side_lane.adapters import claude
 from side_lane.capabilities import RUN_CONFIG_CAPABILITIES, USER_SCOPE_MCP_CAPABILITIES
 from side_lane.credentials import scrub_backend_environment
 from side_lane.governance import known_capabilities, lane_system_prompt, tool_policy
@@ -571,20 +571,17 @@ def _run(command: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeout: 
     try:
         process = popen(command, cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                        start_new_session=True)
+                        **({"start_new_session": True} if claude._posix_process_groups() else {}))
     except OSError as exc:
         raise DevinAdapterError(f"could not start Devin executable: {exc}") from exc
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except (subprocess.TimeoutExpired, KeyboardInterrupt) as exc:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-            stdout, stderr = process.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            stdout, stderr = process.communicate()
-        except ProcessLookupError:
-            stdout, stderr = process.communicate()
+        # One shared stop lifecycle: POSIX process-group TERM/KILL, an
+        # OS-native tree stop where one exists, or the Popen
+        # terminate/kill pair. The outcome string is the Claude receipt's
+        # marker text; this tuple contract keeps the child's raw stream.
+        stdout, stderr, _outcome = claude._stop_bounded_process(process)
         if isinstance(exc, KeyboardInterrupt):
             raise
         return 124, stdout or "", stderr or ""

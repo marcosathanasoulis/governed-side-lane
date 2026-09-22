@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import json
 from contextlib import suppress
@@ -13,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from typing import Any, BinaryIO, Callable, Mapping, Sequence, Union
 from urllib.parse import urlparse
 
@@ -589,29 +591,261 @@ Capabilities = Union[tuple[str, ...], list[str], frozenset[str]]
 Runner = Callable[..., Any]
 
 
+def _posix_process_groups() -> bool:
+    """Whether this platform offers POSIX process-group signaling.
+
+    Windows has neither ``os.killpg`` nor ``signal.SIGKILL`` and no
+    ``start_new_session`` process-group semantics, so the bounded lifecycle
+    must not reach for POSIX primitives there.
+    """
+
+    return os.name == "posix"
+
+
+_BOUNDED_STOP_GRACE_SECONDS = 5
+# The post-kill output drain gets its own bound: a descendant that
+# inherited the worker's pipe handles can keep them open after the worker
+# dies, so an unbounded ``communicate()`` here would defeat the configured
+# timeout entirely.
+_BOUNDED_DRAIN_SECONDS = 10
+# The OS-native tree stop is itself a subprocess, so it is bounded too —
+# a hung taskkill must not stretch the receipt past the deadline.
+_BOUNDED_TREE_KILL_TIMEOUT_SECONDS = 10
+# ``GetSystemDirectoryW`` buffer size: the Win32 MAX_PATH.
+_SYSTEM_DIRECTORY_CHARS = 260
+
+
+def _bounded_stop_note(outcome: str) -> str:
+    """The exit-124 receipt tail describing the stop that actually ran."""
+
+    return "\nworker timed out; " + outcome
+
+
+def _windows_system_directory() -> "str | None":
+    """The OS-reported Windows system directory, or ``None``.
+
+    The worker runs inside its own worktree, so the current directory and
+    ``PATH`` are worker-reachable — a ``taskkill.exe`` planted there is
+    exactly what a ``shutil.which`` search would resolve first on
+    Windows. ``GetSystemDirectoryW`` instead answers the directory the OS
+    itself uses, without relying on repository-controlled search paths.
+    A failed, empty, or truncated read returns ``None`` so the caller fails closed rather
+    than inventing a path.
+    """
+
+    if os.name != "nt":
+        return None
+    buffer = ctypes.create_unicode_buffer(_SYSTEM_DIRECTORY_CHARS)
+    try:
+        length = ctypes.windll.kernel32.GetSystemDirectoryW(
+            buffer, _SYSTEM_DIRECTORY_CHARS)
+    except (AttributeError, OSError):
+        return None
+    if not 0 < length < _SYSTEM_DIRECTORY_CHARS:
+        return None
+    return buffer.value
+
+
+def _system_taskkill() -> "str | None":
+    """Absolute ``taskkill.exe`` in the OS system directory, or ``None``.
+
+    Resolution never searches the current directory or ``PATH``; when the
+    OS directory or the binary itself is unavailable the caller's
+    direct-child fallback is the safe answer.
+    """
+
+    system = _windows_system_directory()
+    if system is None:
+        return None
+    candidate = os.path.join(system, "taskkill.exe")
+    return candidate if os.path.isfile(candidate) else None
+
+
+def _stop_process_tree(process: "subprocess.Popen[Any]") -> bool:
+    """Force-stop the worker's whole process tree; True only if it ran.
+
+    Windows tracks parent links, so ``taskkill /T /F`` is the OS-native way
+    to reach the ordinary descendants that inherited the worker's output
+    handles — the ``Popen`` terminate/kill pair only ever reaches the
+    direct child. The binary is resolved to an absolute path inside the
+    OS-reported system directory so a lookalike ``taskkill.exe`` on the
+    worker-controlled current directory or ``PATH`` is never launched.
+    Hosts without an OS-native tree stop — or where the system binary
+    cannot be resolved — return ``False`` so the caller falls back to
+    that direct-child lifecycle, and a nonzero ``taskkill`` exit (the
+    worker already gone, or the walk denied) is not a tree stop the
+    caller may claim. If the root worker has already exited, PID-based
+    lookup may miss its surviving descendants. The caller then bounds its
+    drain and reports only direct-child or unconfirmed cleanup; it does
+    not establish that those descendants stopped.
+    """
+
+    if os.name != "nt":
+        return False
+    taskkill = _system_taskkill()
+    if taskkill is None:
+        return False
+    try:
+        completed = subprocess.run(
+            [taskkill, "/PID", str(process.pid), "/T", "/F"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=_BOUNDED_TREE_KILL_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0
+
+
+def _close_abandoned_stream(stream: "BinaryIO") -> None:
+    """Close one captured stream; deferred cleanup never raises."""
+    with suppress(OSError, ValueError):
+        stream.close()
+
+
+def _abandon_drain(process: "subprocess.Popen[Any]") -> bool:
+    """Detach from captured pipes a surviving descendant still holds.
+
+    The drain deadline already expired, so the runner attempts to stop
+    and reap the direct child within a bound, and hands each captured
+    stream's ``close()`` to a daemon thread instead of closing inline.
+    ``communicate()``'s daemon reader threads hold each
+    ``BufferedReader``'s internal lock until end-of-file, so a
+    synchronous ``close()`` here would wait on the very pipe holder that
+    outlived the drain bound — the fallback would hang past the deadline
+    it exists to enforce. The deferred close releases each descriptor as
+    soon as the pipe reaches EOF; a holder that never exits leaves only
+    a parked daemon thread, which the interpreter never joins, so the
+    caller's return is never gated on it. An abandoned drain has no
+    partial stream to hand back — the receipt reports the outcome
+    instead.
+
+    The bounded ``wait`` is also the last termination check, so its
+    result is returned as the reap confirmation: ``True`` only when the
+    direct child's exit is actually observed. A grace expiry or a wait
+    error returns ``False`` — the child may still be alive and the caller
+    must not report it stopped.
+    """
+
+    for stream in (process.stdout, process.stderr):
+        if stream is not None:
+            threading.Thread(
+                target=_close_abandoned_stream,
+                args=(stream,),
+                name="side-lane-abandoned-stream-close",
+                daemon=True,
+            ).start()
+    with suppress(OSError):
+        process.kill()
+    try:
+        process.wait(timeout=_BOUNDED_STOP_GRACE_SECONDS)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return True
+
+
+def _stop_bounded_process(process: "subprocess.Popen[Any]") -> tuple[Any, Any, str]:
+    """Stop a timed-out worker; return ``(stdout, stderr, outcome)``.
+
+    ``outcome`` is the truthful cleanup description the caller appends to
+    the exit-124 receipt. POSIX workers are launched in their own session,
+    so ``os.killpg`` SIGTERMs then — after a short grace — SIGKILLs the
+    worker's whole process group, which covers ordinary descendants that
+    stayed in the group (a process that deliberately escaped the group is
+    out of scope). The worker may still exit on its own between the
+    timeout and any escalation step, so ``ProcessLookupError`` from either
+    signal is the requested outcome arriving early, not a failure — it is
+    suppressed and the exit is reaped normally instead of escaping the
+    runner.
+
+    On hosts without POSIX process groups the direct child is stopped
+    through the ``Popen`` lifecycle — ``terminate`` then ``kill`` after the
+    same grace — except on Windows, where ``_stop_process_tree``
+    force-stops the whole tree first so an ordinary descendant that
+    inherited the output handles cannot keep the captured pipes open past
+    the deadline. Every stage of that Windows/direct-child path is
+    bounded: the final drain gets ``_BOUNDED_DRAIN_SECONDS``, and a handle
+    holder outside the stopped tree ends the wait with an ``output
+    capture abandoned`` outcome rather than an unbounded hang — qualified
+    to ``termination unconfirmed`` when the abandoned drain could not
+    confirm the direct child's exit either, so the receipt never claims a
+    stop that may not have happened. The POSIX branch's post-SIGKILL
+    ``communicate()`` is pre-existing and stays unbounded by design: the
+    group kill already released ordinary same-group handles, and a
+    descendant that escaped the session remains out of scope.
+    """
+
+    if _posix_process_groups():
+        escalations = (
+            (signal.SIGTERM, _BOUNDED_STOP_GRACE_SECONDS),
+            (signal.SIGKILL, None),
+        )
+        for signum, grace in escalations:
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signum)
+            try:
+                return (*process.communicate(timeout=grace),
+                        "process group stopped")
+            except subprocess.TimeoutExpired:
+                continue  # escalate to the final signal
+        return (*process.communicate(), "process group stopped")
+
+    if _stop_process_tree(process):
+        outcome = "process tree stopped"
+    else:
+        outcome = "worker process stopped"
+        with suppress(OSError):
+            process.terminate()
+        try:
+            return (*process.communicate(timeout=_BOUNDED_STOP_GRACE_SECONDS),
+                    outcome)
+        except subprocess.TimeoutExpired:
+            with suppress(OSError):
+                process.kill()
+    try:
+        return (*process.communicate(timeout=_BOUNDED_DRAIN_SECONDS), outcome)
+    except subprocess.TimeoutExpired:
+        if _abandon_drain(process):
+            return None, None, outcome + "; output capture abandoned"
+        return None, None, ("termination unconfirmed; "
+                            "output capture abandoned")
+
+
 def _bounded_process(command: list[str], *, timeout: int, **kwargs: Any) -> subprocess.CompletedProcess[str]:
-    """Run one Claude worker and stop its whole process group on timeout/cancel."""
+    """Run one worker under ``timeout``; on expiry, stop it and return 124.
+
+    The stop path is platform-scoped (``_stop_bounded_process``): on POSIX
+    the worker is launched in a new session so its whole process group can
+    be stopped on timeout or cancel. Windows attempts an OS-native process
+    tree stop, with direct-child termination as fallback and a bounded
+    output drain. The receipt names the actual cleanup outcome and is a
+    truthful exit-124 ``CompletedProcess`` carrying any captured stream plus
+    a ``worker timed out`` marker; ``KeyboardInterrupt`` still stops the
+    worker first, then propagates.
+    """
 
     if kwargs.pop("capture_output", False):
         kwargs["stdout"] = subprocess.PIPE
         kwargs["stderr"] = subprocess.PIPE
     kwargs.pop("check", None)
-    process = subprocess.Popen(command, start_new_session=True, **kwargs)
+    if _posix_process_groups():
+        # POSIX-only launch flag; passing it elsewhere is meaningless.
+        kwargs["start_new_session"] = True
+    process = subprocess.Popen(command, **kwargs)
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except (subprocess.TimeoutExpired, KeyboardInterrupt) as exc:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-            stdout, stderr = process.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            stdout, stderr = process.communicate()
-        except ProcessLookupError:
-            stdout, stderr = process.communicate()
+        stdout, stderr, outcome = _stop_bounded_process(process)
         if isinstance(exc, KeyboardInterrupt):
             raise
-        return subprocess.CompletedProcess(command, 124, stdout,
-            (stderr or "") + "\nworker timed out; process group stopped")
+        note = _bounded_stop_note(outcome)
+        if isinstance(stderr, bytes):
+            stderr = (stderr or b"") + note.encode()
+        else:
+            stderr = (stderr or "") + note
+        return subprocess.CompletedProcess(command, 124, stdout, stderr)
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 

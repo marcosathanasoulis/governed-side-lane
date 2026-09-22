@@ -20,6 +20,13 @@ from unittest import mock
 from side_lane import cli, web_domains, worktrees
 from side_lane.adapters import claude, codex, devin
 
+# Hermetic suite: an inherited SIDE_LANE_MODELS_PATH or
+# SIDE_LANE_ROUTING_CATALOG_PATH would silently re-point the config and
+# catalog defaults these tests exercise, so both are removed at import.
+# Tests that want an override set it explicitly (mock.patch.dict).
+for _var in ("SIDE_LANE_MODELS_PATH", "SIDE_LANE_ROUTING_CATALOG_PATH"):
+    os.environ.pop(_var, None)
+
 
 #: A real host the failure this change repairs actually needed.
 GOOGLE = "cloud.google.com"

@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import signal
 import subprocess
 import tempfile
 import unittest
@@ -505,7 +506,7 @@ class DevinAdapterTests(unittest.TestCase):
         code, stdout, stderr = devin._run(("devin",), cwd=Path("."), env={}, timeout=1,
             popen=mock.Mock(return_value=process))
         self.assertEqual((code, stdout, stderr), (124, "partial", "timed out"))
-        killpg.assert_called_once_with(42, devin.signal.SIGTERM)
+        killpg.assert_called_once_with(42, signal.SIGTERM)
 
     def test_command_names_the_resolved_lane_scratch_directory_for_every_configured_model(self) -> None:
         # Two configured Devin models from different vendors: the lane's

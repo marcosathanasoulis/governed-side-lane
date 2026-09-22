@@ -31,3 +31,22 @@ jobs:
       - name: Check shell installer syntax
         working-directory: plugins/governed-side-lane
         run: bash -n scripts/install.sh
+
+  # The bounded worker lifecycle has a non-POSIX branch (no killpg/SIGKILL):
+  # run the portable lifecycle module and the Codex timeout tests for real on
+  # Windows so the OS-native process-tree stop (taskkill /T /F) and the
+  # bounded drain are exercised by actual subprocesses — including a
+  # descendant that inherits the output pipes — not only mocked on POSIX
+  # hosts.
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Bounded lifecycle and Codex timeout tests
+        working-directory: plugins/governed-side-lane
+        run: >-
+          python -m unittest tests.test_bounded_process
+          tests.test_codex_adapter.CodexTimeoutTests -v

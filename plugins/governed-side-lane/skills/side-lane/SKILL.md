@@ -180,11 +180,21 @@ approval gates.
 Claude-host and Devin-host workers default to a 30-minute (1,800-second)
 process timeout. An explicit model route's positive integer `timeout_seconds`
 overrides that default; inspect the installed configuration before reporting
-an effective limit. Native Codex routes have no Side Lane process timeout.
-Provider request limits, host-service limits, readiness checks, and explicit
-task budgets are separate. A timeout change applies to subsequent launches;
-it cannot extend an already-running worker. Keep partial results and report
-failure under the existing retry and authorization rules.
+an effective limit. Native Codex routes have no Side Lane process timeout
+unless the route sets `timeout_seconds` — a configured positive integer
+bounds the worker. Cleanup stops its process group on POSIX hosts and
+attempts the OS-native `taskkill /T /F` tree stop on Windows — resolved to
+the OS system directory's own binary, never the worker-reachable current
+directory or `PATH` — falling back to direct-child termination if
+unavailable or unsuccessful. If the Windows root worker has already exited,
+PID-based cleanup can miss descendants that remain alive holding output pipes.
+The caller still bounds its drain; a direct-child stop receipt does not confirm
+descendant termination. An exceeded run returns exit 124 with the actual cleanup outcome and any captured partial
+stream; abandoned output capture may contain no partial stream. Provider request limits, host-service limits,
+readiness checks, and explicit task budgets are separate. A timeout change
+applies to subsequent launches; it cannot extend an already-running worker.
+Keep partial results and report failure under the existing retry and
+authorization rules.
 
 After execution approval, dispatch the exact approved route and record route
 recheck, dispatch, worktree and capability grants, handoff, validation, and
