@@ -26,7 +26,12 @@ from side_lane.capabilities import (
     USER_SCOPE_MCP_CAPABILITIES,
 )
 from side_lane.credentials import scrub_backend_environment
-from side_lane.governance import known_capabilities, lane_system_prompt, tool_policy
+from side_lane.governance import (
+    known_capabilities,
+    lane_system_prompt,
+    report_write_capability_conflicts,
+    tool_policy,
+)
 from side_lane.mcp_run_config import (
     McpRunServer,
     build_strict_mcp_bundle,
@@ -890,8 +895,14 @@ def allowed_tools(mode: str, capabilities: Capabilities = (),
     return tuple(tools)
 
 
-def disallowed_tools(mode: str, capabilities: Capabilities = ()) -> tuple[str, ...]:
-    """Deny rules that must accompany an allow rule (deny wins in Claude Code)."""
+def disallowed_tools(mode: str, capabilities: Capabilities = (), *,
+                     report_deliverable: bool = False) -> tuple[str, ...]:
+    """Deny rules that must accompany an allow rule (deny wins in Claude Code).
+
+    ``report_deliverable`` adds the canonical report-lane git-write denials. It
+    is a property of the lane, not a capability, so it is applied independently
+    of any grant the lane carries and applies even to a lane granted nothing.
+    """
 
     granted = _capability_set(capabilities)
     if mode != "execute":
@@ -901,6 +912,8 @@ def disallowed_tools(mode: str, capabilities: Capabilities = ()) -> tuple[str, .
     for name, rules in policy.denied.items():
         if name in granted:
             tools.extend(rule for rule in rules if rule not in tools)
+    if report_deliverable:
+        tools.extend(rule for rule in policy.report_denied if rule not in tools)
     return tuple(tools)
 
 
@@ -1322,6 +1335,47 @@ def _report_only_baseline(
         raise ClaudeAdapterError(f"report-only cannot start: {exc}") from exc
 
 
+def reject_report_write_capabilities(
+    capabilities: Sequence[str], report_deliverable: bool
+) -> None:
+    """Refuse explicit write capabilities a report-deliverable lane must not hold.
+
+    The CLI refuses these before it builds a lane, but both public entry points
+    here may be called directly with `capabilities`, and a report lane must not
+    gain by that route what the CLI would not grant: this is a property of the
+    contract, not of the argv that usually carries it. ``workspace-write`` — the
+    report artifact's own write — and every read capability are untouched.
+    """
+
+    if not report_deliverable:
+        return
+    conflicts = report_write_capability_conflicts(capabilities)
+    if conflicts:
+        raise ClaudeAdapterError(
+            "a report-deliverable lane is never granted "
+            + ", ".join(conflicts)
+            + ": its deliverable is the report artifact in the lane worktree, so "
+            "it makes no push of a branch it was told not to commit and no workflow "
+            "or messaging write. Drop the capability, or run an ordinary execute "
+            "lane."
+        )
+
+
+def effective_report_deliverable(report_deliverable: bool, report_only: bool) -> bool:
+    """One lane property, two spellings: either flag selects the contract.
+
+    ``report_only`` predates the canonical report-deliverable contract and is
+    enforced through the run-bound Stop hook; ``report_deliverable`` is the
+    semantic flag the CLI derives (``--report-deliverable``, or ``--report-only``,
+    which implies it). A caller may set either one alone, so no boundary may
+    treat the two as tied: each normalizes to this one effective value, and the
+    rendered instruction, the git-write denials, and the audited
+    ``LaneResult.disallowed_tools`` all read it.
+    """
+
+    return bool(report_deliverable or report_only)
+
+
 def require_report_only_budget(model_config: Mapping[str, Any]) -> str:
     """Return the finite positive USD cap a report-only lane must carry.
 
@@ -1461,6 +1515,7 @@ def build_command(
     mcp_config_path: str | Path | None = None,
     run_mcp_servers: "Mapping[str, Any] | None" = None,
     report_only: bool = False,
+    report_deliverable: bool = False,
     report_baseline: report_stop_hook.ReportBaseline | None = None,
     strict_mcp_config_path: str | Path | None = None,
     strict_mcp_support: bool | None = None,
@@ -1474,6 +1529,15 @@ def build_command(
         # The hook rides the execute lane's own argv and settings; a review
         # lane's argv is the strict read-only form and must stay byte-identical.
         raise ClaudeAdapterError("report-only is execute mode only for the Claude host")
+    # A caller that set only the older Stop-hook flag asked for the same lane:
+    # normalize here so the rendered contract and the deny rules below cannot
+    # depend on the CLI having passed both spellings.
+    report_deliverable = effective_report_deliverable(report_deliverable, report_only)
+    if report_deliverable and mode != "execute":
+        # The report contract narrows the execute grant; a review lane never
+        # received that grant, and its argv is the strict read-only form.
+        raise ClaudeAdapterError("report deliverable is execute mode only for the Claude host")
+    reject_report_write_capabilities(capabilities, report_deliverable)
     armed_baseline: report_stop_hook.ReportBaseline | None = None
     if report_only:
         # Fail before the model, not after: the opt-in only makes sense if the
@@ -1578,9 +1642,11 @@ def build_command(
             command.extend(("--mcp-config", str(mcp_config_path)))
         for tool in allowed_tools(mode, capabilities, web_domains):
             command.extend(("--allowedTools", tool))
-        for tool in disallowed_tools(mode, capabilities):
+        for tool in disallowed_tools(mode, capabilities,
+                                     report_deliverable=report_deliverable):
             command.extend(("--disallowedTools", tool))
-    system_prompt = lane_system_prompt(mode, repo_path)
+    system_prompt = lane_system_prompt(mode, repo_path,
+                                       report_deliverable=report_deliverable)
     if mode == "execute" and "playwright" in _capability_set(capabilities):
         system_prompt += PLAYWRIGHT_STARTUP_INSTRUCTION
     if mode == "execute" and "slack-read" in _capability_set(capabilities):
@@ -1803,12 +1869,21 @@ def launch(
     web_domains: Sequence[str] = (),
     run_mcp_servers: "Mapping[str, McpRunServer] | None" = None,
     report_only: bool = False,
+    report_deliverable: bool = False,
     report_baseline: report_stop_hook.ReportBaseline | None = None,
 ) -> LaneResult:
     if web_domains and mode != "execute":
         # Adapter-level fail-closed mirror of the build_command guard: `launch`
         # may be called without going through that guard's inputs.
         raise ClaudeAdapterError("web domains are execute-only for the Claude host")
+    # Normalize at this boundary too, so the flag handed to the worker path (and
+    # from there to the audited LaneResult) is the effective one, not the raw
+    # default a caller that set only `report_only` left unset.
+    report_deliverable = effective_report_deliverable(report_deliverable, report_only)
+    # Refused here, before the ephemeral run-config and strict-bundle files are
+    # written and before any worker starts: no capability the CLI would refuse
+    # is honored on a direct call either.
+    reject_report_write_capabilities(capabilities, report_deliverable)
     if provider != NATIVE_PROVIDER and provider != "glm":
         qualification = model_config.get("qualification")
         if not isinstance(qualification, Mapping) or qualification.get("verified") is not True:
@@ -1886,6 +1961,7 @@ def launch(
             run_mcp_servers=run_mcp_servers,
             run_config_path=run_config_path,
             report_only=report_only,
+            report_deliverable=report_deliverable,
             report_baseline=report_baseline,
             strict_mcp_config_path=strict_mcp_config_path,
         )
@@ -1923,9 +1999,14 @@ def _launch_worker(
     run_mcp_servers: "Mapping[str, McpRunServer] | None",
     run_config_path: Path | None,
     report_only: bool = False,
+    report_deliverable: bool = False,
     report_baseline: report_stop_hook.ReportBaseline | None = None,
     strict_mcp_config_path: Path | None = None,
 ) -> LaneResult:
+    # The audit below records `disallowed_tools` from this one value, so it is
+    # normalized before either the argv or the receipt is built: the recorded
+    # audit can never disagree with the denials the worker actually ran under.
+    report_deliverable = effective_report_deliverable(report_deliverable, report_only)
     runtime_model, gateway, auth_method, billable = _route_metadata(
         provider, model, provider_config, model_config, mode
     )
@@ -1977,6 +2058,7 @@ def _launch_worker(
             mcp_config_path=run_config_path,
             run_mcp_servers=run_mcp_servers,
             report_only=report_only,
+            report_deliverable=report_deliverable,
             report_baseline=report_baseline,
             strict_mcp_config_path=strict_mcp_config_path,
             strict_mcp_support=strict_mcp_supported,
@@ -2065,7 +2147,8 @@ def _launch_worker(
         availability=availability,
         capabilities=granted,
         allowed_tools=allowed_tools(mode, granted, web_domains),
-        disallowed_tools=disallowed_tools(mode, granted),
+        disallowed_tools=disallowed_tools(mode, granted,
+                                          report_deliverable=report_deliverable),
         requested_model=model,
         # The transport requests this selector; it cannot attest to the
         # provider's response weight/version without a verified response field.

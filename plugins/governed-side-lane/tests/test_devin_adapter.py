@@ -648,5 +648,174 @@ class DevinAdapterTests(unittest.TestCase):
             popen.assert_not_called()
 
 
+class ReportDeliverableModeTests(unittest.TestCase):
+    """`--report-deliverable` on Devin: canonical rules in the per-run policy.
+
+    The assertions read the files a run actually produces (the per-run policy
+    JSON the PreToolUse hook consumes and the generated `devin-config.json`),
+    then replay a git-write command through the hook itself. The `git -C
+    <lane> ...` spelling is included because that normalisation is exactly the
+    parser limitation the contract names rather than hides.
+    """
+
+    def repo(self, root: Path, name: str) -> Path:
+        path = root / name
+        subprocess.run(["git", "init", "-b", "main", str(path)], check=True, capture_output=True)
+        return path
+
+    def config(self, model: str = "swe-2-medium"):
+        provider = {"gateway": "native-devin", "auth_method": "oauth", "billable": False}
+        route = {"runtime_model": model, "protocol": "native-devin",
+            "identity_contract": {"requested_model": model, "resolved_model": model,
+                                  "settings_precedence": "verified"},
+            "qualification": {"verified": True, "verified_on": "2026-09-11",
+                              "source": "mocked local report"}, "timeout_seconds": 600}
+        return provider, route
+
+    def capture_launch(self, root: Path, **overrides) -> dict:
+        model = "swe-2-medium"
+        provider, route = self.config(model)
+        process = mock.Mock(pid=41, returncode=0)
+        captured: dict = {}
+
+        def popen(command, **_kwargs):
+            config = json.loads(Path(command[command.index("--config") + 1]).read_text())
+            captured["config"] = config
+            captured["task"] = command[command.index("-p") + 1]
+            hook = next(entry for entry in config["hooks"]["PreToolUse"]
+                        if "devin_command_policy" in entry["hooks"][0]["command"])
+            captured["rules_path"] = hook["hooks"][0]["command"].split()[-1]
+            Path(command[command.index("--export") + 1]).write_text(
+                json.dumps({"steps": [{"model_name": model}]}))
+            process.communicate.return_value = ("done", "")
+            return process
+
+        lane = self.repo(root, "lane")
+        captured["lane"] = lane.resolve()
+        devin.launch(executable="devin", repo=self.repo(root, "repo"),
+            worktree=lane, provider="devin", model=model,
+            provider_config=provider, model_config=route, prompt="Report on it",
+            popen=popen, capabilities=("shell",),
+            user_config_path=root / "missing.json", **overrides)
+        captured["rules"] = json.loads(Path(captured["rules_path"]).read_text())
+        return captured
+
+    def decision(self, captured: dict, command: str):
+        return devin_command_policy.evaluate_event(
+            {"tool_name": "exec", "tool_input": {"command": command}},
+            captured["rules"]["allowed"], captured["rules"]["denied"],
+            worktree=captured["rules"]["worktree"])
+
+    def test_report_lane_denies_git_writes_in_policy_and_through_the_hook(self) -> None:
+        from side_lane.governance import EXECUTE_GIT_GRANT, tool_policy
+        with tempfile.TemporaryDirectory() as directory:
+            captured = self.capture_launch(Path(directory), report_deliverable=True)
+        # The hook policy file keeps the canonical spellings (the hook is the
+        # Bash-dialect matcher); every report rule is carried, unwidened.
+        for rule in tool_policy().report_denied:
+            self.assertIn(rule, captured["rules"]["denied"], rule)
+        # Devin's own permission layer takes the translated `Exec(...)` form of
+        # the same canonical rules.
+        for rule in ("Exec(git commit)", "Exec(git push)", "Exec(git merge)", "Exec(git fetch)"):
+            self.assertIn(rule, captured["config"]["permissions"]["deny"])
+        # `git commit` with no arguments is the bare form the canonical
+        # `Bash(git commit)` rule names; a rule that only matched the
+        # message-carrying spelling would let the lane's one forbidden write
+        # through uncontested.
+        for command in ("git commit", "git commit -m 'x'", "git push",
+                        "git merge origin/main", "git reset --hard", "git add -A",
+                        "git fetch", "git fetch origin main",
+                        f"git -C {captured['lane']} commit -m 'x'"):
+            verdict = self.decision(captured, command)
+            self.assertIsNotNone(verdict, command)
+            self.assertEqual(verdict["decision"], "block", command)
+        for command in ("git show HEAD", "git log --oneline -10"):
+            self.assertIsNone(self.decision(captured, command))
+        self.assertIn("## Report deliverable", captured["task"])
+        self.assertNotIn(EXECUTE_GIT_GRANT, captured["task"])
+        self.assertIn("SIDE_LANE_REPORT.md", captured["task"])
+
+    def test_ordinary_execute_lane_is_unchanged(self) -> None:
+        from side_lane.governance import EXECUTE_GIT_GRANT
+        with tempfile.TemporaryDirectory() as directory:
+            captured = self.capture_launch(Path(directory))
+        # No capability declares a deny rule, so the ordinary lane's deny list
+        # stays empty and the generic execute grant still reaches the worker.
+        self.assertEqual(captured["rules"]["denied"], [])
+        self.assertEqual(captured["config"]["permissions"]["deny"], [])
+        self.assertIn(EXECUTE_GIT_GRANT, captured["task"])
+        self.assertNotIn("## Report deliverable", captured["task"])
+        # The commit the report lane must not make is still ordinary work here,
+        # in both the bare and the message-carrying spelling.
+        self.assertIsNone(self.decision(captured, "git fetch origin main"))
+        self.assertIsNone(self.decision(captured, "git commit"))
+        self.assertIsNone(self.decision(captured, "git commit -m 'x'"))
+
+    def test_report_deliverable_is_execute_only_on_devin(self) -> None:
+        provider, route = self.config()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            popen = mock.Mock()
+            with self.assertRaisesRegex(devin.DevinAdapterError, "execute mode only"):
+                devin.launch(executable="devin", repo=self.repo(root, "repo"),
+                    worktree=self.repo(root, "lane"), provider="devin", model="swe-2-medium",
+                    provider_config=provider, model_config=route, prompt="Report on it",
+                    mode="review", report_deliverable=True, popen=popen)
+            popen.assert_not_called()
+
+    def test_runtime_config_keeps_report_denials_alongside_git_push_denials(self) -> None:
+        config = devin._runtime_config("swe-2-medium", ("git-push",),
+                                       worktree=Path("/lane"), report_deliverable=True)
+        deny = config["permissions"]["deny"]
+        self.assertIn("Exec(git push --force)", deny)
+        self.assertIn("Exec(git commit)", deny)
+        self.assertEqual(len(deny), len(set(deny)))
+        self.assertFalse(any("-C" in rule for rule in deny))
+
+    def test_report_lane_refuses_an_explicit_write_capability(self) -> None:
+        """The CLI refuses these; a direct caller must not hand them back.
+
+        `git-push` and `workflow-write` are the capabilities that carry explicit
+        write authority, and a report lane's deliverable is its report artifact.
+        The refusal is enforced at this adapter's entry points too, so a caller
+        that does not go through the CLI cannot launch a report lane that holds
+        one. `workspace-write` — the report artifact's own write — is not one.
+        """
+
+        provider, route = self.config()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for capability in ("git-push", "workflow-write"):
+                with self.subTest(capability=capability):
+                    popen = mock.Mock()
+                    with self.assertRaisesRegex(devin.DevinAdapterError, capability):
+                        devin.launch(executable="devin", repo=self.repo(root, "repo"),
+                            worktree=self.repo(root, "lane"), provider="devin",
+                            model="swe-2-medium", provider_config=provider,
+                            model_config=route, prompt="Report on it", popen=popen,
+                            capabilities=("shell", "workspace-write", capability),
+                            report_deliverable=True)
+                    popen.assert_not_called()
+                    with self.assertRaisesRegex(devin.DevinAdapterError, capability):
+                        devin.build_command(executable="devin", repo=self.repo(root, "repo"),
+                            worktree=self.repo(root, "lane"), provider="devin",
+                            model="swe-2-medium", provider_config=provider,
+                            model_config=route, prompt="Report on it",
+                            export_path=root / "atif.json", config_path=root / "config.json",
+                            capabilities=("shell", capability), report_deliverable=True)
+            # The report artifact's own write, and an ordinary execute lane's
+            # grants, still build.
+            self.assertTrue(devin.build_command(executable="devin", repo=self.repo(root, "repo"),
+                worktree=self.repo(root, "lane"), provider="devin", model="swe-2-medium",
+                provider_config=provider, model_config=route, prompt="Report on it",
+                export_path=root / "atif.json", config_path=root / "config.json",
+                capabilities=("shell", "workspace-write"), report_deliverable=True))
+            self.assertTrue(devin.build_command(executable="devin", repo=self.repo(root, "repo"),
+                worktree=self.repo(root, "lane"), provider="devin", model="swe-2-medium",
+                provider_config=provider, model_config=route, prompt="Implement it",
+                export_path=root / "atif.json", config_path=root / "config.json",
+                capabilities=("shell", "git-push", "workflow-write")))
+
+
 if __name__ == "__main__":
     unittest.main()

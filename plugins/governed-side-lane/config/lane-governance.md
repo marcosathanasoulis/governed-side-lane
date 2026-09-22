@@ -249,6 +249,81 @@ direct `NAME=value command` prefixes may prompt the native Devin permission laye
 The `env` form does not grant a new launcher: the policy hook still checks the
 literal value and the underlying command against the execute allowlist.
 
+## Report deliverable
+
+A report-deliverable lane's deliverable is its report artifact, not a commit.
+The runner selects this section — and only this section — with an explicit
+report option, and renders it for every host, including a host where nothing in
+it can be enforced.
+
+- Make no source change, and no change to application configuration,
+  infrastructure, credentials, or data.
+- Make no git write of any kind. Do not run `git add`, `git commit`,
+  `git push`, `git checkout`, `git switch`, `git restore`, `git stash`,
+  `git reset`, `git merge`, `git revert`, `git cherry-pick`, `git apply`,
+  `git am`, `git mv`, `git rm`, `git tag`, or `git update-index`, and run no
+  other command that changes the index, the branch, or any other Git state.
+  Where a conflicting repository commit convention — a repository instruction
+  file, skill, or convention that requires the lane's work to be committed,
+  that nothing stays uncommitted, or that the runner commits the lane worktree
+  — would otherwise require a commit or a push, this contract governs the
+  lane's own commit and push decisions instead, and the grant bullets above
+  that would have authorized them are not rendered into it. That is a narrow
+  rule about conflicting repository commit conventions. It is not a claim of
+  precedence over a higher-priority security or system instruction, and it is
+  not a claim about instruction ordering within a host: where a host orders
+  its own instruction files ahead of this task instruction, that host's
+  ordering applies, and the runner's after-the-fact verification below is what
+  enforces this contract.
+- Your one deliverable path is `SIDE_LANE_REPORT.md` at the lane worktree
+  root. Write it early and revise it incrementally as you work, so a run cut
+  short before its last step still leaves its best available report; revising
+  that same file is the incremental update, and it is not a second artifact.
+  Do not create another report file at the lane root to hold a draft: the
+  runner accepts that one path, and an extra root-level file is refused rather
+  than delivered.
+- `.side-lane-scratch/` stays available for throwaway notes and intermediate
+  output, untracked, exactly as the Common rules above describe. A draft may
+  live there when the approved task names it; it is never committed and never
+  a substitute for the deliverable.
+- Existing browser-report artifacts are unchanged. A report lane granted the
+  `playwright` capability may still leave its `SIDE_LANE_REPORT-<name>.<ext>`
+  evidence at the lane root under the same namespace, untracked-status
+  requirement, and caps as before; those files are capability-scoped evidence,
+  not an incremental home for the report.
+
+A report lane is also never granted a capability whose only effect is explicit
+write authority. Those capability names are declared once, here, on the one
+machine-readable line below, and the runner derives its refusals by reading
+that line rather than from a list kept beside this document:
+
+Report forbidden write capabilities: `git-push`, `workflow-write`
+
+The line must appear exactly once in this section, name at least one capability,
+and hold only backticked capability identifiers separated by commas; a missing,
+malformed, reworded, or duplicated declaration stops the run instead of
+narrowing or inventing a refusal. Nothing else is refused: `workspace-write` is
+the report artifact's own write and every read capability stays available.
+
+Enforcement differs by host, and this section claims no more than each host
+delivers. Claude and Devin carry the `report-deliverable (denied)` rules of the
+Execute tool allowlist below, alongside the Common rules. Those are
+command-string rules: `git -C <path> ...`, reordered or bundled options, a
+compound invocation, and an allowed interpreter are not fully covered by them.
+They are an approval-boundary seam, not a sandbox — the worktree is edit
+isolation, never an operating-system boundary, and no same-user control here
+contains a deliberately adversarial process. Codex carries the instruction
+only: that host has no deny seam, so its report contract is instruction plus
+after-the-fact verification and is never prevention. On the installed Codex
+CLI 0.155.0-alpha.2.6, this contract and the repository's own `AGENTS.md` both arrive as user-role
+input, with the task text — this contract included — arriving after the
+repository file, so a repository instruction file is not inherently higher
+priority there; that ordering is an observation of the installed version, not a
+claim established for every version or for the cloud service. On every host the
+runner verifies the result after the run and refuses a report lane that
+committed or left unexpected files; that gate, not this instruction, is what is
+enforced.
+
 ## Execute tool allowlist
 
 The Claude host adapter renders this section, and only this section, into
@@ -258,8 +333,11 @@ above, which appends one `WebFetch(domain:HOST)` rule per explicitly granted
 host and nothing else. Review lanes never receive an allowlist. Each
 subsection names the capabilities that unlock its rules; `always` applies to
 every execute lane. Rules are ordinary developer
-commands; nothing here may match deploy, IAM, credential, cloud, merge, or
-release tooling, which stay forbidden by the Common rules above.
+commands; no capability here may grant deploy, IAM, credential, cloud, merge,
+or release tooling, which stay forbidden by the Common rules above. A reserved
+`report-deliverable (denied)` subsection is not a capability: it lists
+git-write commands that a report-deliverable lane must not run, so those rules
+exist there only to be denied and no capability ever grants them.
 
 This allowlist is an approval boundary for a headless session, not a security
 boundary. Execute lanes run with the same-user authority the Common rules
@@ -402,6 +480,33 @@ from host registration files, never values.
 - `Bash(git push * --mirror*)`
 - `Bash(git push +*)`
 - `Bash(git push * +*)`
+
+### report-deliverable (denied)
+
+- `Bash(git fetch)`
+- `Bash(git fetch *)`
+- `Bash(git add *)`
+- `Bash(git commit)`
+- `Bash(git commit *)`
+- `Bash(git checkout *)`
+- `Bash(git switch *)`
+- `Bash(git restore *)`
+- `Bash(git stash)`
+- `Bash(git stash *)`
+- `Bash(git merge)`
+- `Bash(git merge *)`
+- `Bash(git reset)`
+- `Bash(git reset *)`
+- `Bash(git revert *)`
+- `Bash(git cherry-pick *)`
+- `Bash(git apply *)`
+- `Bash(git am *)`
+- `Bash(git mv *)`
+- `Bash(git rm *)`
+- `Bash(git tag *)`
+- `Bash(git update-index *)`
+- `Bash(git push)`
+- `Bash(git push *)`
 
 ### gitnexus
 

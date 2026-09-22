@@ -3259,6 +3259,47 @@ class ReportOnlyCliTests(unittest.TestCase):
         create.assert_not_called()
         launch.assert_not_called()
 
+    def test_the_deliverable_flag_reaches_every_host_adapter(self) -> None:
+        """The semantic flag is threaded to each adapter on its own.
+
+        It is independent of `report_only`, which is Claude's Stop hook alone:
+        Claude receives both, Codex and Devin receive the semantic flag only.
+        """
+
+        for host in sorted(HOST_LAUNCH_TARGETS):
+            with self.subTest(host=host):
+                code, _stdout, errors, launch, _worktree = self._drive(
+                    host=host, report_only=False, report_deliverable=True,
+                    model_config={"runtime_model": "claude-sonnet-5",
+                                  "protocol": "native-claude"},
+                    report="# Findings\n- item\n")
+                self.assertEqual(code, 0, errors)
+                self.assertIs(launch.call_args.kwargs["report_deliverable"], True)
+                if host != "claude":
+                    self.assertNotIn("report_only", launch.call_args.kwargs)
+
+    def test_ordinary_execute_lanes_receive_the_flag_as_false(self) -> None:
+        """No lane is steered into a report contract by accident."""
+
+        for host in sorted(HOST_LAUNCH_TARGETS):
+            with self.subTest(host=host):
+                code, _stdout, errors, launch, _worktree = self._drive(
+                    host=host, report_only=False, report_deliverable=False,
+                    no_publish=False,
+                    model_config={"runtime_model": "claude-sonnet-5",
+                                  "protocol": "native-claude"})
+                self.assertEqual(code, 0, errors)
+                self.assertIs(launch.call_args.kwargs["report_deliverable"], False)
+
+    def test_report_only_also_sets_the_semantic_flag(self) -> None:
+        """`--report-only` still implies the verdict it always implied."""
+
+        code, _stdout, errors, launch, _worktree = self._drive(
+            report_only=True, report_deliverable=False, report="# Findings\n")
+        self.assertEqual(code, 0, errors)
+        self.assertIs(launch.call_args.kwargs["report_deliverable"], True)
+        self.assertIs(launch.call_args.kwargs["report_only"], True)
+
     def test_a_publication_request_on_a_report_run_is_refused(self) -> None:
         """A report run never publishes, so it cannot be granted a push.
 
@@ -3286,6 +3327,62 @@ class ReportOnlyCliTests(unittest.TestCase):
                 self.assertIn("git-push", str(caught.exception))
                 create.assert_not_called()
                 launch.assert_not_called()
+
+    def test_a_workflow_write_grant_on_a_report_run_is_refused(self) -> None:
+        """A report lane makes no external write, so it cannot hold one's grant.
+
+        `workflow-write` is the argv's other explicit write capability. Its only
+        grant is the execute lane's task-scoped workflow/messaging exemption,
+        which the report contract removes, so the combination is refused before
+        a lane exists — on both flags.
+        """
+
+        for label, overrides in (
+            ("--report-only", {"report_only": True}),
+            ("--report-deliverable", {"report_deliverable": True}),
+        ):
+            with self.subTest(flag=label):
+                repo = self.repo()
+                values = {"report_only": False, "capability": ["workflow-write"]}
+                values.update(overrides)
+                with (
+                    mock.patch("side_lane.cli.create_worktree") as create,
+                    mock.patch("side_lane.adapters.claude.launch") as launch,
+                ):
+                    with self.assertRaises(cli.SideLaneError) as caught:
+                        cli._launch(self._args(**values), cli.load_config(),
+                                    repo, "Research")
+                self.assertIn("workflow-write", str(caught.exception))
+                create.assert_not_called()
+                launch.assert_not_called()
+
+    def test_the_write_refusal_list_matches_the_canonical_capabilities(self) -> None:
+        """One list, two readers: a new canonical refusal cannot be unmapped."""
+
+        from side_lane.governance import report_forbidden_write_capabilities
+        self.assertEqual(set(cli.REPORT_WRITE_CAPABILITY_REFUSALS),
+                         set(report_forbidden_write_capabilities()))
+        # Read capabilities and the report artifact's own write are not here.
+        for capability in ("workspace-write", "shell", "playwright", "gcloud-read"):
+            self.assertNotIn(capability, cli.REPORT_WRITE_CAPABILITY_REFUSALS)
+
+    def test_an_ordinary_execute_lane_keeps_the_workflow_write_grant(self) -> None:
+        """The refusal is the report contract's, not a new rule for execute.
+
+        An ordinary execute lane whose approved task names the exact update and
+        recipient is the case the canonical exemption exists for; it still
+        launches with the capability.
+        """
+
+        code, _stdout, errors, launch, _worktree = self._drive(
+            report_only=False, report_deliverable=False,
+            capability=["workflow-write"],
+            capability_evidence={"workflow-write": {"state": "present"}},
+            model_config={"runtime_model": "claude-sonnet-5",
+                          "protocol": "native-claude"})
+        self.assertEqual(code, 0, errors)
+        self.assertEqual(launch.call_args.kwargs["capabilities"], ("workflow-write",))
+        self.assertIs(launch.call_args.kwargs["report_deliverable"], False)
 
     def test_a_deliverable_lane_is_never_published(self) -> None:
         code, stdout, errors, _launch, _worktree = self._drive(

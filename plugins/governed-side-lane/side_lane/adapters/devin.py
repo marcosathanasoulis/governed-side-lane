@@ -17,7 +17,12 @@ from side_lane import devin_command_policy
 from side_lane.adapters import claude
 from side_lane.capabilities import RUN_CONFIG_CAPABILITIES, USER_SCOPE_MCP_CAPABILITIES
 from side_lane.credentials import scrub_backend_environment
-from side_lane.governance import known_capabilities, lane_system_prompt, tool_policy
+from side_lane.governance import (
+    known_capabilities,
+    lane_system_prompt,
+    report_write_capability_conflicts,
+    tool_policy,
+)
 from side_lane.mcp_run_config import (
     McpRunServer,
     devin_local_payload,
@@ -183,6 +188,34 @@ def build_environment(inherited: Mapping[str, str]) -> dict[str, str]:
     })
 
 
+def reject_report_write_capabilities(
+    capabilities: Sequence[str], report_deliverable: bool
+) -> None:
+    """Refuse explicit write capabilities a report-deliverable lane must not hold.
+
+    The CLI refuses these before it builds a lane, but both public entry points
+    here may be called directly with `capabilities`, and a report lane must not
+    gain by that route what the CLI would not grant: this is a property of the
+    contract, not of the argv that usually carries it. ``workspace-write`` — the
+    report artifact's own write — and every read capability are untouched. The
+    per-run policy builder keeps its own report denials regardless; this guard
+    stops such a lane being built at all.
+    """
+
+    if not report_deliverable:
+        return
+    conflicts = report_write_capability_conflicts(capabilities)
+    if conflicts:
+        raise DevinAdapterError(
+            "a report-deliverable lane is never granted "
+            + ", ".join(conflicts)
+            + ": its deliverable is the report artifact in the lane worktree, so "
+            "it makes no push of a branch it was told not to commit and no workflow "
+            "or messaging write. Drop the capability, or run an ordinary execute "
+            "lane."
+        )
+
+
 def build_command(
     *, executable: str, repo: str | Path, worktree: str | Path, provider: str,
     model: str, provider_config: Mapping[str, Any], model_config: Mapping[str, Any],
@@ -191,12 +224,18 @@ def build_command(
     read_roots: Sequence[Path] = (),
     web_domains: Sequence[str] = (),
     run_mcp_servers: "Mapping[str, McpRunServer] | None" = None,
+    report_deliverable: bool = False,
 ) -> tuple[str, ...]:
     program = _nonempty(executable, "Devin executable")
     repo_path = _worktree(repo)
     worktree_path = _worktree(worktree)
     if repo_path == worktree_path:
         raise DevinAdapterError("execute lane requires a dedicated worktree")
+    if report_deliverable and mode != "execute":
+        # The report contract narrows the execute grant; a review lane never
+        # received that grant and carries no per-run permission policy at all.
+        raise DevinAdapterError("report deliverable is execute mode only for the Devin host")
+    reject_report_write_capabilities(capabilities, report_deliverable)
     _validate_route(provider, model, provider_config, model_config, mode)
     unknown = sorted(set(capabilities) - known_capabilities())
     if unknown:
@@ -215,7 +254,8 @@ def build_command(
     if "shell" in set(capabilities):
         exec_note = _native_exec_note(worktree_path)
         note = f"{note}\n\n{exec_note}" if note else exec_note
-    governed = (lane_system_prompt(mode, repo_path)
+    governed = (lane_system_prompt(mode, repo_path,
+                                  report_deliverable=report_deliverable)
                 + (f"\n\n{note}" if note else "")
                 + "\n\n# Approved task\n\n" + task)
     # No sandbox flag is passed. Devin runs locally with its normal user-host
@@ -408,7 +448,8 @@ def _runtime_config(model: str, capabilities: Sequence[str],
                     policy_hook_command: str | None = None,
                     worktree: Path | None = None,
                     read_roots: Sequence[Path] = (),
-                    web_domains: Sequence[str] = ()) -> dict[str, Any]:
+                    web_domains: Sequence[str] = (),
+                    report_deliverable: bool = False) -> dict[str, Any]:
     """Build Devin's runtime config from the canonical tool policy.
 
     File tools are scoped to real directories: the lane worktree, plus any
@@ -557,6 +598,16 @@ def _runtime_config(model: str, capabilities: Sequence[str],
             grant = devin_command_policy.devin_exec_deny_rule(rule)
             if grant is not None and grant not in preserved_rules["deny"]:
                 preserved_rules["deny"].append(grant)
+    if report_deliverable:
+        # The report lane's git-write denials are declared once, in the
+        # canonical governance document, and translated here — never copied
+        # into a second list. Deny rules are not widened: the hook strips `-C`
+        # before matching them with `anywhere=True`, so one spelling covers the
+        # `git -C <lane>` form.
+        for rule in policy.report_denied:
+            grant = devin_command_policy.devin_exec_deny_rule(rule)
+            if grant is not None and grant not in preserved_rules["deny"]:
+                preserved_rules["deny"].append(grant)
     config["permissions"] = {
         "allow": allow,
         **preserved_rules,
@@ -664,24 +715,38 @@ def launch(
     user_config_path: Path | None = None, read_roots: Sequence[Path] = (),
     web_domains: Sequence[str] = (),
     run_mcp_servers: "Mapping[str, McpRunServer] | None" = None,
+    report_deliverable: bool = False,
 ) -> LaneResult:
     repo_path = _worktree(repo)
     worktree_path = _worktree(worktree)
+    if report_deliverable and mode != "execute":
+        raise DevinAdapterError("report deliverable is execute mode only for the Devin host")
+    # Refused before the run directory and its per-run policy are created: no
+    # capability the CLI would refuse is honored on a direct call either.
+    reject_report_write_capabilities(capabilities, report_deliverable)
     timeout = _validate_route(provider, model, provider_config, model_config, mode)
     support_root = worktree_path.parent / ".side-lane-runtime"
     support_root.mkdir(parents=True, exist_ok=True)
     run_dir = Path(tempfile.mkdtemp(prefix=f"{worktree_path.name}-", dir=support_root))
     export_path = run_dir / "devin-atif.json"
     config_path = run_dir / "devin-config.json"
+    policy = tool_policy()
     command_capabilities = sorted(set(capabilities) & {"shell", "workspace-write", "git-push"})
     allowed_rules = list(dict.fromkeys(
         rule for capability in command_capabilities
-        for rule in tool_policy().allowed.get(capability, ()) if rule.startswith("Bash(")
+        for rule in policy.allowed.get(capability, ()) if rule.startswith("Bash(")
     ))
     denied_rules = list(dict.fromkeys(
         rule for capability in command_capabilities
-        for rule in tool_policy().denied.get(capability, ()) if rule.startswith("Bash(")
+        for rule in policy.denied.get(capability, ()) if rule.startswith("Bash(")
     ))
+    if report_deliverable:
+        # The report-lane git-write denials come from the same canonical
+        # document as every other rule here; they are a property of the lane,
+        # so a lane granted no command capability still carries them.
+        denied_rules.extend(
+            rule for rule in policy.report_denied if rule not in denied_rules
+        )
     policy_hook_command = None
     if mode == "execute":
         # Install the hook whenever an execute lane has a worktree to contain,
@@ -699,7 +764,8 @@ def launch(
                                           str(policy_path)))
     config_path.write_text(json.dumps(_runtime_config(
         model, capabilities, _load_user_config(user_config_path), policy_hook_command,
-        worktree=worktree_path, read_roots=read_roots, web_domains=web_domains
+        worktree=worktree_path, read_roots=read_roots, web_domains=web_domains,
+        report_deliverable=report_deliverable
     ), indent=2) + "\n",
                            encoding="utf-8")
     command = build_command(executable=executable, repo=repo_path, worktree=worktree_path,
@@ -707,7 +773,7 @@ def launch(
         model_config=model_config, prompt=prompt, export_path=export_path,
         config_path=config_path, mode=mode, capabilities=capabilities,
         read_roots=read_roots, web_domains=web_domains,
-        run_mcp_servers=run_mcp_servers)
+        run_mcp_servers=run_mcp_servers, report_deliverable=report_deliverable)
     child_env = build_environment(os.environ if env is None else env)
     # Per-run MCP delivery (execute only — this adapter supports no other
     # mode): validate env references against the environment the worker child

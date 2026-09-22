@@ -363,5 +363,113 @@ class CodexTimeoutTests(unittest.TestCase):
         self.assertIn("[REDACTED_PROVIDER_KEY]", result.stdout)
 
 
+class ReportDeliverableModeTests(unittest.TestCase):
+    """`--report-deliverable` on Codex: instruction only, with no deny seam.
+
+    This host has no per-command permission rule, so nothing here claims
+    prevention. The test pins the honest boundary: the contract reaches the
+    worker as instruction (with the committable grant removed) and the argv
+    stays `danger-full-access`, so the runner's after-the-fact delivery check is
+    the enforcement.
+    """
+
+    provider = {"gateway": "native-codex", "auth_method": "oauth", "billable": False}
+    execute = {"runtime_model": "gpt-5.6-terra", "protocol": "native-codex"}
+    review = {"runtime_model": "gpt-5.6-terra", "protocol": "native-codex-readonly"}
+
+    def repo(self, root: Path, name: str) -> Path:
+        path = root / name
+        path.mkdir()
+        (path / ".git").mkdir()
+        return path
+
+    def test_report_instruction_reaches_the_worker_without_the_commit_grant(self) -> None:
+        from side_lane.governance import EXECUTE_GIT_GRANT
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            command = codex.build_codex_command("codex", repo, lane, "openai",
+                "gpt-5.6-terra", self.provider, self.execute, "task",
+                report_deliverable=True)
+            plain = codex.build_codex_command("codex", repo, lane, "openai",
+                "gpt-5.6-terra", self.provider, self.execute, "task")
+        task = command[-1]
+        body = task.split("## Report deliverable")[0]
+        self.assertIn("## Report deliverable", task)
+        self.assertIn("SIDE_LANE_REPORT.md", task)
+        self.assertNotIn(EXECUTE_GIT_GRANT, body)
+        self.assertIn("## Active mode: Execute mode", body)
+        # The contract still reaches the task prompt, narrowed rather than
+        # dropped: the priority it claims is limited to conflicting repository
+        # commit conventions, it disclaims precedence over a higher-priority
+        # security or system instruction, and the host-ordering note names the
+        # installed version instead of claiming ordering for every Codex host.
+        report = " ".join(task.split())
+        self.assertIn("conflicting repository commit convention", report)
+        self.assertIn(
+            "not a claim of precedence over a higher-priority security or system "
+            "instruction", report)
+        self.assertIn("observation of the installed version", report)
+        self.assertIn(
+            "Report forbidden write capabilities: `git-push`, `workflow-write`",
+            report)
+        # The host has no deny seam, so no rule is emitted and the sandbox mode
+        # is unchanged: the contract here is instruction, never prevention, and
+        # the rendered text says so instead of implying an enforced boundary.
+        self.assertEqual(command[command.index("-s") + 1], "danger-full-access")
+        self.assertNotIn("--disallowedTools", command)
+        self.assertIn("no deny seam", task)
+        self.assertIn(EXECUTE_GIT_GRANT, plain[-1])
+        self.assertNotIn("## Report deliverable", plain[-1])
+
+    def test_report_deliverable_is_execute_only_on_codex(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            with self.assertRaisesRegex(codex.CodexAdapterError, "execute mode only"):
+                codex.build_codex_command("codex", repo, lane, "openai",
+                    "gpt-5.6-terra", self.provider, self.review, "task",
+                    mode="review", report_deliverable=True)
+            runner = mock.Mock()
+            with self.assertRaisesRegex(codex.CodexAdapterError, "execute mode only"):
+                codex.run_codex(executable="codex", repo=repo, worktree=lane,
+                    provider="openai", model="gpt-5.6-terra", provider_config=self.provider,
+                    model_config=self.review, prompt="task", mode="review",
+                    report_deliverable=True, runner=runner)
+            runner.assert_not_called()
+
+    def test_report_lane_refuses_an_explicit_write_capability(self) -> None:
+        """A direct caller cannot hand a report run a write capability.
+
+        `run_codex` is the only capability-carrying entry point here;
+        `build_codex_command` takes none, because this host has no deny seam and
+        a capability rides the instruction text rather than a rule list. The
+        refusal matches the CLI's, so a caller that skips the CLI gets no more
+        authority than the CLI grants. `workspace-write` — the report artifact's
+        own write — is not refused.
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            for capability in ("git-push", "workflow-write"):
+                with self.subTest(capability=capability):
+                    runner = mock.Mock()
+                    with self.assertRaisesRegex(codex.CodexAdapterError, capability):
+                        codex.run_codex(executable="codex", repo=repo, worktree=lane,
+                            provider="openai", model="gpt-5.6-terra",
+                            provider_config=self.provider, model_config=self.execute,
+                            prompt="task", capabilities=("shell", "workspace-write", capability),
+                            report_deliverable=True, runner=runner)
+                    runner.assert_not_called()
+            runner = mock.Mock(return_value=mock.Mock(returncode=0, stdout="", stderr=""))
+            codex.run_codex(executable="codex", repo=repo, worktree=lane,
+                provider="openai", model="gpt-5.6-terra", provider_config=self.provider,
+                model_config=self.execute, prompt="task",
+                capabilities=("shell", "workspace-write"), report_deliverable=True,
+                runner=runner)
+            runner.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

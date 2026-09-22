@@ -1722,21 +1722,40 @@ class ReportOnlyModeTests(unittest.TestCase):
         self.assertIn("--max-budget-usd", command)
 
     def test_opt_in_preserves_every_other_execute_control(self) -> None:
+        from side_lane.governance import tool_policy
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
             plain = self.command(repo, lane, capabilities=("shell",))
             opted = self.command(repo, lane, capabilities=("shell",), report_only=True)
-        # Same argv but for the settings payload: the opt-in must not widen
-        # tools, permission mode, MCP handling, or the model selector.
-        def without_settings(argv: list[str]) -> list[str]:
-            index = argv.index("--settings")
-            return argv[:index] + argv[index + 2:]
+        # Same argv but for the settings payload, the rendered report contract,
+        # and its git-write denials: the opt-in must not widen tools, permission
+        # mode, MCP handling, or the model selector, and every rule it adds is a
+        # denial, never a grant.
+        def without_report_parts(argv: list[str]) -> list[str]:
+            kept: list[str] = []
+            skip = 0
+            for part in argv:
+                if skip:
+                    skip -= 1
+                    continue
+                if part in ("--settings", "--append-system-prompt", "--disallowedTools"):
+                    skip = 1
+                    continue
+                kept.append(part)
+            return kept
 
-        self.assertEqual(without_settings(plain), without_settings(opted))
-        allowed = [part for part in opted if part.startswith("Bash(")]
+        self.assertEqual(without_report_parts(plain), without_report_parts(opted))
+        allowed = [opted[index + 1] for index, flag in enumerate(opted)
+                   if flag == "--allowedTools"]
+        denied = [opted[index + 1] for index, flag in enumerate(opted)
+                  if flag == "--disallowedTools"]
         self.assertIn("Bash(git commit *)", allowed)
         self.assertNotIn("Bash(git push *)", allowed)
+        self.assertEqual(denied, list(tool_policy().report_denied))
+        self.assertEqual([plain[index + 1] for index, flag in enumerate(plain)
+                          if flag == "--disallowedTools"],
+                         list(claude.disallowed_tools("execute", ("shell",))))
 
     # --- fail closed before any model launch ---------------------------------
 
@@ -1958,6 +1977,245 @@ class ReportOnlyModeTests(unittest.TestCase):
                 "hook_event_name": "Stop", "cwd": "/", "stop_hook_active": False})
         self.assertEqual(result.returncode, 0)
         self.assertEqual(json.loads(result.stdout.decode("utf-8"))["decision"], "block")
+
+
+class ReportDeliverableModeTests(unittest.TestCase):
+    """`--report-deliverable` reaches the argv without the committable grant.
+
+    The contract is host-agnostic: this class proves the Claude seam (the
+    rendered instruction plus the deny rules), and the Devin/Codex suites prove
+    theirs. Ordinary execute and review argv are asserted unchanged here too.
+    """
+
+    native = {"gateway": "native-claude", "auth_method": "oauth", "billable": False}
+
+    def repo(self, root: Path, name: str) -> Path:
+        path = root / name
+        path.mkdir()
+        (path / ".git").write_text("gitdir: /tmp/example\n", encoding="utf-8")
+        return path
+
+    def command(self, repo: Path, lane: Path, mode: str = "execute",
+                model_config: "dict | None" = None, **kwargs) -> list[str]:
+        protocol = "native-claude-readonly" if mode == "review" else "native-claude"
+        return claude.build_command(
+            executable="claude", repo=repo, worktree=lane, provider="claude",
+            model="claude-sonnet-5", provider_config=self.native,
+            model_config=(model_config
+                          or {"runtime_model": "claude-sonnet-5", "protocol": protocol}),
+            prompt="task", mode=mode, **kwargs,
+        )
+
+    def test_report_argv_denies_git_writes_and_renders_the_contract(self) -> None:
+        from side_lane.governance import EXECUTE_GIT_GRANT, tool_policy
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            command = self.command(repo, lane, report_deliverable=True)
+            plain = self.command(repo, lane)
+        denied = tuple(command[index + 1] for index, flag in enumerate(command)
+                       if flag == "--disallowedTools")
+        self.assertEqual(denied, tool_policy().report_denied)
+        for rule in ("Bash(git commit)", "Bash(git commit *)", "Bash(git push *)",
+                     "Bash(git merge *)", "Bash(git reset)"):
+            self.assertIn(rule, denied)
+        prompt = command[command.index("--append-system-prompt") + 1]
+        body = prompt.split("## Report deliverable")[0]
+        self.assertIn("## Report deliverable", prompt)
+        self.assertIn("SIDE_LANE_REPORT.md", prompt)
+        # Exactly two execute bullets are dropped — the commit/push grant and
+        # the task-scoped workflow/messaging grant — and the rest of the mode
+        # contract still reaches the worker.
+        self.assertNotIn(EXECUTE_GIT_GRANT, body)
+        self.assertNotIn("A workflow or messaging write is allowed", body)
+        self.assertIn("## Active mode: Execute mode", body)
+        self.assertIn("- Work only in the dedicated side-lane worktree and assigned lane branch.", body)
+        self.assertIn("- Database access is read-only", body)
+        self.assertIn("open pull requests", body)
+        self.assertNotIn("--disallowedTools", plain)
+
+    def test_ordinary_execute_and_review_argv_are_unchanged(self) -> None:
+        from side_lane.governance import EXECUTE_GIT_GRANT
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            command = self.command(repo, lane, capabilities=("shell", "git-push"))
+            prompt = command[command.index("--append-system-prompt") + 1]
+        # An ordinary execute lane still carries the generic grant it always had
+        # and none of the report-lane denials.
+        self.assertIn(EXECUTE_GIT_GRANT, prompt)
+        self.assertNotIn("## Report deliverable", prompt)
+        self.assertIn("Bash(git commit *)", command)
+        denied = tuple(command[index + 1] for index, flag in enumerate(command)
+                       if flag == "--disallowedTools")
+        self.assertEqual(denied, claude.disallowed_tools("execute", ("git-push",)))
+
+    def test_report_deliverable_applies_without_any_capability(self) -> None:
+        # A property of the lane, not a grant: a lane with no capability at all
+        # still carries the git-write denials.
+        denied = claude.disallowed_tools("execute", (), report_deliverable=True)
+        self.assertIn("Bash(git commit)", denied)
+        self.assertEqual(claude.disallowed_tools("execute", ()), ())
+
+    def test_report_deliverable_is_execute_only_and_never_reaches_review(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            with self.assertRaisesRegex(claude.ClaudeAdapterError, "execute mode only"):
+                self.command(repo, lane, mode="review", report_deliverable=True)
+        self.assertEqual(claude.disallowed_tools("review", ("git-push",),
+                                                report_deliverable=True), ())
+
+    # --- the older Stop-hook flag alone is the same lane ----------------------
+
+    def test_report_only_alone_selects_the_canonical_contract(self) -> None:
+        """A direct caller setting only `report_only` still gets the contract.
+
+        `report_only` predates the canonical report-deliverable contract, so the
+        CLI passes both flags and `report_deliverable` has a conservative default
+        for callers that do not go through it. The adapter boundary must not
+        depend on that: a lane opted in with the Stop-hook flag alone is the same
+        kind of lane, and must not keep the ordinary committable execute grant.
+        """
+        from side_lane.governance import EXECUTE_GIT_GRANT, tool_policy
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            command = self.command(
+                repo, lane, report_only=True,
+                model_config={"runtime_model": "claude-sonnet-5",
+                              "protocol": "native-claude", "max_budget_usd": 2.5},
+            )
+            plain = self.command(repo, lane)
+            settings = json.loads(command[command.index("--settings") + 1])
+        denied = tuple(command[index + 1] for index, flag in enumerate(command)
+                       if flag == "--disallowedTools")
+        self.assertEqual(denied, tool_policy().report_denied)
+        for rule in ("Bash(git commit)", "Bash(git commit *)", "Bash(git push *)"):
+            self.assertIn(rule, denied)
+        prompt = command[command.index("--append-system-prompt") + 1]
+        self.assertIn("## Report deliverable", prompt)
+        self.assertIn("SIDE_LANE_REPORT.md", prompt)
+        self.assertNotIn(EXECUTE_GIT_GRANT, prompt)
+        # The pre-existing report-only machinery is preserved, not replaced: the
+        # Stop hook, this run's freshness baseline, and the USD cap all still
+        # ride the one invocation.
+        self.assertIn("Stop", settings.get("hooks", {}))
+        hook_settings = json.loads(shlex.split(
+            settings["hooks"]["Stop"][0]["hooks"][0]["command"])[3])
+        self.assertIn(report_stop_hook.FRESHNESS_KEY, hook_settings)
+        self.assertIsNone(
+            hook_settings[report_stop_hook.FRESHNESS_KEY][
+                report_stop_hook.BASELINE_IDENTITY_KEY])
+        self.assertIn("--max-budget-usd", command)
+        # Nothing leaked into a lane that opted into neither.
+        self.assertNotIn("--disallowedTools", plain)
+
+    def test_report_only_alone_on_launch_reaches_the_argv_and_the_audit(self) -> None:
+        """`launch` normalizes once, so the argv and the audit agree.
+
+        The audited `LaneResult.disallowed_tools` is recorded from the same
+        effective flag the argv was built from; a raw default here would record
+        a lane as carrying no denials while its argv carried them.
+        """
+        from side_lane.governance import EXECUTE_GIT_GRANT, tool_policy
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            runner = mock.Mock(
+                return_value=subprocess.CompletedProcess([], 0, "done", ""))
+            result = claude.launch(
+                executable="claude", repo=repo, worktree=lane, provider="claude",
+                model="claude-sonnet-5", provider_config=self.native,
+                model_config={"runtime_model": "claude-sonnet-5",
+                              "protocol": "native-claude", "max_budget_usd": 2.5},
+                prompt="task", mode="execute", env={"PATH": "/bin"}, runner=runner,
+                report_only=True, readiness_runner=SUPPORTS_STRICT_MCP,
+            )
+        runner.assert_called_once()
+        self.assertEqual(result.disallowed_tools, tool_policy().report_denied)
+        denied = tuple(result.argv[index + 1] for index, flag in enumerate(result.argv)
+                       if flag == "--disallowedTools")
+        self.assertEqual(denied, tool_policy().report_denied)
+        prompt = result.argv[result.argv.index("--append-system-prompt") + 1]
+        self.assertIn("## Report deliverable", prompt)
+        self.assertNotIn(EXECUTE_GIT_GRANT, prompt)
+
+    def test_report_only_alone_still_fails_closed_before_the_model(self) -> None:
+        """Normalizing the flag must not relax the pre-model validation.
+
+        A report lane still needs its USD cap and still cannot be armed on a
+        review lane, whether the caller spelled the opt-in one way or the other.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "done", ""))
+            with self.assertRaisesRegex(claude.ClaudeAdapterError, "max_budget_usd"):
+                claude.launch(
+                    executable="claude", repo=repo, worktree=lane, provider="claude",
+                    model="claude-sonnet-5", provider_config=self.native,
+                    model_config={"runtime_model": "claude-sonnet-5",
+                                  "protocol": "native-claude"},
+                    prompt="task", mode="execute", env={"PATH": "/bin"}, runner=runner,
+                    report_only=True, readiness_runner=SUPPORTS_STRICT_MCP,
+                )
+            runner.assert_not_called()
+            with self.assertRaisesRegex(claude.ClaudeAdapterError, "execute mode only"):
+                self.command(repo, lane, mode="review", report_only=True)
+
+    # --- explicit write capabilities -----------------------------------------
+
+    def test_report_lane_refuses_an_explicit_write_capability(self) -> None:
+        """The CLI refuses these; a direct caller must not hand them back.
+
+        `git-push` and `workflow-write` are the capabilities that carry explicit
+        write authority, and a report lane's deliverable is its report artifact.
+        The refusal is a property of the lane, so the adapter boundary enforces
+        it too — before any argv exists and before the worker starts — rather
+        than relying on the CLI that normally builds them. `workspace-write` is
+        not one of them: the report artifact is a write inside the lane.
+        """
+
+        from side_lane.governance import EXECUTE_WORKFLOW_GRANT
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, lane = self.repo(root, "repo"), self.repo(root, "lane")
+            for capability in ("git-push", "workflow-write"):
+                with self.subTest(capability=capability):
+                    with self.assertRaisesRegex(claude.ClaudeAdapterError, capability):
+                        self.command(repo, lane, report_deliverable=True,
+                                     capabilities=("shell", "workspace-write", capability))
+            # `report_only` alone names the same lane, and the refusal lands
+            # before the runner the launch would drive.
+            runner = mock.Mock(
+                return_value=subprocess.CompletedProcess([], 0, "done", ""))
+            with self.assertRaisesRegex(claude.ClaudeAdapterError, "workflow-write"):
+                claude.launch(
+                    executable="claude", repo=repo, worktree=lane, provider="claude",
+                    model="claude-sonnet-5", provider_config=self.native,
+                    model_config={"runtime_model": "claude-sonnet-5",
+                                  "protocol": "native-claude", "max_budget_usd": 2.5},
+                    prompt="task", mode="execute", env={"PATH": "/bin"}, runner=runner,
+                    report_only=True, capabilities=("workflow-write",),
+                    readiness_runner=SUPPORTS_STRICT_MCP,
+                )
+            runner.assert_not_called()
+            # The report artifact's own write, and an ordinary execute lane's
+            # grants, are untouched.
+            artifact = self.command(
+                repo, lane, capabilities=("shell", "workspace-write"),
+                report_deliverable=True)
+            ordinary = self.command(
+                repo, lane, capabilities=("shell", "git-push", "workflow-write"))
+        self.assertIn("Write", artifact)
+        self.assertIn("Bash(git push *)", ordinary)
+        # The workflow/messaging grant is a wrapped bullet in the canonical
+        # source, so compare both sides with whitespace collapsed.
+        prompt = ordinary[ordinary.index("--append-system-prompt") + 1]
+        self.assertIn(
+            " ".join(EXECUTE_WORKFLOW_GRANT.split()), " ".join(prompt.split())
+        )
 
 
 class HostMemoryReadOnlyTests(unittest.TestCase):

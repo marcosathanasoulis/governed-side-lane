@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.49 - 2026-09-22
+
+- Reject explicit `git-push` and `workflow-write` capabilities for report lanes at CLI and adapter boundaries; retain report artifact writes and authorized reads. Remove both generic write grants from report instructions, tolerating Markdown bullet reflow while refusing missing or duplicate grants.
+
+- Deliver the canonical report-only override to Claude, Devin, and Codex, including direct Claude callers of `report_only`. Keep incremental work in the canonical report or permitted scratch rather than introducing extra root files.
+- Apply report-specific Git write denials through existing Claude and Devin permission seams. Keep ordinary execute permissions, report artifact limits, and post-run rejection unchanged. Codex remains instruction plus post-run verification; no universal shell containment is claimed.
+
 ## 0.4.48 - 2026-09-22
 
 - Enforce an explicitly configured Codex worker timeout while preserving absent-timeout behavior. Return a sanitized timeout receipt and retain the local worktree for coordinator recovery.

@@ -17,7 +17,11 @@ from side_lane import evaluation, report_stop_hook, routing, selector_policy
 from side_lane.auth import AuthError, auth_status, require_native_oauth
 from side_lane.credentials import CredentialError, credential_present, read_credential
 from side_lane.connector_metadata import json_mcp_name_scopes, toml_mcp_names
-from side_lane.governance import GovernanceError, validate_repository
+from side_lane.governance import (
+    GovernanceError,
+    report_write_capability_conflicts,
+    validate_repository,
+)
 from side_lane.hosts import (
     HostExecutableError,
     host_support_dir,
@@ -453,7 +457,12 @@ def make_parser() -> argparse.ArgumentParser:
         "this run also grants --capability playwright — untracked regular files "
         "at the lane root matching SIDE_LANE_REPORT-<name>.(png|jpg|jpeg|webp|"
         "yaml|yml|json|txt|md), at most 40 files and 20MiB each and 100MiB "
-        "total. Nothing else about the lane changes: the branch is never "
+        "total. Injects the canonical report override on every host and adds "
+        "report Git-write denials on Claude/Devin. Codex receives instructions "
+        "and the post-run verdict, without a preventive command hook. These "
+        "controls are not universal shell containment. Rejects the git-push and "
+        "workflow-write capabilities; workspace-write and authorized read "
+        "capabilities remain available. The branch is never "
         "published, the coordinator checkout is still checked for outside-lane "
         "writes, and an unreadable lane still fails closed. Carries no spend "
         "cap and no Stop hook — pass --report-only, which implies this option, "
@@ -1375,6 +1384,28 @@ BROWSER_ARTIFACT_MAX_FILES = 40
 BROWSER_ARTIFACT_MAX_BYTES = 20 * 1024 * 1024
 BROWSER_ARTIFACT_MAX_TOTAL_BYTES = 100 * 1024 * 1024
 
+#: Why each capability that carries explicit write authority is refused on a
+#: report run. The list of refusals is canonical
+#: (`governance.report_forbidden_write_capabilities`, read from the declaration
+#: line in the `Report deliverable` section); this maps each one to the
+#: operator-facing sentence naming the option they can look up.
+REPORT_WRITE_CAPABILITY_REFUSALS = {
+    "git-push": (
+        "a report run never publishes, so it is not granted --capability "
+        "git-push: the lane's deliverable is its report artifact and it "
+        "makes no commit. Drop the capability, or run an ordinary execute "
+        "lane that publishes its branch."
+    ),
+    "workflow-write": (
+        "a report run makes no external write, so it is not granted "
+        "--capability workflow-write: the lane's deliverable is its report "
+        "artifact, and the workflow or messaging exemption this capability "
+        "grants is not part of that contract. Drop the capability, or run an "
+        "ordinary execute lane whose approved task names the exact update and "
+        "recipient or object."
+    ),
+}
+
 
 def _is_browser_report_artifact_name(name: object) -> bool:
     """True when ``name`` is exactly one allowed artifact name at the lane root.
@@ -1925,9 +1956,10 @@ def _launch(
     # ended its turn with exit 0 and reported a report it never wrote. It is
     # deliberately narrow: execute mode only, the Claude host only (the
     # mechanism is a Claude Code Stop hook), and gated on an explicit spend cap
-    # so the cap and the hook are part of one command. Everything else about an
-    # execute lane — its argv, tools, permissions, MCP handling, timeout — is
-    # untouched by this flag, and review lanes never see it.
+    # so the cap and the hook are part of one command. Its implied report
+    # deliverable also injects the canonical override and Claude command
+    # denials. MCP handling and timeout remain unchanged; review lanes never
+    # see this flag.
     # Exact-boolean read: an argparse Namespace always carries the declared
     # flag, and anything other than an explicit True means the opt-in was not
     # given, so no lane can be steered into report-only mode by accident.
@@ -1937,8 +1969,9 @@ def _launch(
     # Stop hook plus a USD cap buys one more turn to write it. Only the second
     # is Claude's, and only the second bounds spend — so `--report-only`
     # implies this and keeps its hook and its cap, while `--report-deliverable`
-    # selects the verdict alone. A report lane can then run on any host and on
-    # any route, including the provider-key routes that carry no
+    # selects the report contract without that hook or cap: canonical
+    # instructions, host-specific command denials, and the post-run verdict.
+    # A report lane can run on any host and route, including provider-key routes with no
     # `max_budget_usd` and the Devin/Codex hosts where no Stop hook exists.
     report_deliverable = report_only or (
         getattr(args, "report_deliverable", False) is True
@@ -1947,21 +1980,17 @@ def _launch(
     # names an option they can look up. `--report-only` implies the verdict, so
     # a run carrying both is named for the flag that also bought the Stop hook.
     report_flag = "--report-only" if report_only else "--report-deliverable"
-    if report_deliverable and "git-push" in set(args.capability):
-        # `git-push` is the only publication request this argv can express, and
-        # a report run never publishes: its deliverable is the report artifact in
-        # the lane worktree, and an accepted report lane has no commit to make
-        # remote-contained. Granting the worker a push the run will never
-        # exercise would hand out inert authority over a remote for no gain, so
-        # the combination is refused here — before the spend cap the
-        # `--report-only` repair requires, because no cap makes it honorable —
-        # and on `--report-only` and `--report-deliverable` alike.
-        raise SideLaneError(
-            "a report run never publishes, so it is not granted --capability "
-            "git-push: the lane's deliverable is its report artifact and it "
-            "makes no commit. Drop the capability, or run an ordinary execute "
-            "lane that publishes its branch."
-        )
+    if report_deliverable:
+        # A report lane's deliverable is the report artifact in the lane
+        # worktree, so it never holds a capability whose grant is explicit write
+        # authority: no push of a branch it was told not to commit, and no
+        # workflow or messaging write, even though an ordinary execute lane may
+        # make one when its approved task names the exact update and recipient.
+        # Refused here — before the spend cap the `--report-only` repair
+        # requires, because no cap makes it honorable — and on `--report-only`
+        # and `--report-deliverable` alike.
+        for capability in report_write_capability_conflicts(args.capability):
+            raise SideLaneError(REPORT_WRITE_CAPABILITY_REFUSALS[capability])
     report_path: Path | None = None
     if report_only:
         if args.mode != "execute":
@@ -2185,6 +2214,7 @@ def _launch(
                 read_roots=read_roots,
                 web_domains=web_domains,
                 run_mcp_servers=run_mcp_servers,
+                report_deliverable=report_deliverable,
             )
         elif args.host == "claude":
             from side_lane.adapters.claude import launch
@@ -2205,6 +2235,7 @@ def _launch(
                 web_domains=web_domains,
                 run_mcp_servers=run_mcp_servers,
                 report_only=report_only,
+                report_deliverable=report_deliverable,
                 report_baseline=report_baseline,
             )
         else:
@@ -2224,6 +2255,7 @@ def _launch(
                 read_roots=read_roots,
                 web_domains=web_domains,
                 run_mcp_servers=run_mcp_servers,
+                report_deliverable=report_deliverable,
             )
     except Exception:
         dispose_clean_worktree(lane)

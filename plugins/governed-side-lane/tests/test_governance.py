@@ -448,5 +448,323 @@ class NegatedLinkageTests(LinkageWordingTests):
             self.assertIn("capabilities", hints)
 
 
+class ReportDeliverableContractTests(unittest.TestCase):
+    """The canonical report contract: one override, delivered on every host."""
+
+    def test_report_rules_are_a_reserved_non_capability_bucket(self) -> None:
+        from side_lane.governance import known_capabilities, tool_policy
+        policy = tool_policy()
+        self.assertTrue(policy.report_denied)
+        # Not a capability: nothing can be granted it, so it must not appear in
+        # the capability set the runtime allowlist is checked against.
+        self.assertNotIn("report-deliverable", policy.capabilities)
+        self.assertTrue(policy.capabilities <= known_capabilities())
+        for rule in ("Bash(git add *)", "Bash(git commit)", "Bash(git commit *)",
+                     "Bash(git push)", "Bash(git push *)", "Bash(git merge *)",
+                     "Bash(git reset)", "Bash(git stash *)",
+                     "Bash(git fetch)", "Bash(git fetch *)"):
+            self.assertIn(rule, policy.report_denied)
+        # The report rules do overlap the shell grants (`git add`, `git commit`
+        # and `git stash` are ordinary work): an ordinary execute lane keeps
+        # them, and in a report lane the deny seam is what wins.
+        self.assertIn("Bash(git commit *)", policy.allowed["shell"])
+        self.assertEqual(
+            claude.disallowed_tools("execute", ("shell",), report_deliverable=True),
+            claude.disallowed_tools("execute", ("shell",)) + policy.report_denied,
+        )
+
+    def test_report_prompt_drops_both_write_grants(self) -> None:
+        from side_lane.governance import EXECUTE_GIT_GRANT
+        plain = lane_system_prompt("execute", Path("/repo"))
+        report = lane_system_prompt("execute", Path("/repo"), report_deliverable=True)
+        self.assertIn(EXECUTE_GIT_GRANT, plain)
+        body = report.split("## Report deliverable")[0]
+        self.assertNotIn(EXECUTE_GIT_GRANT, body)
+        self.assertIn("## Report deliverable", report)
+        self.assertIn("SIDE_LANE_REPORT.md", report)
+        self.assertIn(".side-lane-scratch/", report)
+        # The remainder of execute mode still applies verbatim.
+        self.assertIn("## Active mode: Execute mode", body)
+        self.assertIn("- Work only in the dedicated side-lane worktree and assigned lane branch.", body)
+        self.assertIn("- Database access is read-only", body)
+        self.assertIn("open pull requests", body)
+
+    def test_report_prompt_drops_the_workflow_write_grant_too(self) -> None:
+        from side_lane.governance import EXECUTE_GIT_GRANT, EXECUTE_WORKFLOW_GRANT
+        # Both grants are compared whitespace-normalized: the workflow bullet
+        # wraps in the canonical source, so only its normalized text is a
+        # substring of the render.
+        plain = " ".join(lane_system_prompt("execute", Path("/repo")).split())
+        report = " ".join(lane_system_prompt(
+            "execute", Path("/repo"), report_deliverable=True).split())
+        # Both explicit write grants are ordinary execute rules ...
+        self.assertIn(EXECUTE_GIT_GRANT, plain)
+        self.assertIn(EXECUTE_WORKFLOW_GRANT, plain)
+        body = report.split("## Report deliverable")[0]
+        self.assertNotIn(EXECUTE_GIT_GRANT, body)
+        # ... and neither reaches a report lane: the report artifact is the
+        # deliverable, so the task-scoped workflow/messaging exemption, whose
+        # only grant is that bullet, is not granted either.
+        self.assertNotIn(EXECUTE_WORKFLOW_GRANT, body)
+        self.assertNotIn("workflow or messaging write", body)
+        self.assertIn("- Database access is read-only", body)
+
+    def test_removed_grants_are_matched_as_whole_bullets_however_wrapped(self) -> None:
+        """A reflowed bullet is still one bullet: matching normalizes whitespace.
+
+        The grant is identified by the *complete* bullet — its continuation
+        lines included — so the canonical file may re-wrap it without the
+        override silently leaving the grant in a report lane's contract.
+        """
+        from side_lane.governance import EXECUTE_GIT_GRANT, EXECUTE_WORKFLOW_GRANT
+        base = (ROOT / "config/lane-governance.md").read_text(encoding="utf-8")
+        commit_source = "- " + EXECUTE_GIT_GRANT + "\n"
+        workflow_source = (
+            "- A workflow or messaging write is allowed only when the approved task names\n"
+            "  that exact update and recipient or object. Make only that update through the\n"
+            "  selected worker host's connector and report exactly what changed.\n"
+        )
+        self.assertIn(commit_source, base)
+        self.assertIn(workflow_source, base)
+        wrapped = base.replace(
+            commit_source,
+            "- You may inspect, edit, test, commit, and push only the\n"
+            "  assigned lane branch.\n",
+        ).replace(
+            workflow_source,
+            "- A workflow or messaging write is allowed only when the approved\n"
+            "  task names that exact update and recipient or object. Make only\n"
+            "  that update through the selected worker host's connector and\n"
+            "  report exactly what changed.\n",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "gov.md"
+            path.write_text(wrapped, encoding="utf-8")
+            report = " ".join(lane_system_prompt(
+                "execute", Path("/repo"), report_deliverable=True, path=path).split())
+            plain = " ".join(lane_system_prompt(
+                "execute", Path("/repo"), path=path).split())
+        # The ordinary lane still renders both grants, wrapped as they are ...
+        self.assertIn(
+            "You may inspect, edit, test, commit, and push only the assigned lane branch.",
+            plain)
+        self.assertIn(
+            "A workflow or messaging write is allowed only when the approved task names "
+            "that exact update and recipient or object. Make only that update through "
+            "the selected worker host's connector and report exactly what changed.",
+            plain)
+        # ... and a report lane still drops them, continuation lines and all,
+        # while every unrelated execute rule survives.
+        self.assertNotIn("commit, and push only the", report)
+        self.assertNotIn("A workflow or messaging write", report)
+        self.assertIn("Work only in the dedicated side-lane worktree", report)
+        self.assertIn("Database access is read-only", report)
+        self.assertIn("Stop and report when an action exceeds these boundaries", report)
+        self.assertIn("This grant is execute-only: it", report)
+
+    def test_a_missing_or_duplicated_grant_bullet_fails_closed(self) -> None:
+        """Zero or duplicate expected grants are errors, never a silent drop."""
+        from side_lane.governance import EXECUTE_GIT_GRANT, EXECUTE_WORKFLOW_GRANT
+        base = (ROOT / "config/lane-governance.md").read_text(encoding="utf-8")
+        commit_source = "- " + EXECUTE_GIT_GRANT + "\n"
+        workflow_source = (
+            "- A workflow or messaging write is allowed only when the approved task names\n"
+            "  that exact update and recipient or object. Make only that update through the\n"
+            "  selected worker host's connector and report exactly what changed.\n"
+        )
+        self.assertIn(commit_source, base)
+        self.assertIn(workflow_source, base)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "gov.md"
+            for label, text, pattern in (
+                ("workflow grant missing",
+                 base.replace(workflow_source, ""), "workflow/messaging grant"),
+                ("workflow grant duplicated",
+                 base.replace(workflow_source, workflow_source + workflow_source),
+                 "workflow/messaging grant"),
+                ("commit grant duplicated",
+                 base.replace(commit_source, commit_source + commit_source),
+                 "commit grant"),
+            ):
+                with self.subTest(case=label):
+                    path.write_text(text, encoding="utf-8")
+                    # An ordinary execute lane is untouched by the override and
+                    # still renders, whatever the canonical file now says.
+                    self.assertIn(EXECUTE_GIT_GRANT, lane_system_prompt(
+                        "execute", Path("/repo"), path=path))
+                    with self.assertRaisesRegex(GovernanceError, pattern):
+                        lane_system_prompt("execute", Path("/repo"),
+                                           report_deliverable=True, path=path)
+
+    def test_report_bullet_ends_before_separate_indented_text(self) -> None:
+        from side_lane.governance import (
+            EXECUTE_GIT_GRANT, EXECUTE_WORKFLOW_GRANT, _report_execute_body,
+        )
+        for separator in ("\n", "unindented paragraph\n"):
+            with self.subTest(separator=separator):
+                unrelated = separator + "  separate indented paragraph\n"
+                body = ("- " + EXECUTE_GIT_GRANT + "\n" + unrelated
+                        + "- " + EXECUTE_WORKFLOW_GRANT + "\n")
+                result = _report_execute_body(body)
+                self.assertIn("  separate indented paragraph", result)
+                self.assertNotIn(EXECUTE_GIT_GRANT, result)
+                self.assertNotIn(EXECUTE_WORKFLOW_GRANT, result)
+
+    def test_report_lanes_refuse_the_explicit_write_capabilities(self) -> None:
+        """The refusal list is exactly the write grants, and only those.
+
+        A report lane's deliverable is its report artifact, so the capabilities
+        that carry explicit write authority are refused before a worker starts.
+        Read capabilities and `workspace-write` — the report artifact's own
+        grant, and the lane's tooling — stay available.
+        """
+        from side_lane.governance import (
+            known_capabilities,
+            report_forbidden_write_capabilities,
+            report_write_capability_conflicts,
+        )
+        # A tuple, not a set: the canonical line's own order is the reported
+        # order, so the refusals stay comparable across the doc and the code.
+        self.assertEqual(report_forbidden_write_capabilities(),
+                         ("git-push", "workflow-write"))
+        self.assertLessEqual(set(report_forbidden_write_capabilities()),
+                             known_capabilities())
+        self.assertNotIn("workspace-write", report_forbidden_write_capabilities())
+        self.assertEqual(
+            report_write_capability_conflicts(
+                ("shell", "workspace-write", "gcloud-read", "playwright")), ())
+        # Canonical order, whatever order the caller names them in.
+        self.assertEqual(
+            report_write_capability_conflicts(("workflow-write", "shell", "git-push")),
+            ("git-push", "workflow-write"))
+
+    def test_report_capability_refusals_derive_from_the_canonical_declaration(self) -> None:
+        """The refused names are read from the document, not owned by Python.
+
+        The canonical `Report deliverable` section carries one machine-readable
+        declaration line, and every reader parses it: an edited-but-valid
+        declaration re-derives the refusal set, and a missing, malformed,
+        repeated, or duplicated one fails closed rather than leaving the
+        refusals silently narrowed to nothing or widened to something the
+        document never named.
+        """
+        from side_lane.governance import (
+            report_forbidden_write_capabilities,
+            report_write_capability_conflicts,
+        )
+        base = (ROOT / "config/lane-governance.md").read_text(encoding="utf-8")
+        line = "Report forbidden write capabilities: `git-push`, `workflow-write`\n"
+        self.assertIn(line, base)
+        self.assertEqual(report_forbidden_write_capabilities(),
+                         ("git-push", "workflow-write"))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "gov.md"
+            # A valid declaration naming something else proves derivation: the
+            # refusals follow the document, not a code-side list.
+            path.write_text(
+                base.replace(
+                    line, "Report forbidden write capabilities: `workflow-write`\n"),
+                encoding="utf-8")
+            self.assertEqual(report_forbidden_write_capabilities(path),
+                             ("workflow-write",))
+            self.assertEqual(
+                report_write_capability_conflicts(
+                    ("shell", "git-push", "workflow-write", "workspace-write"), path),
+                ("workflow-write",))
+            self.assertEqual(report_write_capability_conflicts(("git-push",), path), ())
+            for label, text, pattern in (
+                ("missing line", base.replace(line, ""), "exactly one line"),
+                ("duplicated line", base.replace(line, line + line),
+                 "exactly one line"),
+                ("no name", base.replace(
+                    line, "Report forbidden write capabilities:\n"),
+                 "declares no report forbidden write capability"),
+                ("unbackticked entry", base.replace(
+                    line, "Report forbidden write capabilities: git-push\n"),
+                 "malformed entry"),
+                ("non-identifier name", base.replace(
+                    line, "Report forbidden write capabilities: `Git Push`\n"),
+                 "invalid capability name"),
+                ("repeated name", base.replace(
+                    line,
+                    "Report forbidden write capabilities: `git-push`, `git-push`\n"),
+                 "duplicate capability name"),
+            ):
+                with self.subTest(declaration=label):
+                    path.write_text(text, encoding="utf-8")
+                    with self.assertRaisesRegex(GovernanceError, pattern):
+                        report_forbidden_write_capabilities(path)
+
+    def test_report_section_states_the_per_host_enforcement_honestly(self) -> None:
+        report = " ".join(
+            lane_system_prompt("execute", Path("/repo"), report_deliverable=True).split())
+        # Named seams where they exist, and no claim of an OS sandbox.
+        self.assertIn("`report-deliverable (denied)` rules", report)
+        self.assertIn("no deny seam", report)
+        self.assertIn("after-the-fact verification", report)
+        self.assertIn("not a sandbox", report)
+        # The priority claim is narrowed to conflicting repository commit
+        # conventions: no blanket override, and no claim about the ordering a
+        # host decides for itself or about anything above this instruction.
+        self.assertIn("conflicting repository commit convention", report)
+        self.assertIn(
+            "not a claim of precedence over a higher-priority security or system "
+            "instruction", report)
+        self.assertNotIn("outranks every repository instruction file", report)
+        # The Codex note stays an observation of one installed version rather
+        # than proof established for every version or for the cloud service.
+        self.assertIn("observation of the installed version", report)
+        # The parser limits are named rather than papered over.
+        self.assertIn("`git -C <path> ...`", report)
+        self.assertIn("compound invocation", report)
+        # The canonical declaration of refused capabilities is part of the
+        # section, so it reaches the worker alongside the rule it states.
+        self.assertIn(
+            "Report forbidden write capabilities: `git-push`, `workflow-write`",
+            report)
+
+    def test_report_contract_is_execute_only(self) -> None:
+        with self.assertRaisesRegex(GovernanceError, "execute mode only"):
+            lane_system_prompt("review", Path("/repo"), report_deliverable=True)
+        self.assertNotIn("## Report deliverable", lane_system_prompt("review", Path("/repo")))
+
+    def test_report_contract_fails_closed_when_the_source_moves(self) -> None:
+        from side_lane.governance import tool_policy
+        base = (ROOT / "config/lane-governance.md").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "gov.md"
+            # A missing section, a missing reserved bucket, and a reworded
+            # commit grant each fail closed rather than shipping a lane whose
+            # contract was silently dropped.
+            path.write_text(
+                base.replace("## Report deliverable\n", "## Report notes\n"), encoding="utf-8")
+            with self.assertRaisesRegex(GovernanceError, "missing sections"):
+                tool_policy(path)
+            head, _, tail = base.partition("### report-deliverable (denied)\n")
+            path.write_text(head + "### " + tail.split("### ", 1)[1], encoding="utf-8")
+            with self.assertRaisesRegex(GovernanceError, "report-deliverable"):
+                tool_policy(path)
+            path.write_text(
+                base.replace("commit, and push only the assigned lane branch",
+                             "commit and push as needed"), encoding="utf-8")
+            with self.assertRaisesRegex(GovernanceError, "commit grant"):
+                lane_system_prompt("execute", Path("/repo"),
+                                   report_deliverable=True, path=path)
+
+    def test_report_deliverable_does_not_widen_the_artifact_namespace(self) -> None:
+        # The approved scope adds no broad root artifact exemption: the one
+        # deliverable path is a fixed name and the browser-report namespace and
+        # its caps are untouched by this contract.
+        from side_lane import cli
+        table = json.loads(
+            (ROOT / "tests/fixtures/report_artifact_names.json").read_text(encoding="utf-8"))
+        self.assertEqual(cli.BROWSER_REPORT_ARTIFACT_RE.pattern, table["pattern"])
+        self.assertEqual(cli.BROWSER_ARTIFACT_MAX_FILES, table["max_files"])
+        self.assertEqual(cli.BROWSER_ARTIFACT_MAX_BYTES, table["max_bytes"])
+        self.assertEqual(cli.BROWSER_ARTIFACT_MAX_TOTAL_BYTES, table["max_total_bytes"])
+        self.assertEqual(cli.REPORT_ONLY_SCRATCH_PREFIX, ".side-lane-scratch/")
+        self.assertNotIn("SIDE_LANE_REPORT", cli.REPORT_ONLY_SCRATCH_PREFIX)
+
+
 if __name__ == "__main__":
     unittest.main()

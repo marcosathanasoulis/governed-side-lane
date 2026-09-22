@@ -117,12 +117,40 @@ account enforces the same cap; verify provider-side and account limits separatel
 Add `shell` or `workspace-write` capabilities when the report generation/read
 tool needs to write artifacts. Ordinary execute and review lanes are untouched,
 and either flag is rejected before a worktree, credential, or host executable is
-touched anywhere else. A report run also refuses `--capability git-push`
-outright: it never publishes, so the grant would be inert authority over a
-remote for a run that can never exercise it.
+touched anywhere else. A report run refuses both `--capability git-push` and
+`--capability workflow-write` at the CLI and direct adapter boundaries: it
+neither publishes a branch nor makes workflow or messaging updates. Report
+artifact writes still use `workspace-write`, and authorized read capabilities
+remain available.
+
+The override lives in the canonical governance document rather than in a
+host-specific patch, so every host is handed it: a report lane renders the
+`Report deliverable` section alongside its mode rules, with the ordinary
+execute commit/push and workflow/messaging-write grants removed. That section
+instructs the worker to change
+no source and make no git change — governing the lane's own commit and push
+decisions where a conflicting repository commit convention would otherwise
+require them, and claiming no precedence over a higher-priority security or
+system instruction or over the instruction ordering a host decides for itself —
+to write `SIDE_LANE_REPORT.md` early and revise that same file
+incrementally instead of leaving a second draft at the lane root, and to keep
+throwaway output in the git-excluded, untracked `.side-lane-scratch/` tree.
+That section also carries the canonical declaration of the two capabilities a
+report run refuses (`Report forbidden write capabilities:`), which the runner
+reads from the document instead of from a code-side copy.
+Enforcement differs by host and is documented as such rather than assumed:
+Claude and Devin also receive the canonical `report-deliverable (denied)`
+git-write rules, which are an approval-boundary seam over command strings — a
+`git -C <path>` invocation, reordered or bundled options, a compound command,
+and an allowed interpreter are not fully covered by them — while the Codex host
+carries the instruction with no deny seam at all, so its contract is instruction
+plus after-the-fact verification and never prevention. On every host the runner
+refuses, after the fact, a report lane that committed or left unexpected files,
+and that check is the enforcement.
 
 **A report-only lane is judged on its report, not on implementation delivery.**
-Its worker is told to change no source and make no git change, so the execute
+Its worker is told by that contract to change no source and make no git change,
+so the execute
 rule — a commit plus a clean tree — would reject the very outcome this flag
 exists to accept, and `--allow-no-commit` could not repair it: the report file
 is itself one of the uncommitted paths that flag's condition excludes. The

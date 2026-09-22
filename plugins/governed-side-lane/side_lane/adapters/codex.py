@@ -38,7 +38,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from side_lane.adapters.claude import _bounded_process
 from side_lane.credentials import scrub_backend_environment
-from side_lane.governance import lane_system_prompt
+from side_lane.governance import lane_system_prompt, report_write_capability_conflicts
 from side_lane.hosts import with_support_dir
 from side_lane.mcp_run_config import (
     McpRunServer,
@@ -237,6 +237,33 @@ def _redact(value: object, secret: str | None) -> str:
     return text.replace(secret, REDACTED_SECRET) if secret else text
 
 
+def reject_report_write_capabilities(
+    capabilities: "tuple[str, ...] | list[str]", report_deliverable: bool
+) -> None:
+    """Refuse explicit write capabilities a report-deliverable lane must not hold.
+
+    The CLI refuses these before it builds a lane, and `run_codex` is the only
+    entry point here that carries capabilities — this host has no deny seam, so
+    a capability rides the instruction text rather than a rule list. A direct
+    caller therefore gets the same refusal rather than an instruction naming a
+    grant the report contract removed. ``workspace-write`` — the report
+    artifact's own write — and every read capability are untouched.
+    """
+
+    if not report_deliverable:
+        return
+    conflicts = report_write_capability_conflicts(capabilities)
+    if conflicts:
+        raise CodexAdapterError(
+            "a report-deliverable lane is never granted "
+            + ", ".join(conflicts)
+            + ": its deliverable is the report artifact in the lane worktree, so "
+            "it makes no push of a branch it was told not to commit and no workflow "
+            "or messaging write. Drop the capability, or run an ordinary execute "
+            "lane."
+        )
+
+
 def build_codex_command(
     executable: str,
     repo: Path | str,
@@ -251,11 +278,16 @@ def build_codex_command(
     read_roots: "Sequence[Path]" = (),
     web_domains: "Sequence[str]" = (),
     run_mcp_servers: "Mapping[str, McpRunServer] | None" = None,
+    report_deliverable: bool = False,
 ) -> tuple[str, ...]:
     if not isinstance(executable, str) or not executable:
         raise CodexAdapterError("Codex executable is required")
     if mode not in {"review", "execute"}:
         raise CodexAdapterError("mode must be review or execute")
+    if report_deliverable and mode != "execute":
+        # The report contract narrows the execute grant; a review lane is
+        # read-only by sandbox mode and never received it.
+        raise CodexAdapterError("report deliverable is execute mode only for the Codex host")
     if web_domains:
         # Refused, not silently accepted. The Codex host's execute sandbox is
         # `danger-full-access`, so this lane already reaches every destination
@@ -303,9 +335,13 @@ def build_codex_command(
         # additive, never a replacement. No file is written and nothing
         # enters the argv except the URL and the env NAME.
         note = (note or "") + startup_note(run_mcp_servers)
-    task = (lane_system_prompt(mode, repo_path)
+    task = (lane_system_prompt(mode, repo_path, report_deliverable=report_deliverable)
             + (f"\n\n{note}" if note else "")
             + "\n\n# Approved task\n\n" + prompt)
+    # No deny seam exists on this host: the argv below is `danger-full-access`
+    # with no per-command permission rule, so the report instruction above is
+    # delivered as instruction, never as prevention. The run's report contract
+    # is the runner's after-the-fact delivery check.
     command = [
         executable,
         "exec",
@@ -345,6 +381,7 @@ def run_codex(
     read_roots: "Sequence[Path]" = (),
     web_domains: "Sequence[str]" = (),
     run_mcp_servers: "Mapping[str, McpRunServer] | None" = None,
+    report_deliverable: bool = False,
 ) -> LaneResult:
     repo_path = _validate_worktree(repo)
     worktree_path = _validate_worktree(worktree)
@@ -356,6 +393,14 @@ def run_codex(
         # Adapter-level fail-closed mirror of the build_codex_command guard;
         # run_codex may be called without going through that guard's inputs.
         raise CodexAdapterError("per-run MCP config is execute-only for the Codex host")
+    if report_deliverable and mode != "execute":
+        # Same mirror: the report contract narrows the execute grant, and the
+        # argv for this host carries no seam that could carry it in review mode.
+        raise CodexAdapterError("report deliverable is execute mode only for the Codex host")
+    # Capabilities arrive only here in this adapter (`build_codex_command` takes
+    # none), so this is the single boundary that can refuse them for a report
+    # lane; nothing is launched past it.
+    reject_report_write_capabilities(capabilities, report_deliverable)
     argv = build_codex_command(
         executable,
         repo_path,
@@ -369,6 +414,7 @@ def run_codex(
         read_roots=read_roots,
         web_domains=web_domains,
         run_mcp_servers=run_mcp_servers,
+        report_deliverable=report_deliverable,
     )
     child_env = with_support_dir(
         build_transport_environment(
