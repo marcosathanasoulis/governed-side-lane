@@ -63,7 +63,15 @@ and sourced model guidance rather than hardcoding a second allowlist here.
 Inspect the resolved runner's help. `list` shows configured route inventory, not
 current readiness. For the exact host, mode, provider, model, and repository,
 run `check-capabilities`; treat its OAuth/credential result as presence-only and
-never retrieve a secret value. Use `recommend` separately for task eligibility.
+never retrieve a secret value. A provider is a route attribute, not a host
+executable: `check-capabilities` resolves the selected host's runtime and, for
+a provider-key route, the presence of its configured credential — never a
+provider-named binary. A configured `claude`/`glm`/`glm-5.3` route, when
+present in inventory, runs through the Claude host and needs no standalone
+`glm`, `glm-task`, or `zhipu` executable. Do not infer a route's availability
+from provider-name PATH probes; an absent provider-named binary does not
+establish unavailability, while a missing host runtime, missing auth, or
+missing grant still can. Use `recommend` separately for task eligibility.
 Record `absent`, `configured`, `auth-or-tool-missing`, `task-unqualified`, or
 `eligible` with evidence source, observation time, and reason. Native
 Codex/OpenAI and Claude routes use the selected host's existing signed-in OAuth
