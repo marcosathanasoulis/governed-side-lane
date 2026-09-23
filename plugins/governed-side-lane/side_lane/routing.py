@@ -283,6 +283,17 @@ def _validate_executable_route(route: Mapping[str, Any], route_id: str) -> None:
         isinstance(item, str) and item for item in supported
     ):
         raise RoutingError(f"route {route_id} capabilities.supported is invalid")
+    capability_evidence = route.get("capability_evidence")
+    if capability_evidence is not None:
+        if not isinstance(capability_evidence, Mapping):
+            raise RoutingError(f"route {route_id} capability_evidence is invalid")
+        unsupported_evidence = set(capability_evidence) - set(supported)
+        if unsupported_evidence:
+            names = ", ".join(sorted(map(str, unsupported_evidence)))
+            raise RoutingError(
+                f"route {route_id} capability_evidence names unsupported "
+                f"capabilities: {names}"
+            )
     if not isinstance(roles, list) or not all(
         item in {"worker", "reviewer", "coordinator"} for item in roles
     ):
@@ -371,7 +382,22 @@ def _normalize_attempts(attempts: object, label: str) -> tuple[dict[str, Any], .
     return tuple(normalized)
 
 
-def _profile(profile: Mapping[str, Any]) -> dict[str, Any]:
+def validate_task_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and normalize the task profile a recommendation is made against.
+
+    This is the whole of the routing-side *request* validation, and it is
+    deliberately pure: it reads the caller's own mapping and nothing else — no
+    catalog, no host executable, no MCP registration, no credential store, no
+    provider, no selector policy.  The band, policy, quality floor, token and
+    attempt budgets, cohort basis and per-route cohorts, cost state, preference
+    and avoidance lists, and duration bound are all checked here, so a caller
+    that cannot reach the recommender at all can still refuse a malformed
+    profile in the core's own wording instead of being answered about the
+    catalog.  It is public for exactly that reason: the private report-intent
+    entrypoint's absent-target path runs before ``recommend`` and must share
+    this one validator rather than restate any part of it.
+    """
+
     if not isinstance(profile, Mapping):
         raise RoutingError("task profile must be an object")
     host = profile.get("coordinator_host", profile.get("originating_host"))
@@ -771,15 +797,57 @@ def _estimate_cost(
     )
 
 
-def _route_execution_location(route: Mapping[str, Any]) -> str:
-    """Use a narrow migration inference for pre-location native records only."""
+#: The protocols whose record predates the `execution_location` field and which
+#: are nevertheless known to run on the operator's own machine: the native
+#: host CLI, signed in with the operator's own OAuth session, in a checkout
+#: they own. This is the narrow migration inference — a route that declares a
+#: location is never inferred over, and everything else stays `unknown`.
+NATIVE_LOCAL_PROTOCOLS = frozenset(
+    {
+        "native-codex",
+        "native-codex-readonly",
+        "native-claude",
+        "native-claude-readonly",
+        "native-devin",
+    }
+)
 
-    declared = route.get("execution_location")
-    if declared in EXECUTION_LOCATIONS:
-        return str(declared)
-    if route.get("protocol") in {"native-codex", "native-codex-readonly", "native-claude", "native-claude-readonly"}:
+
+def effective_execution_location(record: Mapping[str, Any]) -> str:
+    """One route record's execution location, declared first, inferred second.
+
+    The single seam every caller reads: the routing catalog and the launch path
+    must not disagree about whether a route runs on the operator's machine, or
+    a lane could be recommended as local and launched as if it were not (the
+    asymmetry that made the native OAuth route unreachable for the local
+    developer profile). A declared location in the routing vocabulary is
+    authoritative; a record that declares none is inferred only for
+    ``NATIVE_LOCAL_PROTOCOLS``; anything else is ``unknown``, and ``unknown``
+    is refused wherever a local location is required.
+
+    Presence of the key is what the inference turns on, not what it parses to,
+    and a declaration this seam cannot read is never inferred over. A record
+    that declares a location outside the vocabulary — a typo, a spelling from a
+    newer vocabulary, a null, a list — has still *made* a declaration, and
+    reading its protocol instead answers ``local-user-workspace`` for a route
+    whose own location field just failed to parse: a claim about the operator's
+    own machine resting on the one field this seam could not act on. It stays
+    ``unknown``, which can only ever narrow.
+    """
+
+    if "execution_location" in record:
+        declared = record["execution_location"]
+        if isinstance(declared, str) and declared in EXECUTION_LOCATIONS:
+            return str(declared)
+        return "unknown"
+    if record.get("protocol") in NATIVE_LOCAL_PROTOCOLS:
         return "local-user-workspace"
     return "unknown"
+
+
+#: Kept as the routing catalog's own spelling of the same rule, so the
+#: catalog's reasons and the launch path's guard cannot drift apart.
+_route_execution_location = effective_execution_location
 
 
 def _candidate_or_reasons(
@@ -1184,7 +1252,7 @@ def recommend(
     """
 
     validate_catalog(catalog)
-    normalized = _profile(profile)
+    normalized = validate_task_profile(profile)
     now = today or date.today()
     effective_now_utc = now_utc or datetime.now(timezone.utc)
     if effective_now_utc.tzinfo is None:

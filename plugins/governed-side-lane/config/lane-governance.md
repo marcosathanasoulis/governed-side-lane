@@ -69,6 +69,17 @@ backup is allowed, but no alternate GLM model is.
 
 ## Execute mode
 
+- MCP capability descriptions below govern those MCP tools; they do not make
+  an MCP bridge, proxy, or predefined credential mapping a prerequisite for
+  separately authorized direct service execution. For an already-authorized
+  task, use the execution identity's existing local credentials or ADC and
+  retrieve required service credentials privately inside execution when that
+  access is authorized. Keep credential values out of model context, tool
+  output, Slack, and logs. Actual service IAM, requester/task scope, data
+  placement, and approvals for consequential actions still apply; possession
+  of a credential alone is not task authority. Do not repeat approval solely
+  because this authorized execution uses direct service access.
+
 - Work only in the dedicated side-lane worktree and assigned lane branch.
 - Before editing shared files, inspect open pull requests and active Git
   worktrees for overlap, and use repository-specific coordination tooling when
@@ -324,6 +335,62 @@ runner verifies the result after the run and refuses a report lane that
 committed or left unexpected files; that gate, not this instruction, is what is
 enforced.
 
+## Publication refusal
+
+An execute lane may be selected with an explicit task no-external-publication
+guard: the approved task's authority forbids this lane from publishing anything
+outside the launching machine, whatever the runner or the host could otherwise
+do. The runner selects this section — and only this section — with that option,
+and renders it for every host, including a host where nothing in it can be
+enforced.
+
+- Make no external publication. Do not run `git push` in any spelling or form,
+  do not create or update a remote branch or remote tag for the lane branch,
+  and do not have another command, tool, or connected system do it on your
+  behalf. The lane's work stays on the lane branch in the lane worktree, where
+  the coordinator decides what happens to it next.
+- This is the task's authority, and it is not the runner's `--no-publish`. That
+  option is a separate, runner-side decision to skip the runner's own automatic
+  push of a delivered branch; a lane carrying it alone is not forbidden to push
+  and may still publish its own branch. A lane selected with this guard also has
+  the runner's own automatic push suppressed, so the guard alone is enough and
+  the caller does not have to remember `--no-publish` as well. Read this
+  section, not that option, as the rule that governs your own publication
+  decisions.
+- Do not read a missing denial as permission. The rule above governs this lane
+  whether or not this host can enforce it, and a host that cannot deny the
+  command still expects the lane not to run it.
+- A deliverable that would otherwise be published is handed back as the lane
+  branch the coordinator reviews. Losing a remote copy is the intended outcome
+  here, not a failure to work around.
+- Enforcement differs by host, and this section claims no more than each host
+  delivers. Claude and Devin carry the `no-external-publication (denied)` rules
+  of the Execute tool allowlist below, alongside the Common rules. Those are
+  command-string rules: `git -C <path> push`, a reordered or bundled option, a
+  compound invocation, and an allowed interpreter are not fully covered by
+  them. They are an approval-boundary seam, not a sandbox — the worktree is
+  edit isolation, never an operating-system boundary, and no same-user control
+  here contains a deliberately adversarial process. Codex carries the
+  instruction only: that host has no deny seam, so its refusal is never
+  prevention. On every host the runner records in its audit what it asked for
+  and which of these the host could enforce, and records that the worker's own
+  publication is otherwise unverified. Neither record is evidence that no
+  publication happened.
+
+Publication-refusing lanes never hold a capability whose whole grant is the
+publication this guard refuses. Those capability names are declared once, here,
+on the one machine-readable line below, and the runner derives its refusals by
+reading that line rather than from a list kept beside this document:
+
+Publication refusal never grants these capabilities: `git-push`
+
+The line must appear exactly once in this section, name at least one capability,
+and hold only backticked capability identifiers separated by commas; a missing,
+malformed, reworded, or duplicated declaration stops the run instead of
+narrowing or inventing a refusal. Nothing else is refused: `workflow-write`
+stays a separate grant a task may authorize, and every read capability and
+`workspace-write` are untouched.
+
 ## Execute tool allowlist
 
 The Claude host adapter renders this section, and only this section, into
@@ -334,10 +401,94 @@ host and nothing else. Review lanes never receive an allowlist. Each
 subsection names the capabilities that unlock its rules; `always` applies to
 every execute lane. Rules are ordinary developer
 commands; no capability here may grant deploy, IAM, credential, cloud, merge,
-or release tooling, which stay forbidden by the Common rules above. A reserved
-`report-deliverable (denied)` subsection is not a capability: it lists
-git-write commands that a report-deliverable lane must not run, so those rules
-exist there only to be denied and no capability ever grants them.
+or release tooling, which stay forbidden by the Common rules above. Three
+reserved subsections are not capabilities. `report-deliverable (denied)`
+lists git-write commands that a report-deliverable lane must not run, so those
+rules exist there only to be denied and no capability ever grants them.
+`no-external-publication (denied)` lists the publication commands a lane
+carrying the task no-external-publication guard must not run, on the same
+terms: rules there exist only to be denied and no capability ever grants them.
+`existing-workspace (denied)` lists the direct git-write commands an
+existing-owner-workspace lane must not run, on those same terms: those rules
+exist only to be denied, no capability ever grants them, and the verbs they
+name are the verbs the `## Existing owner workspace` section forbids, so the
+command a lane is told not to run and the command the host is given to deny
+are one list rather than two that can drift apart. `local-developer (granted)`
+names the tool surface of the local developer
+execute profile described below: no capability unlocks it and no lane is
+granted it — a profile selection, made once per run, is what selects it, and
+every capability's own rules are rendered alongside it exactly as before.
+
+**The local developer execute profile.** An execute lane is either `standard`
+or `local-developer`. `standard` is the public default: the literal
+per-command rules of the capability subsections below, and no rule outside
+them. `local-developer` selects the `local-developer (granted)` surface instead
+— the host's own native shell class in place of an enumeration of literals,
+because a closed enumeration of command prefixes denies every family nobody
+thought to list (`gh api`, `git grep`, `cd`, `gh auth status`, a compound
+`ls … | head …; cat …`, `git -C <path> …`, and the next one), and each unlisted
+family is a separate denial with the same cause.
+
+The profile also stops suppressing the worker host's own MCP registrations, and
+makes the ones it already holds usable by emitting one server-wide
+`mcp__<server>` rule per inherited server. The inventory is read from the
+registration files the worker's own environment resolves — a controlled `HOME`,
+and on a routed lane the disposable `CLAUDE_CONFIG_DIR` that lane runs under —
+so the rules describe the registry the process loads,
+never a registry it does not. That is what lets a local developer's own
+signed-in tooling keep working, and the host's registrations of the graph,
+browser, messaging and remote names count here too: a name a capability also
+maps to is still the developer's own registration, so it is usable by
+registration and the capability's exact per-tool rules render beside it.
+
+The one exception is the `cm-services` proxy, which is a capability-gated
+bridge rather than a host-native tool. It is deliberately excluded from the
+inventory: granting a `cm-services` capability renders that capability's exact
+per-tool IDs, an ungranted one has its tool IDs denied, and a registration of
+the name alone reaches none of them. Registration is presence evidence only: it
+authenticates nothing, grants no scope, and a listed server's granted scope
+remains unproven until a permitted tool call succeeds.
+
+It changes nothing else: the capability grants and their exact per-tool MCP
+IDs, the `report-deliverable (denied)` rules, and every Common and Execute-mode
+rule are unaffected. The profile reuses each registration's own native auth
+reference — an env reference the registration states, or a session the server
+manages — exactly as written; it copies, exports, and logs no credential. A
+credential the host holds outside the registration itself, notably a native MCP
+OAuth token cache, is not carried into the lane's config directory, so such a
+server may load and still fail to authenticate: that is reported as unproven,
+never as a grant. In particular the profile does not move a cloud read onto
+a proxy or off one. A local developer reading cloud state with the `gcloud` CLI
+or ADC through the host's own shell is doing ordinary local work under this
+task's authority — the same-user authority described below — while the
+capability-gated `cm-services` path stays a separate, narrower, explicitly
+granted route that is never required for it.
+
+The profile is selected by private configuration, and never by a rule in this
+public document: this package ships the mechanism and the conservative default,
+not the policy about which route is local. Two independent statements must both
+hold — the private route table explicitly opts its local routes in, and the
+route itself declares `execution_location: local-user-workspace`. Which host
+executes the lane is **not** a third premise: the same same-user local
+workspace is the same ordinary developer surface whichever qualified host runs
+there, so the profile resolves from the route alone and each adapter renders it
+on its own seam — the Claude allowlist, the Devin pre-tool command policy *and*
+the Devin native permission layer that decides before that policy hook runs, the
+Codex native surface. Gating the selection on a host name would let a route's
+own authorized statement be true while the read is still denied, which is a
+routing fault and not a boundary. The public
+route table declares local locations but no policy, so every lane it describes
+is `standard`; a cloud-generated table, a `cloud-only` route, and a route that
+declares nothing are likewise `standard`. A lane for which nothing selects the
+profile is `standard`. The selection is execute mode only: a review lane's argv
+is the strict read-only form and refuses it. A lane whose deliverable is the
+report (`--report-only` or `--report-deliverable`) always resolves `standard`,
+whatever the private table and the route declare: the report contract is the
+narrowed form of an execute lane, and the widened surface — the bare shell
+class and the server-wide rules for inherited registrations — is exactly what
+that contract excludes. An explicit `local-developer` selection beside a report
+flag is refused rather than silently reconciled, because dropping either
+selection would bypass the other.
 
 This allowlist is an approval boundary for a headless session, not a security
 boundary. Execute lanes run with the same-user authority the Common rules
@@ -481,6 +632,10 @@ from host registration files, never values.
 - `Bash(git push +*)`
 - `Bash(git push * +*)`
 
+### local-developer (granted)
+
+- `Bash`
+
 ### report-deliverable (denied)
 
 - `Bash(git fetch)`
@@ -507,6 +662,68 @@ from host registration files, never values.
 - `Bash(git update-index *)`
 - `Bash(git push)`
 - `Bash(git push *)`
+
+### no-external-publication (denied)
+
+- `Bash(git push)`
+- `Bash(git push *)`
+
+### existing-workspace (denied)
+
+- `Bash(git add)`
+- `Bash(git add *)`
+- `Bash(git commit)`
+- `Bash(git commit *)`
+- `Bash(git push)`
+- `Bash(git push *)`
+- `Bash(git checkout)`
+- `Bash(git checkout *)`
+- `Bash(git switch)`
+- `Bash(git switch *)`
+- `Bash(git restore)`
+- `Bash(git restore *)`
+- `Bash(git reset)`
+- `Bash(git reset *)`
+- `Bash(git stash)`
+- `Bash(git stash *)`
+- `Bash(git clean)`
+- `Bash(git clean *)`
+- `Bash(git rm)`
+- `Bash(git rm *)`
+- `Bash(git mv)`
+- `Bash(git mv *)`
+- `Bash(git apply)`
+- `Bash(git apply *)`
+- `Bash(git am)`
+- `Bash(git am *)`
+- `Bash(git rebase)`
+- `Bash(git rebase *)`
+- `Bash(git merge)`
+- `Bash(git merge *)`
+- `Bash(git cherry-pick)`
+- `Bash(git cherry-pick *)`
+- `Bash(git revert)`
+- `Bash(git revert *)`
+- `Bash(git update-ref)`
+- `Bash(git update-ref *)`
+- `Bash(git symbolic-ref)`
+- `Bash(git symbolic-ref *)`
+- `Bash(git update-index)`
+- `Bash(git update-index *)`
+- `Bash(git read-tree)`
+- `Bash(git read-tree *)`
+- `Bash(git write-tree)`
+- `Bash(git write-tree *)`
+- `Bash(git commit-tree)`
+- `Bash(git commit-tree *)`
+- `Bash(git pack-refs)`
+- `Bash(git pack-refs *)`
+- `Bash(git replace)`
+- `Bash(git replace *)`
+- `Bash(git filter-branch)`
+- `Bash(git filter-branch *)`
+- `Bash(git config)`
+- `Bash(git config *)`
 
 ### gitnexus
 
@@ -616,3 +833,103 @@ from host registration files, never values.
 - `mcp__codegraph__neighbors`
 - `mcp__codegraph__impact_of`
 - `mcp__codegraph__path_between`
+
+## Existing owner workspace
+
+An execute lane normally runs in a dedicated worktree the runner created from
+HEAD. An existing owner workspace is the other case: the operator names a
+checkout they own — through the CLI's explicit workspace selection — and the
+worker's working directory is that checkout, exactly as it stood. The runner
+selects this section, and only this section, for such a lane, in addition to
+the active-mode rules; the commit/push bullet of Execute mode is dropped,
+because there is no assigned lane branch here for it to be about.
+
+- The workspace is not a dedicated lane and isolation is not claimed for it.
+  It is a checkout that predates this run, on a branch this run did not
+  create, and it may hold staged, unstaged, and untracked work belonging to
+  someone else. Nothing contains your writes to it beyond the task you were
+  given and the rules below.
+- Work only in that workspace. Do not create a worktree, switch branches, or
+  check out any other ref.
+- Make no git write of any kind. Do not run `git add`, `git commit`,
+  `git push`, `git checkout`, `git switch`, `git restore`, `git reset`,
+  `git stash`, `git clean`, `git rm`, `git mv`, `git apply`, `git am`,
+  `git rebase`, `git merge`, `git cherry-pick`, `git revert`,
+  `git update-ref`, `git symbolic-ref`, `git update-index`, `git read-tree`,
+  `git write-tree`, `git commit-tree`, `git pack-refs`, `git replace`,
+  `git filter-branch`, or `git config`. A commit
+  here would take the owner's staged work with it, and a push would send the
+  owner's commits to a remote as a side effect of your run. Leave the work
+  uncommitted; deciding what to do with it is the owner's, not yours. These
+  same verbs are declared once as deny rules, in the
+  `existing-workspace (denied)` subsection of the Execute tool allowlist, so
+  the command you are told not to run and the command each host is given to
+  deny are one list; the `Everything else is unchanged` bullet below says what
+  that denial does and does not add. The list names only commands whose every
+  spelling is a write: update-index and symbolic-ref write the index and HEAD
+  respectively even when the file they name is untouched, which is why they
+  are denied here and why the same commands appear in the
+  `report-deliverable (denied)` bucket above. Commands with a read-only
+  spelling this mode must keep — branch and tag list, remote and worktree have
+  inspection forms, reflog is a log — are not denied, and a write through one
+  of their other spellings is caught by the after-the-fact comparison below
+  instead.
+- Anything already in the workspace that you did not put there belongs to
+  whoever left it. Do not revert, reformat, tidy, relocate, or delete it, and
+  do not treat it as a change you made. If it blocks the task, stop and report
+  it rather than clearing it.
+- Report the paths you changed. The runner compares the workspace against a
+  content-and-index baseline taken before you started, so a file that was
+  already dirty and that you changed again is reported as changed, and a file
+  you left alone is reported as untouched — however dirty it already was.
+  That comparison covers more than file contents: it records every tracked
+  path's index flags as well as its entry, and it reads the repository's refs,
+  its local config and its worktree registrations, none of which appear in
+  `git status`. A write that moves no file — a ref moved, HEAD repointed, a
+  flag set, a worktree registered — is therefore still reported, and a run
+  that made one is refused as a git write this mode forbids. Your report and
+  the runner's record must agree.
+- Everything else is unchanged: the Common rules above, the capability grants
+  and their exact per-tool MCP IDs, the execute tool allowlist or the tool
+  profile this lane selected, model and credential handling, and the read-only
+  database rule. This section narrows a lane's git authority; it widens
+  nothing. In particular it does not narrow the tool surface: a lane reached
+  here still runs whichever execute profile it selected, the local developer
+  profile included, and every read-only git command (`git status`, `git log`,
+  `git diff`, `git show`, `git branch`, `git rev-parse`) keeps working exactly
+  as it did. Dedicated worktrees on the same host and route are untouched:
+  this section is selected by an explicit owner-workspace run, and an ordinary
+  lane keeps the commit and push grant above.
+
+Enforcement differs by host, and this section claims no more than each host
+delivers. Claude and Devin carry the `existing-workspace (denied)` rules of the
+Execute tool allowlist above, alongside the Common rules: on Claude they render
+as `--disallowedTools` deny rules, which take precedence over the profile's
+allow rule, and on Devin they render twice — in the native permission deny list
+the layer consults first, and in the PreToolUse command policy, which strips a
+leading `git -C <target>` before matching a *denial*, so a
+`git -C <path> <verb>` spelling is denied there too, whatever checkout the
+target names. Those are command-string rules, and a command-string rule only
+describes the command it is matched against: on Claude that same
+`git -C <path> <verb>` spelling, a reordered or bundled option, a compound
+invocation, and an allowed interpreter are not fully covered by them. They are an approval-boundary seam, not a sandbox — the
+workspace is edit isolation, never an operating-system boundary, and no
+same-user control here contains a deliberately adversarial process. An allowed
+interpreter or package runner (`python3`, `node`, `npx`, `uv`) can in principle
+run `git` itself, and a scaffolded subprocess can write git state that no
+command-string rule here inspects. That gap is stated rather than papered over:
+this section does not promise that a shell which must stay arbitrary is also a
+sandbox. Codex carries the instruction only: that host has no deny seam, its
+execute lane runs `danger-full-access`, and its owner-workspace contract is
+instruction plus the runner's after-the-fact comparison below, never
+prevention. On every host the runner compares the workspace against the
+content-and-index baseline it took before the run and reports the paths that
+changed — including a file that was already dirty and changed again, and one
+whose index entry carries a flag that made `git status` stop reporting it —
+together with the parts of the repository's git state that are not paths at
+all: HEAD and the branch, the index, the refs, the local config and the
+worktree registrations. That is what makes the guard effective rather than
+declarative: a deny list is a set of command spellings and is never complete
+over an arbitrary shell, while this comparison is over what the workspace
+actually holds before and after. It is a report about what happened, not
+evidence that nothing else did.

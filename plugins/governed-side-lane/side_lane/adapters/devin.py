@@ -15,11 +15,21 @@ from typing import Any, Callable, Mapping, Sequence
 
 from side_lane import devin_command_policy
 from side_lane.adapters import claude
+# The two execute-profile names describe the lane's surface, not the product
+# that runs it, so both adapters must spell them identically; they are declared
+# once, in the adapter that implemented the profile first.
+from side_lane.adapters.claude import (
+    EXECUTE_PROFILES,
+    LOCAL_DEVELOPER_PROFILE,
+    STANDARD_PROFILE,
+)
 from side_lane.capabilities import RUN_CONFIG_CAPABILITIES, USER_SCOPE_MCP_CAPABILITIES
 from side_lane.credentials import scrub_backend_environment
 from side_lane.governance import (
+    ToolPolicy,
     known_capabilities,
     lane_system_prompt,
+    publication_refusal_capability_conflicts,
     report_write_capability_conflicts,
     tool_policy,
 )
@@ -39,6 +49,8 @@ from side_lane.worktrees import (
     WorktreeError,
     ensure_devin_local_mcp_exclusion,
     ensure_devin_local_mcp_untracked,
+    lift_devin_local_mcp_exclusion,
+    repository_runtime_dir,
 )
 
 
@@ -105,6 +117,17 @@ def _nonempty(value: object, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise DevinAdapterError(f"{label} must be a non-empty string")
     return value.strip()
+
+
+def _execute_profile(execute_profile: object) -> str:
+    """Validate one execute profile selection, fail-closed on anything else."""
+
+    if execute_profile not in EXECUTE_PROFILES:
+        raise DevinAdapterError(
+            f"unknown execute profile: {execute_profile!r}; expected one of "
+            + ", ".join(EXECUTE_PROFILES)
+        )
+    return str(execute_profile)
 
 
 def _path_spellings(path: Path) -> tuple[str, ...]:
@@ -216,6 +239,33 @@ def reject_report_write_capabilities(
         )
 
 
+def reject_publication_capabilities(
+    capabilities: Sequence[str], no_external_publication: bool
+) -> None:
+    """Refuse the capabilities a publication-refusing lane must not hold.
+
+    The guard denies the publication command family, so a capability whose whole
+    grant is that family is refused rather than carried as a dead grant. The CLI
+    refuses it before it builds a lane, but both public entry points here may be
+    called directly with `capabilities`, and the task's no-publication authority
+    must not be undone by that route. Every other grant is untouched.
+    """
+
+    if not no_external_publication:
+        return
+    conflicts = publication_refusal_capability_conflicts(capabilities)
+    if conflicts:
+        raise DevinAdapterError(
+            "a lane whose task authority refuses external publication is never "
+            "granted "
+            + ", ".join(conflicts)
+            + ": the whole grant is the publication this lane must not make, so "
+            "the allow rule could only be denied by the same run. Drop the "
+            "capability, or run an ordinary execute lane for a task that "
+            "authorizes publication."
+        )
+
+
 def build_command(
     *, executable: str, repo: str | Path, worktree: str | Path, provider: str,
     model: str, provider_config: Mapping[str, Any], model_config: Mapping[str, Any],
@@ -225,17 +275,49 @@ def build_command(
     web_domains: Sequence[str] = (),
     run_mcp_servers: "Mapping[str, McpRunServer] | None" = None,
     report_deliverable: bool = False,
+    existing_workspace: bool = False,
+    no_external_publication: bool = False,
 ) -> tuple[str, ...]:
     program = _nonempty(executable, "Devin executable")
     repo_path = _worktree(repo)
     worktree_path = _worktree(worktree)
-    if repo_path == worktree_path:
+    if repo_path == worktree_path and not existing_workspace:
         raise DevinAdapterError("execute lane requires a dedicated worktree")
+    if existing_workspace:
+        # The operator's own checkout, named explicitly through
+        # --existing-workspace: the worker's working directory is a tree that
+        # predates this run and may hold other people's uncommitted work. Devin
+        # runs locally with no sandbox flag either way, so nothing about the
+        # argv gives this workspace a containment claim it does not have; its
+        # governance text carries the existing-owner-workspace section, which
+        # drops the commit/push grant the lane has no assigned branch for.
+        # Dropping a grant is not a denial on its own — under the local
+        # developer profile the allow side is the whole `exec` class — so the
+        # lane's direct git writes are denied on this host as well
+        # (`launch` puts the canonical `existing-workspace (denied)` rules
+        # in the PreToolUse command policy and in this config's native deny
+        # list). That is an approval boundary for the commands it names, not
+        # containment: an allowed interpreter and any other same-user process
+        # are outside what a command rule can describe.
+        if mode != "execute":
+            raise DevinAdapterError(
+                "an existing owner workspace is supported only in execute mode"
+            )
+        if report_deliverable:
+            raise DevinAdapterError(
+                "an existing owner workspace cannot carry the report contract"
+            )
     if report_deliverable and mode != "execute":
         # The report contract narrows the execute grant; a review lane never
         # received that grant and carries no per-run permission policy at all.
         raise DevinAdapterError("report deliverable is execute mode only for the Devin host")
+    if no_external_publication and mode != "execute":
+        raise DevinAdapterError(
+            "the publication refusal contract is execute mode only for the "
+            "Devin host"
+        )
     reject_report_write_capabilities(capabilities, report_deliverable)
+    reject_publication_capabilities(capabilities, no_external_publication)
     _validate_route(provider, model, provider_config, model_config, mode)
     unknown = sorted(set(capabilities) - known_capabilities())
     if unknown:
@@ -255,7 +337,9 @@ def build_command(
         exec_note = _native_exec_note(worktree_path)
         note = f"{note}\n\n{exec_note}" if note else exec_note
     governed = (lane_system_prompt(mode, repo_path,
-                                  report_deliverable=report_deliverable)
+                                  report_deliverable=report_deliverable,
+                                  existing_workspace=existing_workspace,
+                                  no_external_publication=no_external_publication)
                 + (f"\n\n{note}" if note else "")
                 + "\n\n# Approved task\n\n" + task)
     # No sandbox flag is passed. Devin runs locally with its normal user-host
@@ -443,13 +527,67 @@ def _file_tool_rules(worktree: Path | None,
     return rules
 
 
+def command_policy_rules(
+    policy: ToolPolicy,
+    command_capabilities: Sequence[str],
+    *,
+    execute_profile: str = STANDARD_PROFILE,
+) -> tuple[list[str], list[str]]:
+    """The per-run ``allowed``/``denied`` rules the PreToolUse hook enforces.
+
+    ``standard`` renders the granted capabilities' literal ``Bash`` prefixes,
+    which is the enumeration that denied the original cloud read: a task that
+    declared ``shell`` and correctly asked for no bridge still held no rule
+    matching ``gcloud run services describe``, so the hook blocked it as
+    "outside canonical capability grants".
+
+    ``local-developer`` additionally carries the canonical
+    ``local-developer (granted)`` surface — the bare ``Bash`` rule — **for a
+    lane whose capability grants carry ``shell``**.
+    :func:`devin_command_policy.grants_shell_class` reads that rule as the
+    host's native shell class, so every command the deny list does not block is
+    authorized: the ordinary local developer surface the profile exists to
+    describe, on this host's own seam.
+
+    The profile widens *how a shell lane's commands are read*; it is not itself
+    a grant of one, and the capability gate here is the same gate the native
+    layer's own class applies (see ``_runtime_config``). Ungated, a lane
+    launched with no shell — the reachable case being a ``workspace-write``
+    lane that asked for the profile but never for a shell — had the native
+    layer, which decides first, refusing every command while this hook admitted
+    all of them: the seam an operator reads as the enforcement would have
+    reported the opposite of the layer that actually stopped the run.
+
+    The profile widens the allow side only. ``denied`` is computed identically
+    in both profiles and is matched before ``allowed``, so the Common and
+    Execute-mode rules and the capability denials keep their full force, and no
+    command is promoted out of a denial by selecting the profile.
+    """
+
+    execute_profile = _execute_profile(execute_profile)
+    allowed = list(dict.fromkeys(
+        rule for capability in command_capabilities
+        for rule in policy.allowed.get(capability, ()) if rule.startswith("Bash(")
+    ))
+    if execute_profile == LOCAL_DEVELOPER_PROFILE and "shell" in set(command_capabilities):
+        allowed = list(dict.fromkeys([*allowed, *policy.local_developer]))
+    denied = list(dict.fromkeys(
+        rule for capability in command_capabilities
+        for rule in policy.denied.get(capability, ()) if rule.startswith("Bash(")
+    ))
+    return allowed, denied
+
+
 def _runtime_config(model: str, capabilities: Sequence[str],
                     user_config: Mapping[str, Any] | None = None,
                     policy_hook_command: str | None = None,
                     worktree: Path | None = None,
                     read_roots: Sequence[Path] = (),
                     web_domains: Sequence[str] = (),
-                    report_deliverable: bool = False) -> dict[str, Any]:
+                    report_deliverable: bool = False,
+                    no_external_publication: bool = False,
+                    existing_workspace: bool = False,
+                    execute_profile: str = STANDARD_PROFILE) -> dict[str, Any]:
     """Build Devin's runtime config from the canonical tool policy.
 
     File tools are scoped to real directories: the lane worktree, plus any
@@ -461,7 +599,21 @@ def _runtime_config(model: str, capabilities: Sequence[str],
     `Exec(git status)` and would prompt, ending a non-interactive run; the
     `-C` spellings are therefore granted explicitly, while the PreToolUse hook
     still normalises `-C` before matching deny rules.
+
+    ``execute_profile`` selects the Allow side of the *native* permission
+    layer, which is the layer that runs **before** the PreToolUse hook. The
+    hook reads the profile directly (`command_policy_rules`), so under
+    `local-developer` it already admits the whole shell class — but the hook is
+    never consulted for a command the native layer has already decided to
+    prompt on, and a prompt ends a non-interactive run. The
+    `local-developer` profile therefore also emits its documented native
+    equivalent (`devin_command_policy.NATIVE_EXEC_TOOL_RULE`), exactly as the
+    hook emits the canonical one. It is conditioned on the same two facts the
+    hook's shell class is: the profile, and the `shell` capability. Deny
+    precedence is untouched — native deny and ask rules are matched first, and
+    the hook still enforces every canonical denial afterwards.
     """
+    _execute_profile(execute_profile)
     allow = _file_tool_rules(worktree, read_roots)
     # One `Fetch(https://<host>/*)` rule per coordinator-granted documentation
     # domain, and nothing else: no capability unlocks a web rule, so shell or
@@ -516,6 +668,23 @@ def _runtime_config(model: str, capabilities: Sequence[str],
                 if pregrant not in allow and pregrant not in extra_pregrants:
                     extra_pregrants.append(pregrant)
         allow.extend(extra_pregrants)
+    # The native layer decides before the PreToolUse hook ever sees the
+    # command, so a profile whose whole meaning is "the host's own native shell
+    # class" has to say so in the layer that gates it: the hook's bare `Bash`
+    # rule is read only after a prompt the native layer already raised. The
+    # granted class is the documented tool-based spelling, not a widened
+    # `Exec(...)` prefix and not a wildcard — see
+    # `devin_command_policy.NATIVE_EXEC_TOOL_RULE` for the installed-document
+    # citations. Two facts condition it, the same two the hook's own shell
+    # class is conditioned on: the lane runs the `local-developer` profile, and
+    # the `shell` capability was granted. A lane holding neither, or only one,
+    # keeps the closed `Exec(...)` enumeration exactly as before. The profile
+    # widens the allow side only: native deny and ask rules are matched first,
+    # and the hook still enforces every canonical denial afterwards.
+    if execute_profile == LOCAL_DEVELOPER_PROFILE and "shell" in set(capabilities):
+        native_class = devin_command_policy.NATIVE_EXEC_TOOL_RULE
+        if native_class not in allow:
+            allow.append(native_class)
     # MCP rules are copied from the canonical policy as exact per-tool IDs and
     # never widened to a server-wide wildcard. Devin's own permissions
     # reference documents these exact `mcp__<server>__<tool>` MCP permission
@@ -598,16 +767,26 @@ def _runtime_config(model: str, capabilities: Sequence[str],
             grant = devin_command_policy.devin_exec_deny_rule(rule)
             if grant is not None and grant not in preserved_rules["deny"]:
                 preserved_rules["deny"].append(grant)
-    if report_deliverable:
-        # The report lane's git-write denials are declared once, in the
-        # canonical governance document, and translated here — never copied
-        # into a second list. Deny rules are not widened: the hook strips `-C`
-        # before matching them with `anywhere=True`, so one spelling covers the
-        # `git -C <lane>` form.
-        for rule in policy.report_denied:
-            grant = devin_command_policy.devin_exec_deny_rule(rule)
-            if grant is not None and grant not in preserved_rules["deny"]:
-                preserved_rules["deny"].append(grant)
+    for enabled, rules in (
+        (report_deliverable, policy.report_denied),
+        # The publication guard's denials come from the same place and take the
+        # same path: declared once in the canonical document, translated here —
+        # never copied into a second list. Devin's native deny list is the
+        # seam; the PreToolUse hook strips `-C` before matching, so one
+        # spelling covers the `git -C <lane>` form.
+        (no_external_publication, policy.no_publication_denied),
+        # ... and the owner-workspace direct git-write denials on the same
+        # path. This is the layer consulted *first*, so it is what stops a
+        # `git commit` in the owner's checkout before the hook is reached; the
+        # hook remains the enforcing seam for the `-C` spellings the native
+        # prefix matcher does not normalise.
+        (existing_workspace, policy.existing_workspace_denied),
+    ):
+        if enabled:
+            for rule in rules:
+                grant = devin_command_policy.devin_exec_deny_rule(rule)
+                if grant is not None and grant not in preserved_rules["deny"]:
+                    preserved_rules["deny"].append(grant)
     config["permissions"] = {
         "allow": allow,
         **preserved_rules,
@@ -691,8 +870,21 @@ def _merge_local_mcp_config(
     return path, original
 
 
-def _restore_local_mcp_config(path: Path, original: str | None) -> None:
-    """Best-effort restoration of the local-scope MCP file after a run."""
+def _restore_local_mcp_config(path: Path, original: str | None) -> str | None:
+    """Put the local-scope MCP file back, and report what is left if it cannot.
+
+    ``None`` means the file is back in its pre-run state: gone when it was not
+    there, and byte-identical when it was. Anything else is a description of
+    what is still on disk — a generated file naming this run's own server
+    registrations, which a run must not silently leave in a checkout it does
+    not own. Returning the reason rather than swallowing it is what lets the
+    caller fail closed; the path is left exactly as the failed attempt left it,
+    because erasing the evidence is the one thing this must not do.
+
+    The post-condition is read back rather than assumed: a write that reported
+    success but left different content, and a removal that left the file in
+    place, are the same outcome as an ``OSError`` and are reported the same way.
+    """
 
     try:
         if original is None:
@@ -701,10 +893,17 @@ def _restore_local_mcp_config(path: Path, original: str | None) -> None:
                 path.parent.rmdir()
         else:
             path.write_text(original, encoding="utf-8")
-    except OSError:
-        # Restoration is best-effort: a leftover file is visible in the lane's
-        # delivery check (uncommitted artifact) rather than silently erased.
-        pass
+    except OSError as exc:
+        return f"{exc}"
+    try:
+        if original is None:
+            if path.exists():
+                return "the generated file is still present after removal"
+        elif path.read_text(encoding="utf-8") != original:
+            return "the restored file does not hold what was there before the run"
+    except OSError as exc:
+        return f"the restored file could not be read back: {exc}"
+    return None
 
 
 def launch(
@@ -716,37 +915,79 @@ def launch(
     web_domains: Sequence[str] = (),
     run_mcp_servers: "Mapping[str, McpRunServer] | None" = None,
     report_deliverable: bool = False,
+    execute_profile: str = STANDARD_PROFILE,
+    existing_workspace: bool = False,
+    no_external_publication: bool = False,
+    appended_exclude_lines: "list[bytes] | None" = None,
 ) -> LaneResult:
     repo_path = _worktree(repo)
     worktree_path = _worktree(worktree)
+    execute_profile = _execute_profile(execute_profile)
+    if execute_profile == LOCAL_DEVELOPER_PROFILE and mode != "execute":
+        raise DevinAdapterError(
+            "the local-developer execute profile is execute mode only for the "
+            "Devin host"
+        )
     if report_deliverable and mode != "execute":
         raise DevinAdapterError("report deliverable is execute mode only for the Devin host")
+    if no_external_publication and mode != "execute":
+        raise DevinAdapterError(
+            "the publication refusal contract is execute mode only for the "
+            "Devin host"
+        )
     # Refused before the run directory and its per-run policy are created: no
     # capability the CLI would refuse is honored on a direct call either.
     reject_report_write_capabilities(capabilities, report_deliverable)
+    reject_publication_capabilities(capabilities, no_external_publication)
+    if existing_workspace and mode != "execute":
+        raise DevinAdapterError(
+            "an existing owner workspace is supported only in execute mode"
+        )
+    if existing_workspace and report_deliverable:
+        raise DevinAdapterError(
+            "an existing owner workspace cannot carry the report contract"
+        )
     timeout = _validate_route(provider, model, provider_config, model_config, mode)
-    support_root = worktree_path.parent / ".side-lane-runtime"
-    support_root.mkdir(parents=True, exist_ok=True)
+    if existing_workspace:
+        # The operator's own checkout. This run's runtime files go under the
+        # repository's own `.git` instead of beside the workspace: the default
+        # root is the worktree's *parent*, which for an owner checkout is a
+        # directory of theirs the run does not own — and a directory this run
+        # created there would be a change to their machine that its own
+        # baseline, which reads one workspace, would never report.
+        support_root = repository_runtime_dir(repo_path)
+    else:
+        support_root = worktree_path.parent / ".side-lane-runtime"
+        support_root.mkdir(parents=True, exist_ok=True)
     run_dir = Path(tempfile.mkdtemp(prefix=f"{worktree_path.name}-", dir=support_root))
     export_path = run_dir / "devin-atif.json"
     config_path = run_dir / "devin-config.json"
     policy = tool_policy()
     command_capabilities = sorted(set(capabilities) & {"shell", "workspace-write", "git-push"})
-    allowed_rules = list(dict.fromkeys(
-        rule for capability in command_capabilities
-        for rule in policy.allowed.get(capability, ()) if rule.startswith("Bash(")
-    ))
-    denied_rules = list(dict.fromkeys(
-        rule for capability in command_capabilities
-        for rule in policy.denied.get(capability, ()) if rule.startswith("Bash(")
-    ))
-    if report_deliverable:
-        # The report-lane git-write denials come from the same canonical
-        # document as every other rule here; they are a property of the lane,
-        # so a lane granted no command capability still carries them.
-        denied_rules.extend(
-            rule for rule in policy.report_denied if rule not in denied_rules
-        )
+    allowed_rules, denied_rules = command_policy_rules(
+        policy, command_capabilities, execute_profile=execute_profile
+    )
+    for enabled, rules in (
+        # Each set is a property of the lane, so a lane granted no command
+        # capability still carries it. The report-lane git-write denials, the
+        # publication guard's denials, and the owner-workspace direct git-write
+        # denials all come from the same canonical document as every other rule
+        # here. All three are the second independent control on this host:
+        # `_runtime_config` puts them in Devin's native deny list, and this puts
+        # them in the PreToolUse command policy, which normalises a
+        # lane-contained `-C` prefix and strips any other `git -C <target>`
+        # before matching a denial.
+        #
+        # The owner-workspace set is the one that matters most here: this
+        # profile's allow side is the whole `exec` class, so without a denial a
+        # `git commit` in the owner's own checkout matches no rule at all — the
+        # contract forbade it and nothing on this host did.
+        (report_deliverable, policy.report_denied),
+        (no_external_publication, policy.no_publication_denied),
+        (existing_workspace, policy.existing_workspace_denied),
+    ):
+        if enabled:
+            denied_rules.extend(rule for rule in rules if rule not in denied_rules)
     policy_hook_command = None
     if mode == "execute":
         # Install the hook whenever an execute lane has a worktree to contain,
@@ -765,7 +1006,10 @@ def launch(
     config_path.write_text(json.dumps(_runtime_config(
         model, capabilities, _load_user_config(user_config_path), policy_hook_command,
         worktree=worktree_path, read_roots=read_roots, web_domains=web_domains,
-        report_deliverable=report_deliverable
+        report_deliverable=report_deliverable,
+        no_external_publication=no_external_publication,
+        existing_workspace=existing_workspace,
+        execute_profile=execute_profile,
     ), indent=2) + "\n",
                            encoding="utf-8")
     command = build_command(executable=executable, repo=repo_path, worktree=worktree_path,
@@ -773,7 +1017,9 @@ def launch(
         model_config=model_config, prompt=prompt, export_path=export_path,
         config_path=config_path, mode=mode, capabilities=capabilities,
         read_roots=read_roots, web_domains=web_domains,
-        run_mcp_servers=run_mcp_servers, report_deliverable=report_deliverable)
+        run_mcp_servers=run_mcp_servers, report_deliverable=report_deliverable,
+        existing_workspace=existing_workspace,
+        no_external_publication=no_external_publication)
     child_env = build_environment(os.environ if env is None else env)
     # Per-run MCP delivery (execute only — this adapter supports no other
     # mode): validate env references against the environment the worker child
@@ -798,15 +1044,72 @@ def launch(
         # `git add -A` for the whole run — the exclusion lands BEFORE the file
         # is written, while restore only runs after the worker exits. Tracked
         # local configs are rejected above because Git excludes cannot protect
-        # them from a worker's mid-run add.
-        ensure_devin_local_mcp_exclusion(worktree_path)
-        local_mcp = _merge_local_mcp_config(worktree_path, run_mcp_servers)
+        # them from a worker's mid-run add. A restore that cannot be made lifts
+        # the entry again (see the `finally` below), so the entry never hides
+        # the file it was protecting once that file is a leftover.
+        # An existing-workspace launch passes the collector its own exclude
+        # writers record into, so this adapter's append is recognizable as the
+        # tool's own write when the post-run reading normalizes the exclude
+        # file. The entry lands after that baseline was captured, so a launch
+        # that did not record it here would report it as the worker's edit.
+        _, exclusion_added = ensure_devin_local_mcp_exclusion(
+            worktree_path, appended_exclude_lines=appended_exclude_lines
+        )
+        try:
+            local_mcp = _merge_local_mcp_config(worktree_path, run_mcp_servers)
+        except Exception as exc:
+            # The worker has not started, so a new exclude entry has no useful
+            # lifetime when the generated config could not be merged.
+            if exclusion_added and not lift_devin_local_mcp_exclusion(worktree_path):
+                raise DevinAdapterError(
+                    "the local MCP merge failed and this run's Git exclusion "
+                    "could not be removed; the config may still be hidden"
+                ) from exc
+            raise
+    restore_error: str | None = None
     try:
         returncode, stdout, stderr = _run(command, cwd=worktree_path,
             env=child_env, timeout=timeout, popen=popen)
     finally:
         if local_mcp is not None:
-            _restore_local_mcp_config(*local_mcp)
+            restore_error = _restore_local_mcp_config(*local_mcp)
+            if restore_error is not None and existing_workspace and exclusion_added:
+                # A leftover generated file must not stay hidden. The exclusion
+                # landed at launch so a mid-run `git add -A` could not stage the
+                # file; the very same entry would hide the leftover from the
+                # post-run workspace measurement, which is the only thing the
+                # owner workspace's audit reads. Lifting it here — inside the
+                # `finally`, so it also happens when `_run` itself raised —
+                # makes the leftover an ordinary untracked path in that audit.
+                # An owner workspace is the case this exists for: a created lane
+                # is disposed with its worktree, so it leaves nothing behind.
+                visible = lift_devin_local_mcp_exclusion(worktree_path)
+                restore_error = (
+                    f"{restore_error}; the generated file was left in place and "
+                    + (
+                        "is visible to git status again"
+                        if visible
+                        else "may still be hidden, because this run's exclude "
+                        "entry could not be removed"
+                    )
+                )
+            elif restore_error is not None and existing_workspace:
+                restore_error = (
+                    f"{restore_error}; the generated file was left in place, "
+                    "and the pre-existing exclusion was preserved, so git status "
+                    "may hide it"
+                )
+    if restore_error is not None:
+        # Fail closed rather than hand back a result from a worker whose run
+        # left a generated file — URL plus `${ENV}` reference — in a checkout
+        # this run does not own. The exception path (a raise from `_run`) keeps
+        # its own exception: it already reports the run as failed, and the
+        # leftover is recorded by the workspace audit rather than by masking
+        # what actually went wrong.
+        raise DevinAdapterError(
+            "the per-run Devin local MCP config could not be put back after the "
+            f"run, so no result from it is accepted: {restore_error}"
+        )
     models, usage = _atif_metadata(export_path)
     resolved_model = next(iter(models)) if len(models) == 1 else None
     if returncode == 0:

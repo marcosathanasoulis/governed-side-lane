@@ -229,12 +229,28 @@ The effective rules per capability are the "Execute tool allowlist" section of
 `config/lane-governance.md`; the adapter renders that section and nothing else,
 so do not restate or extend the list in a prompt or skill.
 
-Execute lanes also inherit the host's configured MCP servers (for example,
+Execute lanes also load the host's configured MCP servers (for example,
 Playwright, when the `playwright` capability reports as present via
 `check-capabilities`). Review mode hides every MCP server with
 `--strict-mcp-config`, so no capability makes a connector available there.
-On a Claude-host execute lane a connected MCP server is callable only when a
-granted capability allowlists its tools: pass `--capability gitnexus` and/or
+A routed Claude execute lane loads only the narrow bundle it was granted — its
+capability-mapped servers, the per-run registrations, and the worktree's own
+`.mcp.json` — and a native one loads the host's registrations beside its
+per-run file. The `local-developer` execute profile requires private
+route-table opt-in and a local execution location. For a native-protocol route
+whose location is inferred rather than declared, the operator must also
+select an existing owner workspace or explicitly select the profile. This
+selection is host-neutral: the qualified host renders it through its own tool
+seam. On Claude, the profile keeps the worker's host registrations and renders
+a server-wide `mcp__<server>` rule for each, except that `cm-services` remains
+capability-gated. On Devin, it grants native `exec` and only the MCP rules
+selected by capabilities; it does not add Claude-style server-wide rules.
+Codex retains its native tool surface and after-run workspace audit.
+Registration is presence evidence only — never authentication, and never a
+grant by itself.
+On a Claude-host execute lane outside that profile a connected MCP server is
+callable only when a granted capability allowlists its tools: pass
+`--capability gitnexus` and/or
 `--capability codegraph` when the worker should query those code graphs.
 Only their read-only query tools are granted there; GitNexus index mutation
 (`analyze`, `clean`, `group_sync`, non-dry-run `rename`) never is. Codex

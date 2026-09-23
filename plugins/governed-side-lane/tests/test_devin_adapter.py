@@ -1,17 +1,16 @@
 import json
-import os
 from pathlib import Path
 import shlex
 import signal
 import subprocess
 import tempfile
 import unittest
-import shlex
 from unittest import mock
 
 from side_lane import devin_command_policy
 from side_lane import read_roots
 from side_lane import web_domains
+from side_lane import worktrees
 from side_lane.adapters import devin
 from side_lane.mcp_run_config import McpRunServer
 
@@ -145,6 +144,78 @@ class DevinAdapterTests(unittest.TestCase):
         for prefix in ("git", "echo", "uv"):
             self.assertFalse(any(rule.startswith(f"Exec(PYTHONDONTWRITEBYTECODE=1 {prefix}")
                                  for rule in allow))
+
+    def test_runtime_config_renders_the_native_shell_class_only_on_the_profile(self) -> None:
+        """The native layer decides before the hook, so the profile must reach it.
+
+        The hook reads the profile directly, but a command the native layer
+        prompts on ends a non-interactive run before the hook is consulted, so
+        the profile is rendered on both. Two facts condition the grant — the
+        `local-developer` profile and the `shell` capability — and it is the
+        documented bare tool rule, never a widened `Exec(...)` prefix.
+        """
+
+        local = devin._runtime_config("swe-2-medium", ("shell",),
+                                      execute_profile=devin.LOCAL_DEVELOPER_PROFILE)
+        self.assertTrue(devin_command_policy.native_exec_tool_granted(
+            local["permissions"]["allow"]))
+        # A narrowed lane keeps the closed enumeration.
+        self.assertFalse(devin_command_policy.native_exec_tool_granted(
+            devin._runtime_config("swe-2-medium", ("shell",))["permissions"]["allow"]))
+        # Neither profile emits the class without the `shell` capability.
+        for profile in (devin.STANDARD_PROFILE, devin.LOCAL_DEVELOPER_PROFILE):
+            with self.subTest(profile=profile):
+                self.assertFalse(devin_command_policy.native_exec_tool_granted(
+                    devin._runtime_config("swe-2-medium", ("playwright",),
+                                          execute_profile=profile)["permissions"]["allow"]))
+        self.assertNotIn("Exec(*)", local["permissions"]["allow"])
+        self.assertFalse(any("*" in rule for rule in local["permissions"]["allow"]
+                             if rule.startswith("Exec(")))
+        with self.assertRaisesRegex(devin.DevinAdapterError, "unknown execute profile"):
+            devin._runtime_config("swe-2-medium", ("shell",),
+                                  execute_profile="not-a-profile")
+
+    def test_launch_hands_the_resolved_profile_to_the_runtime_config(self) -> None:
+        """`launch` plumbs the profile to the config builder, not only the hook.
+
+        This is the wiring the original defect was missing: the profile
+        resolved correctly and reached the command policy, while the config
+        builder that renders the native allow list was never given it.
+        """
+
+        model = "swe-2-medium"
+        provider, route = self.config(model)
+        process = mock.Mock(pid=41, returncode=0)
+        captured: dict = {}
+        def popen(command, **_kwargs):
+            config = json.loads(Path(command[command.index("--config") + 1]).read_text())
+            captured["config"] = config
+            captured["rules"] = json.loads(Path(
+                next(entry for entry in config["hooks"]["PreToolUse"]
+                     if "devin_command_policy" in entry["hooks"][0]["command"]
+                     )["hooks"][0]["command"].split()[-1]).read_text())
+            Path(command[command.index("--export") + 1]).write_text(
+                json.dumps({"steps": [{"model_name": model}]}))
+            process.communicate.return_value = ("done", "")
+            return process
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lane = self.repo(root, "lane")
+            def launch(profile):
+                return devin.launch(executable="devin", repo=self.repo(root, "repo"),
+                    worktree=lane, provider="devin", model=model,
+                    provider_config=provider, model_config=route, prompt="Implement it",
+                    popen=popen, capabilities=("shell",),
+                    user_config_path=root / "missing.json", execute_profile=profile)
+            launch(devin.LOCAL_DEVELOPER_PROFILE)
+            widened = captured["config"]["permissions"]["allow"]
+            self.assertTrue(devin_command_policy.native_exec_tool_granted(widened))
+            # The hook and the native layer agree on the same lane.
+            self.assertIn("Bash", captured["rules"]["allowed"])
+            launch(devin.STANDARD_PROFILE)
+            narrowed = captured["config"]["permissions"]["allow"]
+            self.assertFalse(devin_command_policy.native_exec_tool_granted(narrowed))
+            self.assertNotIn("Bash", captured["rules"]["allowed"])
 
     def test_runtime_config_grants_exact_slack_read_tools_only(self) -> None:
         config = devin._runtime_config("swe-2-medium", ("slack-read",))
@@ -498,6 +569,59 @@ class DevinAdapterTests(unittest.TestCase):
                 ["git", "-C", str(lane), "check-ignore", "-q",
                  ".devin/mcp_config.local.json"], capture_output=True)
             self.assertEqual(ignored.returncode, 0)
+
+    def test_launch_records_the_exclusion_it_appends_for_the_workspace_audit(self) -> None:
+        # An owner-workspace launch digests `.git/info/exclude` before the run
+        # and compares that digest with a reading taken after it. This adapter
+        # appends its local-MCP entry *during* the run, so the exact bytes it
+        # writes have to reach the launch doing the comparing: the caller hands
+        # the adapter the same collector its own writers use, and a reading
+        # under those bytes has to digest the owner's file, not this adapter's
+        # own write. Without that, every Devin owner-workspace run with MCP
+        # servers reports a git write the worker never made.
+        provider, route = self.config()
+        process = mock.Mock(pid=41, returncode=0)
+        servers = {"aws": McpRunServer(
+            name="aws", url="https://bridge.example.invalid/mcp",
+            headers=(("Authorization", "Bearer", "CLAUDE_TAG_AWS_MCP_TOKEN"),),
+        )}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lane = self.repo(root, "lane")
+            (lane / "base.txt").write_text("base\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(lane), "add", "base.txt"],
+                           check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(lane), "-c", "user.email=test@example.com",
+                            "-c", "user.name=Test", "commit", "-q", "-m", "base"],
+                           check=True, capture_output=True)
+            before = worktrees.capture_workspace_baseline(lane)
+            def popen(command, **_kwargs):
+                Path(command[command.index("--export") + 1]).write_text(
+                    json.dumps({"steps": [{"model_name": "swe-2-medium"}]}))
+                process.communicate.return_value = ("done", "")
+                return process
+            appended: list = []
+            result = devin.launch(executable="devin",
+                repo=self.repo(root, "repo"), worktree=lane, provider="devin",
+                model="swe-2-medium", provider_config=provider, model_config=route,
+                prompt="task",
+                env={"PATH": "/bin", "HOME": str(root),
+                     "CLAUDE_TAG_AWS_MCP_TOKEN": "placeholder"},
+                popen=popen, user_config_path=root / "missing.json",
+                run_mcp_servers=servers, appended_exclude_lines=appended)
+            self.assertEqual(result.returncode, 0)
+            # The exact bytes this run appended, not every line whose text
+            # happens to match the pattern: the audit strips these and only
+            # these.
+            self.assertEqual(
+                appended, [b"/.devin/mcp_config.local.json\n"]
+            )
+            exclude = lane / ".git" / "info" / "exclude"
+            self.assertIn(appended[0], exclude.read_bytes())
+            after = worktrees.capture_workspace_baseline(
+                lane, tool_appended_exclude_lines=tuple(appended))
+            self.assertEqual(before.git_state.info, after.git_state.info)
+            self.assertNotIn("info", before.git_state.moved_by(after.git_state))
 
     @mock.patch("side_lane.adapters.devin.os.killpg")
     def test_timeout_terminates_the_process_group(self, killpg: mock.Mock) -> None:

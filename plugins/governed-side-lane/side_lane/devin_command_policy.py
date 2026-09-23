@@ -149,6 +149,64 @@ def devin_exec_deny_rule(rule: str) -> str | None:
     return f"Exec({pattern})"
 
 
+#: The ``local-developer (granted)`` surface is the **bare** ``Bash`` rule:
+#: the host's own native shell class, in place of an enumeration of literal
+#: command prefixes. It carries no parenthesised pattern, so it grants every
+#: command the canonical deny list does not block — which is exactly what the
+#: profile means, because a closed enumeration denies every family nobody
+#: thought to list (``gcloud run services describe``, ``gh api``, ``cd``, a
+#: compound ``ls … | head …; cat …``) with one false cause.
+SHELL_CLASS_RULE = "Bash"
+
+
+def grants_shell_class(rules: Sequence[str]) -> bool:
+    """True when ``rules`` carries the bare shell-class grant."""
+
+    return any(
+        isinstance(rule, str) and " ".join(rule.split()) == SHELL_CLASS_RULE
+        for rule in rules
+    )
+
+
+#: The documented native spelling of that same whole-``exec``-class grant.
+#:
+#: Devin's native permission layer is a *separate* control from the PreToolUse
+#: hook, and it runs first: under ``--permission-mode accept-edits`` a shell
+#: command is auto-approved only when an allow rule matches, and a prompt ends
+#: a non-interactive run. The installed CLI's own reference documents two
+#: matcher kinds. Scope-based ``Exec(prefix)`` matches a whole-word command
+#: prefix only, which is why a closed enumeration of literals cannot admit an
+#: unlisted family. Tool-based rules instead "match by tool name to control
+#: entire tools", and the reference names ``read``, ``edit``, ``grep``,
+#: ``glob`` and ``exec`` as the available tool names — so the bare ``exec``
+#: entry is the documented whole-``exec``-class grant, the native equivalent
+#: of the canonical bare ``Bash`` rule above. It is deliberately not the
+#: undocumented ``Exec(*)``: no installed page documents a wildcard inside an
+#: ``Exec(...)`` scope, and a guessed spelling would be a grant nobody proved.
+#:
+#: Native precedence is deny, then ask, then allow, so emitting this rule never
+#: promotes a blocked command: the layer's own deny rules and every preserved
+#: user ``ask`` rule are matched before it, and the PreToolUse hook — the
+#: enforcement seam for the canonical policy — still decides afterwards.
+#:
+#: Sources (installed Devin CLI ``3000.10.21``, bundled documentation
+#: ``share/devin/docs``): ``reference/permissions.mdx`` "Tool-Based
+#: Permissions" and its "Locked-Down Enterprise" example, which spells the
+#: class as the bare ``"exec"`` in an ``ask`` list; corroborated by
+#: ``enterprise/team-settings.mdx``, which spells it as the bare ``"exec"`` in
+#: a ``deny`` list.
+NATIVE_EXEC_TOOL_RULE = "exec"
+
+
+def native_exec_tool_granted(rules: Sequence[str]) -> bool:
+    """True when ``rules`` carries the native whole-``exec``-class grant."""
+
+    return any(
+        isinstance(rule, str) and " ".join(rule.split()) == NATIVE_EXEC_TOOL_RULE
+        for rule in rules
+    )
+
+
 def bare_rule_pattern(pattern: str | None) -> str | None:
     """Return the argument-free command a ``<command> *`` pattern also grants."""
 
@@ -165,6 +223,13 @@ def matching_rule(command: object, rules: Sequence[str], *, anywhere: bool = Fal
 
     if not isinstance(command, str):
         return None
+    # The shell-class grant is checked before the enumeration because it is a
+    # superset of it. Denials are unaffected: every caller matches `denied`
+    # before `allowed`, so a blocked command still blocks under this profile
+    # (``git push --force``, the report-deliverable git writes, and every
+    # Common and Execute-mode rule keep their force).
+    if grants_shell_class(rules):
+        return SHELL_CLASS_RULE
     normalized = " ".join(command.split())
     for rule in rules:
         pattern = bash_rule_pattern(rule)
@@ -914,7 +979,24 @@ def _validate_component(component: list[_Token], allowed: Sequence[str],
         basename = Path(argv[0]).name
         if basename:
             spellings.append(" ".join([basename, *argv[1:]]))
-    for spelling in spellings:
+    # A denial is also matched against the command with a leading
+    # ``git -C <target>`` removed, *whatever* that target is. The
+    # normalisation above deliberately keeps a ``-C`` target it cannot prove
+    # lane-contained so the command fails the *grant* match — the right answer
+    # for an allow rule, and no answer at all for a deny rule, because the
+    # profile whose allow side is the bare shell class grants it. So
+    # ``git -C /elsewhere commit`` and ``git -C "$PWD" commit`` reach a
+    # canonical ``Bash(git commit *)`` denial through this spelling.
+    #
+    # Denying is fail-safe: matching an extra spelling can only add a block and
+    # can never promote a command. Only denials take this path; ``allowed``
+    # below still sees the command exactly as spelled, so no grant widens.
+    deny_spellings = list(spellings)
+    if len(argv) >= 4 and argv[1] == "-C" and Path(argv[0]).name == "git":
+        stripped = " ".join([argv[0], *argv[3:]])
+        if stripped not in deny_spellings:
+            deny_spellings.append(stripped)
+    for spelling in deny_spellings:
         matched = matching_rule(spelling, denied, anywhere=True)
         if matched is not None:
             return ({"decision": "block",

@@ -11,6 +11,25 @@ from side_lane.adapters import claude, codex
 
 ROOT = Path(__file__).parents[1]
 
+ALLOWLIST_HEADING = "## Execute tool allowlist"
+
+
+def inside_allowlist(base: str, extra: str) -> str:
+    """Insert ``extra`` at the end of the ``Execute tool allowlist`` section.
+
+    ``tool_policy()`` parses only that section, and ``_sections()`` ends a
+    section at the next ``## `` heading — which is not necessarily the end of
+    the file. Appending a malformed-subsection fixture to the whole document
+    would drop it into whatever section happens to follow, silently testing
+    nothing. Cut at the real section boundary instead, so the fixture lands
+    inside the allowlist wherever later sections sit.
+    """
+
+    after = base.index(ALLOWLIST_HEADING) + len(ALLOWLIST_HEADING)
+    boundary = base.find("\n## ", after)
+    end = len(base) if boundary == -1 else boundary + 1
+    return base[:end] + extra + base[end:]
+
 
 class GovernanceParityTests(unittest.TestCase):
     def test_every_configured_route_uses_one_canonical_renderer(self) -> None:
@@ -384,18 +403,59 @@ class ToolPolicyTests(unittest.TestCase):
             path.write_text(base.replace("### always\n", "### sometimes\n"), encoding="utf-8")
             with self.assertRaisesRegex(GovernanceError, "always"):
                 tool_policy(path)
-            path.write_text(base + "\n### Shell Bad\n\n- `Bash(x)`\n", encoding="utf-8")
+            path.write_text(
+                inside_allowlist(base, "\n### Shell Bad\n\n- `Bash(x)`\n"),
+                encoding="utf-8",
+            )
             with self.assertRaisesRegex(GovernanceError, "invalid capability name"):
                 tool_policy(path)
             path.write_text(base.replace("- `Bash(git push * -f*)`", "- Bash(git push * -f*)"), encoding="utf-8")
             with self.assertRaisesRegex(GovernanceError, "malformed line"):
                 tool_policy(path)
-            path.write_text(base + "\n### always\n\n- `Bash(*)`\n", encoding="utf-8")
+            path.write_text(
+                inside_allowlist(base, "\n### always\n\n- `Bash(*)`\n"),
+                encoding="utf-8",
+            )
             with self.assertRaisesRegex(GovernanceError, "more than once"):
                 tool_policy(path)
-            path.write_text(base.split("## Execute tool allowlist")[0], encoding="utf-8")
+            path.write_text(base.split(ALLOWLIST_HEADING)[0], encoding="utf-8")
             with self.assertRaisesRegex(GovernanceError, "missing sections"):
                 tool_policy(path)
+
+    def test_a_repeated_required_section_fails_closed(self) -> None:
+        """One copy per required heading, or the document's guarantee is gone.
+
+        The section map keeps one body per name, so a second copy of a whole
+        section silently replaced the first: a document carrying two
+        `## Publication refusal` sections was accepted, and its refusal list
+        came from whichever copy came last. A repeated required heading is
+        refused now; a heading the contract does not require carries no such
+        guarantee and is left alone.
+        """
+        from side_lane.governance import (
+            REQUIRED_SECTIONS, publication_refused_capabilities, tool_policy)
+        base = (ROOT / "config/lane-governance.md").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "gov.md"
+            # The whole-section duplication that motivated the check: the later
+            # copy names a different capability, so accepting the document would
+            # replace the canonical `git-push` refusal with `workflow-write`.
+            path.write_text(
+                base + "\n## Publication refusal\n\n"
+                "Publication refusal never grants these capabilities: `workflow-write`\n",
+                encoding="utf-8")
+            with self.assertRaisesRegex(GovernanceError, "repeats required sections"):
+                publication_refused_capabilities(path)
+            # Every required heading is checked, not just the guarded one.
+            for heading in REQUIRED_SECTIONS:
+                path.write_text(base + f"\n## {heading}\n\nSecond copy.\n", encoding="utf-8")
+                with self.assertRaisesRegex(GovernanceError, "repeats required sections"):
+                    tool_policy(path)
+            # Unrequired, so unchecked: its last-wins behaviour is unchanged.
+            path.write_text(base + "\n## Preapproved backup reassignment\n\nSecond copy.\n",
+                            encoding="utf-8")
+            self.assertEqual(publication_refused_capabilities(path), ("git-push",))
+            tool_policy(path)
 
 
 class NegatedLinkageTests(LinkageWordingTests):

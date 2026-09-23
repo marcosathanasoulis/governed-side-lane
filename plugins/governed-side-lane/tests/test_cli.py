@@ -1538,10 +1538,41 @@ class ConnectorDiscoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory) / "home"
             repo = Path(directory) / "repo"
+            home.mkdir()
+            repo.mkdir()
+            # A per-project entry keyed by ANOTHER path: the user config parses
+            # and declares names, none of them this lane's. Only the Claude user
+            # config has that position at all — the worktree ``.mcp.json``
+            # reader and the Devin reader are root-only — so the out-of-scope
+            # state is exercised on the file a host reads it from.
+            (home / ".claude.json").write_text(
+                json.dumps({"projects": {"/elsewhere": {"mcpServers": {"zoom": {}}}}}),
+                encoding="utf-8",
+            )
+            # Unparsable: a registration file the host would refuse to load.
+            (repo / ".mcp.json").write_text('{"mcpServers": {', encoding="utf-8")
+            with mock.patch("side_lane.cli.Path.home", return_value=home):
+                sources = cli._mcp_registration_sources("claude", repo)
+        # Two files, not three: Claude's settings file carries no MCP scope, so
+        # it is not a registration source the report names at all. The ``missing``
+        # disposition is covered by the Devin case below.
+        self.assertEqual([source["state"] for source in sources],
+                         ["out-of-scope-only", "unparsed"])
+        # Only paths ever leave the registration files, never their values.
+        self.assertNotIn("/elsewhere", json.dumps(sources))
+
+    def test_a_devin_projects_key_declares_no_registration(self) -> None:
+        # The Devin reader is root-only: ``mcp_config.json`` is read for its
+        # ``mcpServers`` container and nothing else, so a ``projects`` key there
+        # is data — the file declares no servers at all rather than a set of
+        # names the child never loads, whatever is spelled inside one.
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "home"
+            repo = Path(directory) / "repo"
             (home / ".config" / "devin").mkdir(parents=True)
             (repo / ".devin").mkdir(parents=True)
             (home / ".config" / "devin" / "mcp_config.json").write_text(
-                '{"mcpServers": {', encoding="utf-8"
+                '{"mcpServers":{"gitnexus":{"command":"native"}}}', encoding="utf-8"
             )
             (repo / ".devin" / "mcp_config.json").write_text(
                 json.dumps({"projects": {"/elsewhere": {"mcpServers": {"zoom": {}}}}}),
@@ -1549,10 +1580,10 @@ class ConnectorDiscoveryTests(unittest.TestCase):
             )
             with mock.patch("side_lane.cli.Path.home", return_value=home):
                 sources = cli._mcp_registration_sources("devin", repo)
+                in_scope, out_of_scope = cli._discover_mcp_inventory("devin", repo)
         self.assertEqual([source["state"] for source in sources],
-                         ["unparsed", "out-of-scope-only", "missing"])
-        # Only paths ever leave the registration files, never their values.
-        self.assertNotIn("/elsewhere", json.dumps(sources))
+                         ["registered", "no-servers", "missing"])
+        self.assertEqual((in_scope, out_of_scope), ({"gitnexus"}, set()))
 
     def test_capability_report_carries_registration_sources_and_never_verifies(
         self,

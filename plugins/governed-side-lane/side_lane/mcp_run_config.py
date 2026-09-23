@@ -73,6 +73,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import stat
 import tempfile
 from typing import Mapping
 from urllib.parse import urlsplit
@@ -281,15 +282,35 @@ def registration_paths(
     ``devin mcp add --help`` documents three separate registration files — a
     user file under the CLI config directory and two repository files — none
     of which is the general ``--config`` file the Devin adapter generates.
-    The Claude and Codex entries mirror those hosts' documented user and
-    project config files. Only file paths are produced; no value from them is
-    ever read here.
+    The Codex entries mirror that host's documented user and project config
+    files. Only file paths are produced; no value from them is ever read here.
+
+    Claude's entries are exactly the files its own MCP scopes resolve to: the
+    global ``.claude.json`` (``user``, plus ``local`` through its
+    ``projects.<path>`` entry, which is what the adapter's own registration
+    reader reads) and the lane's ``.mcp.json`` (``project``). The Claude USER
+    SETTINGS file — ``.claude/settings.json``, or the ``settings.json`` under a
+    routed lane's ``CLAUDE_CONFIG_DIR`` — is deliberately NOT listed: the host
+    reads no MCP scope out of it. Its scope resolver maps ``user``/``local`` to
+    the global ``.claude.json`` and ``project`` to ``.mcp.json``, and its
+    settings sources name only the settings files (claude 2.1.278), so an
+    ``mcpServers`` key there is a settings field and never a registry the child
+    loads. Listing the file made every inventory of a lane's registry name a
+    registration the child does not have, and judge that field's shape — a
+    non-object spelling refused a whole file the child loads.
 
     ``env`` defaults to ``os.environ`` for ``CODEX_HOME``/``APPDATA``, with
     the home directory resolved through ``Path.home()`` (the process's own
     view). A caller that passes an explicit ``env`` — the adapters' pre-launch
     name-conflict check, which must resolve against the worker child's
-    environment — pins ``HOME`` from it when present.
+    environment — pins ``HOME`` from it when present, and honors
+    ``CLAUDE_CONFIG_DIR`` for the Claude host.
+
+    ``CLAUDE_CONFIG_DIR`` is honored ONLY from an explicit ``env``: the Claude
+    adapter scrubs it out of the child environment (``SCRUB_EXACT``) and sets
+    its own for a routed lane, so an ambient value in this process describes a
+    config directory the worker child never opens. Reading it here would let a
+    preflight inventory see one registry while the child loads another.
     """
 
     environment = os.environ if env is None else env
@@ -302,10 +323,25 @@ def registration_paths(
             paths.append(("project", repo / ".codex" / "config.toml"))
         return paths
     if host == "claude":
-        paths = [
-            ("user", home / ".claude.json"),
-            ("user", home / ".claude" / "settings.json"),
-        ]
+        # A lane that sets ``CLAUDE_CONFIG_DIR`` — the routed execute lane's
+        # disposable config directory — resolves its config file AND its
+        # settings files under that directory instead of under the home
+        # directory. That is therefore the scope whose registrations the child
+        # opens, and the only one an inventory of what it loads may read: the
+        # home directory holds a registry this process never consults. Only an
+        # explicit ``env`` (the child environment an adapter built) can say a
+        # lane sets it: this process's own ``CLAUDE_CONFIG_DIR`` is scrubbed
+        # before the child starts, so trusting it would resolve a registry the
+        # child never loads.
+        config_dir = (
+            str(environment.get("CLAUDE_CONFIG_DIR", "")).strip() if env is not None else ""
+        )
+        # One file, the global ``.claude.json``: the settings file beside it
+        # carries no MCP scope (module docstring of this function).
+        if config_dir:
+            paths = [("user", Path(config_dir) / ".claude.json")]
+        else:
+            paths = [("user", home / ".claude.json")]
         if repo is not None:
             paths.append(("project", repo / ".mcp.json"))
         return paths
@@ -328,6 +364,133 @@ def registration_paths(
     return []
 
 
+def _claude_worktree_mapping(host: str, path: Path) -> bool:
+    """Whether ``path`` is the Claude worktree ``.mcp.json``.
+
+    That file's server names are its own top-level keys as often as they are an
+    ``mcpServers`` container's — the shape the Claude adapter's own
+    ``_effective_mcp_registrations`` reads for it (and its ``.mcp.json``
+    branch, which is this file's only reader). An inventory that looked for
+    only the container would report no name for a registration the child
+    loads, and the local-developer profile would then render no
+    ``mcp__<server>`` rule for a tool the host has.
+    """
+
+    return host == "claude" and path.name == ".mcp.json"
+
+
+def _host_reads_project_entries(host: str, path: Path) -> bool:
+    """Whether ``path`` is a file ``host``'s reader has project entries in.
+
+    Only ONE file has that position: the Claude USER config ``.claude.json``.
+    The adapter's registration merge (``_effective_mcp_registrations``) reads
+    ``projects.<path>.mcpServers`` out of ``home/.claude.json`` — or the same
+    file under a routed lane's ``CLAUDE_CONFIG_DIR`` — and out of no other file,
+    and it reads the lane worktree ``.mcp.json`` as its ``mcpServers`` container
+    or as its own top-level keys, never as a project entry. The Devin reader is
+    root-only as well.
+
+    The file's NAME is the right discriminator here, not its inequality with
+    ``.mcp.json``: the position belongs to the file the adapter reads it out of
+    and to nothing else. A predicate keyed on a name being SOMETHING ELSE
+    re-reads the rule into every other file the host happens to list, and
+    ``settings.json`` was the file that exposed it — a ``projects`` key there is
+    a settings field, not a scope, and not a container whose shape may refuse a
+    file the child loads whole. Reading the user config's position rule into it
+    made the scanner disagree with the host twice over: a ``null`` spelling
+    refused a whole file the child loads, and a container-shaped one invented a
+    registration (and a server-wide ``mcp__<server>`` rule, and a same-name
+    launch refusal) the child never had.
+
+    A file whose reader has no such position declares nothing there however its
+    bytes are spelled: a server named ``projects`` is a flat worktree
+    registration, not a scope, and a field spelled ``mcpServers`` inside such a
+    definition is data.
+    """
+
+    return host == "claude" and path.name == ".claude.json"
+
+
+def json_registration_scopes(
+    host: str, path: Path, *, selected_project: str | None = None
+) -> dict[str, set[tuple[str, ...]]]:
+    """Names and declaration paths for one JSON registration file of ``host``.
+
+    The single reader of a JSON registration file's SHAPE, so every inventory
+    of one host's registry — the pre-launch name-conflict check, the worker's
+    own inherited-name inventory and the CLI's gate scan and source report —
+    agrees on which names the child loads. ``connector_metadata`` owns the
+    grammar (names only, never a value, and nothing from a document the host
+    refuses); this adds the host's own file-shape rules on top of it, in the two
+    places the adapter's ``_effective_mcp_registrations`` differs by file:
+    Claude's worktree ``.mcp.json`` is read flat when it declares no non-empty
+    ``mcpServers`` object (``_claude_worktree_mapping``), and exactly one file —
+    Claude's user ``.claude.json`` — is read for a ``projects.<path>`` entry at
+    all (``_host_reads_project_entries``, which also covers the same file under
+    a routed lane's ``CLAUDE_CONFIG_DIR``). Every other file the host lists is
+    container-only at root scope — and the settings file is not among them,
+    because the host reads no MCP scope out of it at all
+    (``registration_paths``).
+
+    ``selected_project`` is the one ``projects.<path>`` entry a reader opens
+    (``_selected_project``) — the same entry the callers scope names to. With it
+    named, a malformed container under any other path is data the child never
+    opens — no name, and no refusal — while the lane's own entry keeps the
+    strict shape rule. Without it no entry is selected and every project entry
+    keeps that rule, which is the conservative reading for a caller that cannot
+    say which directory a host would launch in.
+    """
+
+    return json_mcp_name_scopes(
+        path,
+        root_mapping_fallback=_claude_worktree_mapping(host, path),
+        project_entries=_host_reads_project_entries(host, path),
+        selected_project=selected_project,
+    )
+
+
+def _registration_is_file(path: Path) -> bool:
+    """Whether ``path`` is a registration file that exists, by a strict stat.
+
+    ``Path.is_file()`` (and ``os.path.isfile``) answers False for ANY
+    ``OSError`` — an unsearchable parent directory among them — so a registry
+    that exists but cannot be reached reads as "no such file", and the caller
+    proceeds with an inventory it could not actually take. That is the one
+    answer this module's readers must not give: a name inventory that cannot be
+    established is what they fail closed on. ``os.stat`` separates the two: a
+    genuine absence (``FileNotFoundError``) is False, and every other
+    ``OSError`` propagates to the caller's refusal.
+
+    Non-regular files keep their existing meaning. A directory, socket or fifo
+    where a registration belongs is not a registration file and is skipped
+    exactly as before — this probe changes which errors are suppressed, and
+    which paths are read, not at all.
+    """
+
+    try:
+        info = os.stat(path)
+    except FileNotFoundError:
+        return False
+    return stat.S_ISREG(info.st_mode)
+
+
+def _selected_project(worktree: "Path | None") -> str | None:
+    """The project path a Claude reader selects for a lane in ``worktree``.
+
+    A Claude user config carries ``projects.<path>`` entries keyed by the
+    directory the host was launched in, and a reader opens the one for its own
+    directory and no other, so that single entry is the only one whose shape may
+    refuse the registry. Which directory a caller means is the caller's to say:
+    the value reaching here is the same one the in-scope name filter below
+    already uses to decide which entry's names are the lane's, so the shape rule
+    and the name rule cover one entry, not two. ``None`` when the caller has no
+    such path: it names no directory, so no entry is selected and the scanner
+    keeps its strict judgement of every project entry.
+    """
+
+    return None if worktree is None else str(worktree)
+
+
 def conflicting_server_names(
     servers: Mapping[str, McpRunServer], host: str, worktree: "Path | None" = None,
     *, env: "Mapping[str, str] | None" = None
@@ -345,13 +508,14 @@ def conflicting_server_names(
         return set()
     conflicts: set[tuple[str, str, Path]] = set()
     for scope, path in registration_paths(host, worktree, env=env):
-        if not path.is_file():
-            continue
         try:
+            if not _registration_is_file(path):
+                continue
             if path.suffix == ".toml":
                 names = toml_mcp_names(path)
             else:
-                scopes = json_mcp_name_scopes(path)
+                scopes = json_registration_scopes(
+                    host, path, selected_project=_selected_project(worktree))
                 names = {
                     name for name, key_paths in scopes.items()
                     if any(keys == () or (worktree is not None
@@ -366,6 +530,73 @@ def conflicting_server_names(
         for name in sorted(names & declared):
             conflicts.add((name, scope, path))
     return conflicts
+
+
+def host_registered_server_names(
+    host: str, worktree: "Path | None" = None, *, env: "Mapping[str, str] | None" = None
+) -> tuple[str, ...]:
+    """Names the worker host itself registers, user scope plus this worktree.
+
+    Only NAMES are extracted — ``connector_metadata`` keeps no values — and only
+    entries in scope for a lane running in ``worktree``: a Claude user config
+    also carries per-project entries keyed by launch directory, and an entry for
+    any other path is not this lane's — neither as a name (the scope filter
+    below) nor as a file-shape judgement, because that reader opens one entry
+    (``_selected_project``). Sorted and de-duplicated so the tool rules rendered
+    from it are deterministic.
+
+    This is a registration inventory and nothing more. It is presence evidence
+    only: nothing here authenticates a server, reads a credential, or claims a
+    granted scope, and a name in this list means exactly that the host has an
+    entry for it. Callers decide what a merely-registered name may reach.
+
+    The files read are ``registration_paths`` for the host, resolved in the
+    environment given, so the inventory is the registry the child environment
+    actually loads — not the one the parent process happens to hold. An
+    explicit environment's ``HOME`` and ``CLAUDE_CONFIG_DIR`` are honored; an
+    ambient ``CLAUDE_CONFIG_DIR`` is not read at all (``registration_paths``),
+    because the Claude launch scrubs it before the child starts.
+
+    Each file is read with the shape the host's own registration reader uses
+    for it — an ``mcpServers`` container, or, for Claude's worktree
+    ``.mcp.json``, that file's own top-level keys — so a name here is one the
+    child both declares and loads.
+
+    An unreadable or unparsable registration file is a name inventory that
+    cannot be established, so the lane refuses rather than proceeding with a
+    silently partial one — the same fail-closed basis as the name-conflict
+    check beside it. Unparsable covers every input the host itself would
+    refuse: the scanner holds JSON's tokens to their exact spelling and a
+    registration file to the object shapes it has, so a name returned here is
+    one the host actually declares and the child actually loads.
+    """
+
+    names: set[str] = set()
+    for _scope, path in registration_paths(host, worktree, env=env):
+        try:
+            if not _registration_is_file(path):
+                continue
+            if path.suffix == ".toml":
+                names.update(toml_mcp_names(path))
+            else:
+                names.update(
+                    name
+                    for name, key_paths in json_registration_scopes(
+                        host, path, selected_project=_selected_project(worktree)
+                    ).items()
+                    if any(
+                        keys == ()
+                        or (worktree is not None and keys == ("projects", str(worktree)))
+                        for keys in key_paths
+                    )
+                )
+        except (OSError, ValueError) as exc:
+            raise McpRunConfigError(
+                f"cannot inventory the MCP servers {host} registers: "
+                f"registration file {path} is unreadable or unparsable "
+                f"({exc.__class__.__name__})"
+            ) from exc
+    return tuple(sorted(names))
 
 
 def ensure_no_registration_conflicts(
@@ -475,7 +706,16 @@ def devin_local_payload(servers: Mapping[str, McpRunServer]) -> dict[str, object
 
 
 def _server_names_from_config(path: Path) -> set[str]:
-    """Extract server names from a JSON MCP config without reading values."""
+    """Extract server names from a JSON MCP config without reading values.
+
+    A key counts as a name only when its definition is an object, matching the
+    rule the Claude adapter's own registration merge applies
+    (``isinstance(definition, dict)`` in ``_effective_mcp_registrations``): a
+    key holding ``null``, an array or a scalar is not a registration the host
+    loads, so reporting it would invent a collision the host never has. Any
+    object definition is kept as written — an empty or "disabled" body is still
+    a registration.
+    """
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError:
@@ -491,8 +731,8 @@ def _server_names_from_config(path: Path) -> set[str]:
     if "mcpServers" in config:
         servers = config["mcpServers"]
         if isinstance(servers, dict):
-            for name in servers:
-                if isinstance(name, str):
+            for name, definition in servers.items():
+                if isinstance(name, str) and isinstance(definition, dict):
                     names.add(name)
     # Claude projects entry: {"projects": {"/path": {"mcpServers": {...}}}}
     if "projects" in config:
@@ -502,8 +742,8 @@ def _server_names_from_config(path: Path) -> set[str]:
                 if isinstance(project_entry, dict) and "mcpServers" in project_entry:
                     servers = project_entry["mcpServers"]
                     if isinstance(servers, dict):
-                        for name in servers:
-                            if isinstance(name, str):
+                        for name, definition in servers.items():
+                            if isinstance(name, str) and isinstance(definition, dict):
                                 names.add(name)
     return names
 

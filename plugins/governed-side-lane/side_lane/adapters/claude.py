@@ -27,8 +27,10 @@ from side_lane.capabilities import (
 )
 from side_lane.credentials import scrub_backend_environment
 from side_lane.governance import (
+    ToolPolicy,
     known_capabilities,
     lane_system_prompt,
+    publication_refusal_capability_conflicts,
     report_write_capability_conflicts,
     tool_policy,
 )
@@ -37,6 +39,7 @@ from side_lane.mcp_run_config import (
     build_strict_mcp_bundle,
     claude_payload,
     ensure_no_registration_conflicts,
+    host_registered_server_names,
     require_env_references,
     write_ephemeral,
     write_strict_mcp_bundle,
@@ -45,6 +48,7 @@ from side_lane.read_roots import scope_note
 from side_lane.web_domains import claude_rules, scope_note as web_scope_note
 from side_lane.results import LaneResult
 from side_lane.redaction import redact_provider_secret
+from side_lane.worktrees import repository_runtime_dir
 
 
 MAX_PROMPT_CHARS = 100_000
@@ -74,6 +78,29 @@ FIRST_WAVE_ENDPOINTS = {
     "minimax": "https://api.minimax.io/anthropic",
     "anthropic": "https://api.anthropic.com",
 }
+
+#: The two execute-lane tool profiles.  ``standard`` is the PUBLIC default and
+#: keeps every existing lane's argv byte-identical: the literal per-command
+#: rules of the capabilities the lane was granted, and no rule outside them.
+#: ``local-developer`` is one coherent wider mode for a lane running on the
+#: coordinator's own machine under the coordinator's own authority: the host's
+#: native shell class in place of an enumeration of literals, and the worker
+#: host's own registered MCP servers loaded instead of a capability-only
+#: bundle.  No capability unlocks either profile; a per-run selection does.
+STANDARD_PROFILE = "standard"
+LOCAL_DEVELOPER_PROFILE = "local-developer"
+EXECUTE_PROFILES = (STANDARD_PROFILE, LOCAL_DEVELOPER_PROFILE)
+
+
+def _execute_profile(execute_profile: object) -> str:
+    """Validate one execute profile selection, fail-closed on anything else."""
+
+    if execute_profile not in EXECUTE_PROFILES:
+        raise ClaudeAdapterError(
+            f"unknown execute profile: {execute_profile!r}; expected one of "
+            + ", ".join(EXECUTE_PROFILES)
+        )
+    return str(execute_profile)
 
 SCRUB_EXACT = frozenset(
     {
@@ -470,6 +497,41 @@ review-only, report-only, read-only, and no-commit instructions, and stop and
 report genuine authority, credential, or scope blockers rather than requesting
 approval.
 """
+LOCAL_DEVELOPER_NOTE = """\
+## Active execute profile: local-developer
+
+This lane runs under the local developer execute profile: it holds the host's
+native shell class rather than a list of permitted command prefixes, and the
+worker host's own registered MCP servers load alongside this run's capability
+bundle. Both are the same-user authority the canonical rules above describe,
+not an operating-system sandbox — the profile is an approval boundary for a
+headless session, nothing more.
+
+It grants no capability. Every capability rule, every exact per-tool MCP ID,
+the `cm-services` proxy's capability gate, and every Common and Execute-mode
+rule still apply unchanged. The host's *own* registrations are usable through
+the profile, including one whose name a capability also maps to: the graph,
+browser, messaging and remote-read servers are the host's own signed-in
+tooling, so a registration of those names is usable by registration and the
+capability's exact per-tool rules render beside it. The one exception is the
+`cm-services` proxy, which is a capability-gated bridge rather than a
+host-native tool: it is reached only through the capability that grants it.
+Reading cloud state with the host's own CLI or ADC (`gcloud`, a database
+client) is ordinary local developer work under this task's authority and is
+not routed through that proxy.
+
+Every inherited server's tool state is `registered` and nothing more. The
+profile reuses each registration's own configuration and its own native auth
+references (an env reference or a server-managed session) exactly as the
+registration states them; it copies, exports, and logs no credential, and a
+registration is presence evidence only — authentication and granted scope stay
+unproven until a permitted tool call succeeds. A credential the host keeps
+outside the registration itself (notably a native MCP OAuth token cache) is not
+carried into the lane's config directory, so such a server may load and still
+fail to authenticate; report that state as unproven rather than as a grant.
+Report presence, authentication, and scope as three separate facts, and never
+widen a grant by way of the profile.
+"""
 
 
 def _run_config_mcp_instruction(server_names: "Sequence[str]") -> str:
@@ -862,13 +924,81 @@ def _capability_set(capabilities: Capabilities) -> frozenset[str]:
     return granted
 
 
+#: Grammar for a name INHERITED from the host's own registrations, before it is
+#: rendered into an allowlist rule — deliberately NOT the per-run registration
+#: grammar (``mcp_run_config.SERVER_NAME``), which gates what a coordinator may
+#: REGISTER and is untouched here. An inherited name is whatever the host's own
+#: config already holds, which is not this adapter's to rename, and Claude Code's
+#: documented server-name alphabet is letters, digits, hyphens and underscores.
+#: So: non-empty ASCII ``[A-Za-z0-9_-]``. Uppercase, a single underscore and a
+#: leading digit pass; a wildcard, whitespace, control character or other
+#: punctuation is outside the alphabet and fails. The ``__`` separator — which
+#: would let a rendered ``mcp__<name>`` span into another server's tool IDs — is
+#: rejected separately by the caller, because ``[A-Za-z0-9_-]`` cannot exclude it.
+INHERITED_SERVER_NAME = re.compile(r"[A-Za-z0-9_-]+")
+
+
 def allowed_tools(mode: str, capabilities: Capabilities = (),
-                  web_domains: Sequence[str] = ()) -> tuple[str, ...]:
+                  web_domains: Sequence[str] = (),
+                  execute_profile: str = STANDARD_PROFILE,
+                  inherited_mcp_servers: Sequence[str] = ()) -> tuple[str, ...]:
     """Deterministic ``--allowedTools`` rules rendered from canonical governance.
 
     Capability names are validated first and unknown names raise in every
     mode; review mode then returns an empty tuple. The rule text comes from the
     ``Execute tool allowlist`` section of ``config/lane-governance.md``.
+
+    ``execute_profile`` selects which surface that section renders. The default
+    ``standard`` profile is the public, conservative one: ``always`` plus the
+    rules of the capabilities actually granted. ``local-developer`` adds the
+    section's own ``local-developer (granted)`` rule — the host's native shell
+    class — instead of relying on the per-command enumeration to have listed
+    every family a local developer needs. Capability rules are rendered in both
+    profiles, because an exact per-tool MCP ID is not a shell prefix and a
+    profile never substitutes for a grant.
+
+    ``inherited_mcp_servers`` is the host's own registration inventory, taken
+    from the configuration the child environment resolves, and it is honored on
+    the ``local-developer`` profile only. On that profile the lane stops
+    suppressing the host's registrations, so the servers the worker host
+    already has signed in must actually be *usable*: a registration that loads
+    but whose tools are never allowed is a server the worker still cannot call.
+    Each inherited name therefore renders one server-wide ``mcp__<server>``
+    rule — including a name a capability also maps to, because those names are
+    the host's own graph, browser, messaging and remote registrations and the
+    capability's exact per-tool rules render beside them. The single exception
+    is the ``cm-services`` proxy (``CM_SERVICES_SERVERS``): it is a
+    capability-gated bridge rather than a host-native tool, so it stays
+    reachable only through its own grant and a registration of that name
+    reaches none of its tools. No capability is unlocked and no credential is
+    read: this is an allowlist entry for a registration the host already holds,
+    not an authentication, and it says nothing about the server's granted
+    scope.
+
+    Rendering that rule is not an approval either, and it deliberately does not
+    add the name to ``enabledMcpjsonServers``: that per-launch approval list is
+    built from the granted capabilities alone (``_approved_mcp_servers``), so
+    the only project ``.mcp.json`` server a lane pre-approves is one a
+    capability maps to. A worktree registration the profile did not grant is
+    left to whatever the host's own project trust does with it — a rule for a
+    server the host never connects allows nothing — whereas approving every
+    inventoried name would turn presence evidence into a grant, which is the
+    one reading ``Registration is presence evidence only`` forbids. Whether a
+    given host connects, authenticates, or rejects such a server is a host
+    behaviour this adapter does not observe and never reports as proven.
+
+    Every inherited name is validated before it is interpolated into a rule, and
+    a name outside the grammar refuses the lane. That grammar is the inherited
+    one (``INHERITED_SERVER_NAME``), NOT the per-run registration grammar
+    (``mcp_run_config.SERVER_NAME``, which gates what a coordinator may REGISTER
+    and is untouched): an inherited name is whatever the host's own config
+    already holds, and Claude Code's documented server-name alphabet allows
+    uppercase, a single underscore and a leading digit, which the per-run form
+    would refuse on a host name that is not this adapter's to rename. It still
+    requires one literal ASCII name — no wildcard, whitespace, control character
+    or other punctuation — and rejects the ``__`` separator, so no rendered
+    ``mcp__<name>`` can span into another server's tool IDs; the ``cm-services``
+    proxy wildcard included.
 
     ``web_domains`` is the one coordinator-supplied grant that is not a static
     allowlist rule: a documentation origin is named per run, so it renders as
@@ -882,8 +1012,40 @@ def allowed_tools(mode: str, capabilities: Capabilities = (),
     granted = _capability_set(capabilities)
     if mode != "execute":
         return ()
+    profile = _execute_profile(execute_profile)
     policy = tool_policy()
     tools: list[str] = list(policy.always)
+    if profile == LOCAL_DEVELOPER_PROFILE:
+        for rule in policy.local_developer:
+            if rule not in tools:
+                tools.append(rule)
+        for name in inherited_mcp_servers:
+            # The name is interpolated into a tool rule, so it must be one
+            # literal ASCII server name before it is. Without the ``__``
+            # rejection, an inherited name such as ``cm-services__*`` would
+            # render ``mcp__cm-services__*`` — the proxy wildcard this profile
+            # exists to keep gated — and a name like
+            # ``cm-services__asana_get_task`` would render that exact proxy tool
+            # ID; the character class already refuses a wildcard, whitespace,
+            # control character or other punctuation. An unusable name refuses
+            # the lane; it is never silently dropped, widened, or guessed at.
+            if (not isinstance(name, str)
+                    or not INHERITED_SERVER_NAME.fullmatch(name)
+                    or "__" in name):
+                raise ClaudeAdapterError(
+                    "inherited MCP server name must be one literal ASCII name "
+                    "(letters, digits, hyphen or underscore, no double "
+                    f"underscore): {name!r}"
+                )
+            if name in CM_SERVICES_SERVERS:
+                # The capability-gated proxy, not a host-native tool: reached
+                # through the capability that grants it, never through the
+                # host's registration inventory. Registry presence is not a
+                # grant.
+                continue
+            rule = f"mcp__{name}"
+            if rule not in tools:
+                tools.append(rule)
     for name, rules in policy.allowed.items():
         if name in granted:
             for rule in rules:
@@ -895,25 +1057,112 @@ def allowed_tools(mode: str, capabilities: Capabilities = (),
     return tuple(tools)
 
 
+#: The proxy server whose tool IDs are capability-gated on every profile. A
+#: local developer profile loads the worker host's own MCP registrations, so the
+#: fixed `cm-services` bridge is the one registration that would otherwise
+#: become reachable by presence alone; its tools stay reachable only through the
+#: capability that grants them, on any profile.
+CM_SERVICES_TOOL_PREFIX = "mcp__cm-services__"
+
+#: The server names the ``cm-services`` capability family maps to — the one
+#: capability-gated proxy. Derived from the canonical mapping (one family, one
+#: bridge), so a newly declared family capability is covered without a second
+#: list. A local developer lane inherits the host's own registrations as usable
+#: servers, but never this one: the proxy is reached through the capability that
+#: grants it, and a registration of that name reaches none of its tools. Every
+#: other name a capability maps to is the host's own registration or a per-run
+#: delivery, and is usable through the profile.
+CM_SERVICES_SERVERS = frozenset(
+    CAPABILITY_MCP_SERVERS[name] for name in CM_SERVICES_CAPABILITIES
+)
+
+
+def ungranted_cm_services_rules(capabilities: Capabilities = (),
+                                *, policy: ToolPolicy | None = None) -> tuple[str, ...]:
+    """The `cm-services` tool IDs no granted capability on this lane unlocks.
+
+    Derived from the capability subsections themselves — every rule in that
+    family is declared once, beside the capability that grants it — so a newly
+    declared `cm-services` tool is denied by default rather than silently
+    inherited. Registry presence is not a grant: a lane whose worker host merely
+    has the server registered still reaches none of these tools.
+    """
+
+    granted = _capability_set(capabilities)
+    active = tool_policy() if policy is None else policy
+    rules: list[str] = []
+    for name, capability_rules in active.allowed.items():
+        if name in granted:
+            continue
+        for rule in capability_rules:
+            if rule.startswith(CM_SERVICES_TOOL_PREFIX) and rule not in rules:
+                rules.append(rule)
+    return tuple(rules)
+
+
 def disallowed_tools(mode: str, capabilities: Capabilities = (), *,
-                     report_deliverable: bool = False) -> tuple[str, ...]:
+                     report_deliverable: bool = False,
+                     no_external_publication: bool = False,
+                     existing_workspace: bool = False,
+                     execute_profile: str = STANDARD_PROFILE) -> tuple[str, ...]:
     """Deny rules that must accompany an allow rule (deny wins in Claude Code).
 
-    ``report_deliverable`` adds the canonical report-lane git-write denials. It
-    is a property of the lane, not a capability, so it is applied independently
-    of any grant the lane carries and applies even to a lane granted nothing.
+    ``report_deliverable`` adds the canonical report-lane git-write denials,
+    ``no_external_publication`` adds the canonical publication denials, and
+    ``existing_workspace`` adds the canonical direct git-write denials for a
+    lane pointed at an owner's own checkout. All three are properties of the
+    lane, not capabilities, so each is applied independently of any grant the
+    lane carries and applies even to a lane granted nothing.
+
+    ``existing_workspace`` is the one that has to hold on the *widest* surface:
+    such a lane runs the local developer profile, whose allow rule is the bare
+    shell class, so the deny list is the only thing standing between the
+    worker and the owner's repository. A lane that lacks the flag is untouched
+    by it, so an ordinary worktree lane keeps the commit and push grant.
+
+    The ``local-developer`` profile adds one more denial and no more: the
+    `cm-services` proxy tools no granted capability unlocks. That grant is the
+    cloud half's own bridge and stays capability-gated on every profile, so
+    inheriting the worker host's registry can never turn a registration into
+    proxy access.
+
+    A deny rule is emitted as-is: it is matched against the command as spelled,
+    so it is an approval boundary, never a shell containment claim. That is
+    stated where the rules are declared too (``## Existing owner workspace``,
+    and the ``Execute tool allowlist`` preamble in
+    ``config/lane-governance.md``); this function does not claim more than the
+    seam delivers, and a ``git -C <path> <verb>`` spelling, a reordered or
+    bundled option, a compound invocation, or an allowed interpreter is not
+    fully covered by a command-string rule.
     """
 
     granted = _capability_set(capabilities)
     if mode != "execute":
         return ()
+    profile = _execute_profile(execute_profile)
     policy = tool_policy()
     tools: list[str] = []
     for name, rules in policy.denied.items():
         if name in granted:
             tools.extend(rule for rule in rules if rule not in tools)
-    if report_deliverable:
-        tools.extend(rule for rule in policy.report_denied if rule not in tools)
+    if profile == LOCAL_DEVELOPER_PROFILE:
+        tools.extend(
+            rule for rule in ungranted_cm_services_rules(granted, policy=policy)
+            if rule not in tools
+        )
+    for enabled, rules in (
+        (report_deliverable, policy.report_denied),
+        (no_external_publication, policy.no_publication_denied),
+        # The owner-workspace denials are the third lane property rendered on
+        # this seam, from the third reserved bucket of the same canonical
+        # document — not a list this adapter keeps. On this host they are the
+        # whole control: the local developer profile's allow rule is the bare
+        # `Bash` class, so without them a `git commit` in the owner's checkout
+        # matches no denial at all.
+        (existing_workspace, policy.existing_workspace_denied),
+    ):
+        if enabled:
+            tools.extend(rule for rule in rules if rule not in tools)
     return tuple(tools)
 
 
@@ -1005,16 +1254,54 @@ def _disable_routed_coordinator_plugin(settings: Mapping[str, Any]) -> dict[str,
     return merged
 
 
+def _runtime_root(
+    repo_path: Path,
+    worktree_path: Path,
+    existing_workspace: bool,
+    *,
+    mcp: bool = False,
+) -> Path:
+    """The directory this run's ephemeral host files are written under.
+
+    One rule, two placements, and the placement a created lane had is kept
+    exactly as it was: a lane this run owns writes beside its own worktree —
+    the routed config directory directly beside it, the per-run MCP bundle
+    under a ``.side-lane-runtime/`` that ``write_ephemeral`` creates on demand.
+    An owner workspace is the operator's checkout, so ``worktree_path.parent``
+    is a directory of *theirs*: a runtime directory this run created there
+    would be a change to the operator's machine that the run's own workspace
+    baseline — which reads one tree — would never report. That case uses the
+    repository's own ``.git`` instead, the same seam (and the same reasoning)
+    the Devin adapter uses for its per-run file.
+    """
+
+    if existing_workspace:
+        runtime = repository_runtime_dir(repo_path)
+        return runtime / "mcp" if mcp else runtime
+    if mcp:
+        return worktree_path.parent / ".side-lane-runtime" / "mcp"
+    return worktree_path.parent
+
+
 def _prepare_routed_claude_home(
-    source_home: Path, repo_path: Path, worktree_path: Path
+    source_home: Path,
+    repo_path: Path,
+    worktree_path: Path,
+    existing_workspace: bool = False,
 ) -> Path:
     """Create a disposable Claude config dir with exact project trust.
 
     Routed execute runs keep the original HOME so host tools retain their
     credentials and global skills; ``CLAUDE_CONFIG_DIR`` isolates Claude's
-    trust, MCP registrations, and settings.
+    trust, MCP registrations, and settings. The directory is transient — it is
+    removed on every exit from the run — but it is still created under
+    :func:`_runtime_root` so an owner workspace never gains one beside it, and
+    a killed process cannot strand one in the operator's parent directory.
     """
-    runtime_home = Path(tempfile.mkdtemp(prefix=".side-lane-claude-config-", dir=worktree_path.parent))
+    runtime_home = Path(tempfile.mkdtemp(
+        prefix=".side-lane-claude-config-",
+        dir=_runtime_root(repo_path, worktree_path, existing_workspace),
+    ))
     try:
         source_config = source_home / ".claude.json"
         config: dict[str, Any] = {}
@@ -1361,6 +1648,33 @@ def reject_report_write_capabilities(
         )
 
 
+def reject_publication_capabilities(
+    capabilities: Sequence[str], no_external_publication: bool
+) -> None:
+    """Refuse the capabilities a publication-refusing lane must not hold.
+
+    The guard denies the publication command family, so a capability whose whole
+    grant is that family is refused rather than carried as a dead grant. The CLI
+    refuses it before it builds a lane, but both public entry points here may be
+    called directly with `capabilities`, and the task's no-publication authority
+    must not be undone by that route. Every other grant is untouched.
+    """
+
+    if not no_external_publication:
+        return
+    conflicts = publication_refusal_capability_conflicts(capabilities)
+    if conflicts:
+        raise ClaudeAdapterError(
+            "a lane whose task authority refuses external publication is never "
+            "granted "
+            + ", ".join(conflicts)
+            + ": the whole grant is the publication this lane must not make, so "
+            "the allow rule could only be denied by the same run. Drop the "
+            "capability, or run an ordinary execute lane for a task that "
+            "authorizes publication."
+        )
+
+
 def effective_report_deliverable(report_deliverable: bool, report_only: bool) -> bool:
     """One lane property, two spellings: either flag selects the contract.
 
@@ -1517,14 +1831,73 @@ def build_command(
     report_only: bool = False,
     report_deliverable: bool = False,
     report_baseline: report_stop_hook.ReportBaseline | None = None,
+    no_external_publication: bool = False,
     strict_mcp_config_path: str | Path | None = None,
     strict_mcp_support: bool | None = None,
+    execute_profile: str = STANDARD_PROFILE,
+    inherited_mcp_servers: Sequence[str] = (),
+    existing_workspace: bool = False,
 ) -> list[str]:
     executable = _nonempty(executable, "Claude executable")
     repo_path = validate_worktree(repo)
     worktree_path = validate_worktree(worktree)
-    if repo_path == worktree_path:
+    if existing_workspace:
+        # The owner's own workspace, named by the operator through
+        # --existing-workspace: the worker's working directory is a checkout
+        # that predates this run and may hold other people's uncommitted work.
+        # It is accepted rather than refused, but *isolation is not claimed for
+        # it* — the workspace is not a dedicated lane, nothing here disposes of
+        # it, and a worker's writes to it are not contained by it. The rest of
+        # the lane's controls (model selection, credential handling, the tool
+        # profile, the prompt contract) are unchanged.
+        if mode != "execute":
+            raise ClaudeAdapterError(
+                "an existing owner workspace is supported only in execute mode: "
+                "a review lane's argv is the strict read-only form, and this "
+                "workspace is not a dedicated lane it could be given"
+            )
+        if report_deliverable:
+            # The report contract's verdict rejects commits and unexpected
+            # paths inside the lane. In a workspace already holding others'
+            # uncommitted work that verdict is unreachable, so the two are
+            # refused together here as well as at the CLI.
+            raise ClaudeAdapterError(
+                "an existing owner workspace cannot carry the report contract: "
+                "a workspace holding others' uncommitted work cannot satisfy a "
+                "verdict that rejects commits and unexpected paths"
+            )
+    elif repo_path == worktree_path:
         raise ClaudeAdapterError(f"{mode} lane requires a dedicated worktree")
+    profile = _execute_profile(execute_profile)
+    if profile == LOCAL_DEVELOPER_PROFILE and mode != "execute":
+        # The local developer profile widens an execute lane's tool surface and
+        # its connector source.  A review lane's argv is the strict read-only
+        # form (plan mode, `--tools Read,Glob,Grep`, strict no-MCP) and has no
+        # shell or MCP tool at all, so a profile selection there is authority
+        # the worker cannot be given.  Fail closed rather than launch a lane
+        # whose recorded profile the worker never ran under.
+        raise ClaudeAdapterError(
+            "the local developer execute profile is execute mode only for the "
+            "Claude host"
+        )
+    if profile == LOCAL_DEVELOPER_PROFILE and strict_mcp_config_path is not None:
+        # The two are contradictory: the profile loads the worker host's own
+        # registered servers, and a strict bundle exists to hide them.  A
+        # caller that built both asked for two different lanes.
+        raise ClaudeAdapterError(
+            "the local developer execute profile cannot carry a strict MCP bundle"
+        )
+    if inherited_mcp_servers and not (
+        profile == LOCAL_DEVELOPER_PROFILE and mode == "execute"
+    ):
+        # The inventory is the local developer profile's own input: it exists to
+        # make the host's registrations usable where the profile stops
+        # suppressing them. On any other lane there is nothing for it to do, so
+        # a caller that passed it asked for a lane this argv cannot describe.
+        raise ClaudeAdapterError(
+            "inherited MCP servers are the local developer execute profile's "
+            "own input and cannot be passed to any other lane"
+        )
     if report_only and mode != "execute":
         # The hook rides the execute lane's own argv and settings; a review
         # lane's argv is the strict read-only form and must stay byte-identical.
@@ -1537,7 +1910,29 @@ def build_command(
         # The report contract narrows the execute grant; a review lane never
         # received that grant, and its argv is the strict read-only form.
         raise ClaudeAdapterError("report deliverable is execute mode only for the Claude host")
+    if report_deliverable and profile == LOCAL_DEVELOPER_PROFILE:
+        # The two are contradictory, like the strict bundle above: the profile
+        # widens the lane to the host's own shell class and registered MCP
+        # servers, and the report contract exists to make the lane the
+        # narrowed form whose deliverable is the report artifact. A caller
+        # that built both asked for two different lanes, and silently
+        # rendering either one would bypass the other's explicit restriction.
+        # The CLI resolves this pair away before the adapter is reached; this
+        # guard is the fail-closed mirror for a direct call.
+        raise ClaudeAdapterError(
+            "the local developer execute profile cannot carry a report "
+            "deliverable: the report contract makes the lane the narrowed "
+            "form, so the pair is refused rather than reconciled"
+        )
+    if no_external_publication and mode != "execute":
+        # The refusal narrows the execute grant; a review lane never received
+        # that grant and its argv is the strict read-only form.
+        raise ClaudeAdapterError(
+            "the publication refusal contract is execute mode only for the "
+            "Claude host"
+        )
     reject_report_write_capabilities(capabilities, report_deliverable)
+    reject_publication_capabilities(capabilities, no_external_publication)
     armed_baseline: report_stop_hook.ReportBaseline | None = None
     if report_only:
         # Fail before the model, not after: the opt-in only makes sense if the
@@ -1640,13 +2035,21 @@ def build_command(
             # user/project/server registration (and its auth) keeps loading
             # alongside this file.
             command.extend(("--mcp-config", str(mcp_config_path)))
-        for tool in allowed_tools(mode, capabilities, web_domains):
+        for tool in allowed_tools(
+            mode, capabilities, web_domains, profile, inherited_mcp_servers
+        ):
             command.extend(("--allowedTools", tool))
         for tool in disallowed_tools(mode, capabilities,
-                                     report_deliverable=report_deliverable):
+                                     report_deliverable=report_deliverable,
+                                     no_external_publication=no_external_publication,
+                                     existing_workspace=existing_workspace,
+                                     execute_profile=profile):
             command.extend(("--disallowedTools", tool))
-    system_prompt = lane_system_prompt(mode, repo_path,
-                                       report_deliverable=report_deliverable)
+    system_prompt = lane_system_prompt(
+        mode, repo_path,
+        report_deliverable=report_deliverable,
+        existing_workspace=existing_workspace,
+        no_external_publication=no_external_publication)
     if mode == "execute" and "playwright" in _capability_set(capabilities):
         system_prompt += PLAYWRIGHT_STARTUP_INSTRUCTION
     if mode == "execute" and "slack-read" in _capability_set(capabilities):
@@ -1668,6 +2071,8 @@ def build_command(
     # Every Claude worker carries the host-memory rule, review or execute: it
     # is a note, so no tool list, grant, or argv flag changes with it.
     note = f"{note}\n\n{HOST_MEMORY_READONLY_NOTE}" if note else HOST_MEMORY_READONLY_NOTE
+    if profile == LOCAL_DEVELOPER_PROFILE:
+        note = f"{note}\n\n{LOCAL_DEVELOPER_NOTE}"
     if note:
         system_prompt += f"\n\n{note}"
     if mode == "execute":
@@ -1871,19 +2276,46 @@ def launch(
     report_only: bool = False,
     report_deliverable: bool = False,
     report_baseline: report_stop_hook.ReportBaseline | None = None,
+    execute_profile: str = STANDARD_PROFILE,
+    existing_workspace: bool = False,
+    no_external_publication: bool = False,
 ) -> LaneResult:
+    if no_external_publication and mode != "execute":
+        raise ClaudeAdapterError(
+            "the publication refusal contract is execute mode only for the "
+            "Claude host"
+        )
     if web_domains and mode != "execute":
         # Adapter-level fail-closed mirror of the build_command guard: `launch`
         # may be called without going through that guard's inputs.
         raise ClaudeAdapterError("web domains are execute-only for the Claude host")
+    profile = _execute_profile(execute_profile)
+    if profile == LOCAL_DEVELOPER_PROFILE and mode != "execute":
+        # Mirror of the build_command guard, before the disposable config dir,
+        # the ephemeral per-run config, and any host process exist.
+        raise ClaudeAdapterError(
+            "the local developer execute profile is execute mode only for the "
+            "Claude host"
+        )
     # Normalize at this boundary too, so the flag handed to the worker path (and
     # from there to the audited LaneResult) is the effective one, not the raw
     # default a caller that set only `report_only` left unset.
     report_deliverable = effective_report_deliverable(report_deliverable, report_only)
+    if report_deliverable and profile == LOCAL_DEVELOPER_PROFILE:
+        # Mirror of the build_command guard, before the disposable config dir,
+        # the ephemeral per-run config, and any host process exist: the widened
+        # profile and the report contract that narrows the lane are
+        # contradictory, and a direct call cannot reconcile them either.
+        raise ClaudeAdapterError(
+            "the local developer execute profile cannot carry a report "
+            "deliverable: the report contract makes the lane the narrowed "
+            "form, so the pair is refused rather than reconciled"
+        )
     # Refused here, before the ephemeral run-config and strict-bundle files are
     # written and before any worker starts: no capability the CLI would refuse
     # is honored on a direct call either.
     reject_report_write_capabilities(capabilities, report_deliverable)
+    reject_publication_capabilities(capabilities, no_external_publication)
     if provider != NATIVE_PROVIDER and provider != "glm":
         qualification = model_config.get("qualification")
         if not isinstance(qualification, Mapping) or qualification.get("verified") is not True:
@@ -1892,6 +2324,19 @@ def launch(
         _nonempty(qualification.get("source"), "qualification.source")
     repo_path = validate_worktree(repo)
     worktree_path = validate_worktree(worktree)
+    if existing_workspace:
+        # Mirrors of the build_command refusals, raised here too because
+        # `launch` can be reached without going through the CLI's validation —
+        # both are checked before the ephemeral config, the readiness probe, or
+        # any host process exists.
+        if mode != "execute":
+            raise ClaudeAdapterError(
+                "an existing owner workspace is supported only in execute mode"
+            )
+        if report_deliverable:
+            raise ClaudeAdapterError(
+                "an existing owner workspace cannot carry the report contract"
+            )
     granted = tuple(sorted(_capability_set(capabilities)))
     # Per-run MCP registration (execute only, validated upstream by
     # side_lane.mcp_run_config): materialized OUTSIDE the lane worktree so it
@@ -1901,33 +2346,43 @@ def launch(
         if mode != "execute":
             raise ClaudeAdapterError("per-run MCP config is execute-only for the Claude host")
         # A same-name user/project registration would make the merge outcome
-        # (which server, whose auth) undefined from config alone; fail before
-        # the ephemeral file is written or any process starts. The credential
-        # env-reference check runs later, inside ``_launch_worker``, against
-        # the scrubbed child environment the worker actually gets.
-        ensure_no_registration_conflicts(
-            run_mcp_servers, "claude", worktree_path, env=os.environ if env is None else env
-        )
+        # (which server, whose auth) undefined from config alone, so the run
+        # fails before any process starts.  The check itself runs inside
+        # ``_launch_worker``, beside the credential env-reference check and
+        # against the same scrubbed child environment the worker gets: the
+        # registration files a name conflict can be in are resolved from
+        # ``HOME``/``CLAUDE_CONFIG_DIR``, and the child resolves them from the
+        # environment this adapter builds — a controlled ``HOME`` and, on a
+        # routed execute lane, the disposable ``CLAUDE_CONFIG_DIR`` it sets
+        # there.  Reading them from the caller's own environment instead would
+        # inventory a registry the child never opens and miss a real conflict.
     # Routed execute lanes use --strict-mcp-config with a narrow bundle that
     # contains ONLY per-run servers, user-scope registrations (cm-services),
     # and lane worktree .mcp.json servers. No other host-registered servers
-    # appear in the bundle, and none are loaded.
+    # appear in the bundle, and none are loaded. The local developer profile is
+    # the one selection that deliberately does not take that bundle: it loads
+    # the worker host's own registrations, which is what a strict bundle exists
+    # to suppress. Either way the disposable config dir and its trust isolation
+    # are unchanged, and a per-run registration stays additive.
     is_routed_execute = (
         provider != NATIVE_PROVIDER
         and mode == "execute"
     )
+    strict_bundle_requested = is_routed_execute and profile != LOCAL_DEVELOPER_PROFILE
     # Artifact paths: initialised to None; assigned inside the try block;
     # cleaned up in the finally block. All paths are None if no artifact needed.
     run_config_path: Path | None = None
     strict_mcp_config_path: Path | None = None
     try:
         if run_mcp_servers:
-            runtime_dir = worktree_path.parent / ".side-lane-runtime" / "mcp"
+            runtime_dir = _runtime_root(
+                repo_path, worktree_path, existing_workspace, mcp=True
+            )
             run_config_path = write_ephemeral(
                 runtime_dir, f"{worktree_path.name}-mcp.json",
                 claude_payload(run_mcp_servers),
             )
-        if is_routed_execute:
+        if strict_bundle_requested:
             controlled_home = Path(os.environ.get("HOME", str(Path.home()))).expanduser()
             strict_bundle = build_strict_mcp_bundle(
                 host="claude",
@@ -1937,7 +2392,9 @@ def launch(
                 run_servers=run_mcp_servers,
                 granted_capabilities=capabilities,
             )
-            runtime_dir = worktree_path.parent / ".side-lane-runtime" / "mcp"
+            runtime_dir = _runtime_root(
+                repo_path, worktree_path, existing_workspace, mcp=True
+            )
             strict_mcp_config_path = write_strict_mcp_bundle(
                 runtime_dir, worktree_path.name, strict_bundle,
             )
@@ -1963,7 +2420,10 @@ def launch(
             report_only=report_only,
             report_deliverable=report_deliverable,
             report_baseline=report_baseline,
+            no_external_publication=no_external_publication,
             strict_mcp_config_path=strict_mcp_config_path,
+            execute_profile=profile,
+            existing_workspace=existing_workspace,
         )
     finally:
         if run_config_path is not None:
@@ -2001,12 +2461,16 @@ def _launch_worker(
     report_only: bool = False,
     report_deliverable: bool = False,
     report_baseline: report_stop_hook.ReportBaseline | None = None,
+    no_external_publication: bool = False,
     strict_mcp_config_path: Path | None = None,
+    execute_profile: str = STANDARD_PROFILE,
+    existing_workspace: bool = False,
 ) -> LaneResult:
     # The audit below records `disallowed_tools` from this one value, so it is
     # normalized before either the argv or the receipt is built: the recorded
     # audit can never disagree with the denials the worker actually ran under.
     report_deliverable = effective_report_deliverable(report_deliverable, report_only)
+    profile = _execute_profile(execute_profile)
     runtime_model, gateway, auth_method, billable = _route_metadata(
         provider, model, provider_config, model_config, mode
     )
@@ -2023,13 +2487,25 @@ def _launch_worker(
     try:
         if provider in ROUTED_PROVIDERS and mode == "execute":
             source_home = Path(child_env.get("HOME", str(Path.home()))).expanduser()
-            routed_config_dir = _prepare_routed_claude_home(source_home, repo_path, worktree_path)
+            routed_config_dir = _prepare_routed_claude_home(
+                source_home, repo_path, worktree_path, existing_workspace
+            )
             child_env["CLAUDE_CONFIG_DIR"] = str(routed_config_dir)
             child_env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = ROUTED_MAX_OUTPUT_TOKENS
         if run_mcp_servers:
             # Validate the credential env NAME the config references against the
             # scrubbed environment the worker child actually gets.
             require_env_references(run_mcp_servers, child_env)
+            # A same-name user/project registration would make the merge
+            # outcome (which server, whose auth) undefined from config alone.
+            # Resolved in the SAME environment, so both a controlled ``HOME``
+            # and the routed lane's disposable ``CLAUDE_CONFIG_DIR`` set just
+            # above are honored: the check reads the registry the worker will
+            # actually load and nothing else, exactly as the Codex and Devin
+            # adapters do beside their own env-reference checks.
+            ensure_no_registration_conflicts(
+                run_mcp_servers, "claude", worktree_path, env=child_env
+            )
         timeout = model_config.get("timeout_seconds", 1800)
         if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
             raise ClaudeAdapterError("timeout_seconds must be a positive integer")
@@ -2042,6 +2518,20 @@ def _launch_worker(
             )
         else:
             strict_mcp_supported = False
+        # The local developer profile stops suppressing the host's own MCP
+        # registrations, so this lane must know which names those are: the
+        # inventory is read from the registration files the child environment
+        # actually resolves — the same env the worker gets, so both a controlled
+        # HOME and the routed lane's disposable CLAUDE_CONFIG_DIR (set just
+        # above) are honored — names only, and it renders server-wide allow
+        # rules for every name except the capability-gated proxy. Anything but
+        # this profile renders no rule from it, and the helper is not called at
+        # all.
+        inherited_mcp_servers = (
+            host_registered_server_names("claude", worktree_path, env=child_env)
+            if profile == LOCAL_DEVELOPER_PROFILE and mode == "execute"
+            else ()
+        )
         command = build_command(
             executable=executable,
             repo=repo_path,
@@ -2060,8 +2550,12 @@ def _launch_worker(
             report_only=report_only,
             report_deliverable=report_deliverable,
             report_baseline=report_baseline,
+            no_external_publication=no_external_publication,
             strict_mcp_config_path=strict_mcp_config_path,
             strict_mcp_support=strict_mcp_supported,
+            execute_profile=profile,
+            inherited_mcp_servers=inherited_mcp_servers,
+            existing_workspace=existing_workspace,
         )
         _require_mcp_readiness(
             executable=executable, cwd=worktree_path, capabilities=granted,
@@ -2146,9 +2640,13 @@ def _launch_worker(
         stderr=stderr,
         availability=availability,
         capabilities=granted,
-        allowed_tools=allowed_tools(mode, granted, web_domains),
+        allowed_tools=allowed_tools(
+            mode, granted, web_domains, profile, inherited_mcp_servers),
         disallowed_tools=disallowed_tools(mode, granted,
-                                          report_deliverable=report_deliverable),
+                                          report_deliverable=report_deliverable,
+                                          no_external_publication=no_external_publication,
+                                          existing_workspace=existing_workspace,
+                                          execute_profile=profile),
         requested_model=model,
         # The transport requests this selector; it cannot attest to the
         # provider's response weight/version without a verified response field.

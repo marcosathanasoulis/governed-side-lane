@@ -292,13 +292,13 @@ class RoutingTests(unittest.TestCase):
     def test_route_specific_cohorts_validate_each_cohort(self) -> None:
         common = {"session_cost_basis": "route-specific-cohorts"}
         with self.assertRaisesRegex(routing.RoutingError, "requires route_session_cohorts"):
-            routing._profile(self.profile(**common))
+            routing.validate_task_profile(self.profile(**common))
         with self.assertRaisesRegex(routing.RoutingError, "terra.session_attempts"):
-            routing._profile(self.profile(**common, route_session_cohorts={
+            routing.validate_task_profile(self.profile(**common, route_session_cohorts={
                 "terra": {"session_attempts": [], "accepted_completions": 1},
             }))
         with self.assertRaisesRegex(routing.RoutingError, "per-route accepted"):
-            routing._profile(self.profile(**common, accepted_completions=1,
+            routing.validate_task_profile(self.profile(**common, accepted_completions=1,
                 route_session_cohorts={"terra": {
                     "session_attempts": [{"uncached_input_tokens": 1}],
                     "accepted_completions": 1,

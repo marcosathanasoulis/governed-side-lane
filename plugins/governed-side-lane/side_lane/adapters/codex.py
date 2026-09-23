@@ -38,7 +38,11 @@ from typing import Any, Callable, Mapping, Sequence
 
 from side_lane.adapters.claude import _bounded_process
 from side_lane.credentials import scrub_backend_environment
-from side_lane.governance import lane_system_prompt, report_write_capability_conflicts
+from side_lane.governance import (
+    lane_system_prompt,
+    publication_refusal_capability_conflicts,
+    report_write_capability_conflicts,
+)
 from side_lane.hosts import with_support_dir
 from side_lane.mcp_run_config import (
     McpRunServer,
@@ -279,6 +283,8 @@ def build_codex_command(
     web_domains: "Sequence[str]" = (),
     run_mcp_servers: "Mapping[str, McpRunServer] | None" = None,
     report_deliverable: bool = False,
+    existing_workspace: bool = False,
+    no_external_publication: bool = False,
 ) -> tuple[str, ...]:
     if not isinstance(executable, str) or not executable:
         raise CodexAdapterError("Codex executable is required")
@@ -288,6 +294,11 @@ def build_codex_command(
         # The report contract narrows the execute grant; a review lane is
         # read-only by sandbox mode and never received it.
         raise CodexAdapterError("report deliverable is execute mode only for the Codex host")
+    if no_external_publication and mode != "execute":
+        raise CodexAdapterError(
+            "the publication refusal contract is execute mode only for the "
+            "Codex host"
+        )
     if web_domains:
         # Refused, not silently accepted. The Codex host's execute sandbox is
         # `danger-full-access`, so this lane already reaches every destination
@@ -316,8 +327,36 @@ def build_codex_command(
         raise CodexAdapterError("per-run MCP config is execute-only for the Codex host")
     repo_path = _validate_worktree(repo)
     worktree_path = _validate_worktree(worktree)
-    if repo_path == worktree_path:
+    if repo_path == worktree_path and not existing_workspace:
         raise CodexAdapterError(f"{mode} lane requires a dedicated worktree")
+    if existing_workspace:
+        # The operator's own checkout, named explicitly through
+        # --existing-workspace: the worker's working directory is a tree that
+        # predates this run and may hold other people's uncommitted work. It is
+        # accepted rather than refused, and *isolation is not claimed for it* —
+        # nothing here disposes of it, and a Codex execute lane's
+        # `danger-full-access` sandbox mode is unchanged, so a worker's writes
+        # are bounded by the task contract and the after-the-fact delivery
+        # check, never by this argv. Its governance text carries the
+        # existing-owner-workspace section, which drops the commit/push grant
+        # the lane has no assigned branch for and forbids the direct git writes
+        # it names. On this host that is the whole control: Codex exposes no
+        # deny seam, so the canonical `existing-workspace (denied)` rules are
+        # not rendered anywhere — dropping a grant is not a denial, and this
+        # adapter does not claim one it cannot express.
+        if mode != "execute":
+            raise CodexAdapterError(
+                "an existing owner workspace is supported only in execute mode: "
+                "a review lane is read-only by sandbox mode and this workspace "
+                "is not a dedicated lane it could be given"
+            )
+        if report_deliverable:
+            # The report contract's verdict rejects commits and unexpected
+            # paths inside the lane; a workspace already holding others'
+            # uncommitted work cannot satisfy it.
+            raise CodexAdapterError(
+                "an existing owner workspace cannot carry the report contract"
+            )
     runtime_model = _validate_selection(
         provider, model, provider_config, model_config, mode
     )
@@ -335,13 +374,28 @@ def build_codex_command(
         # additive, never a replacement. No file is written and nothing
         # enters the argv except the URL and the env NAME.
         note = (note or "") + startup_note(run_mcp_servers)
-    task = (lane_system_prompt(mode, repo_path, report_deliverable=report_deliverable)
+    task = (lane_system_prompt(mode, repo_path,
+                               report_deliverable=report_deliverable,
+                               existing_workspace=existing_workspace,
+                               no_external_publication=no_external_publication)
             + (f"\n\n{note}" if note else "")
             + "\n\n# Approved task\n\n" + prompt)
     # No deny seam exists on this host: the argv below is `danger-full-access`
     # with no per-command permission rule, so the report instruction above is
     # delivered as instruction, never as prevention. The run's report contract
-    # is the runner's after-the-fact delivery check.
+    # is the runner's after-the-fact delivery check. A publication refusal
+    # carried by this lane is in exactly the same position: the worker is told,
+    # and nothing on this host denies the push — which the runner records rather
+    # than dressing up as enforcement.
+    #
+    # This is also why the execute profile adds nothing to this adapter: an
+    # execute lane here already runs the host's own native surface, which is
+    # wider than the `local-developer` profile asks for, so an ordinary
+    # `gcloud` read is reachable with no profile, no capability and no bridge.
+    # The resolver still returns the profile its route authorized — it is a
+    # property of the route, and the run summary records it — but there is no
+    # enumeration to widen and therefore no argv change to make. That is a
+    # no-op, not a silent ignore: nothing is narrowed or dropped.
     command = [
         executable,
         "exec",
@@ -382,6 +436,8 @@ def run_codex(
     web_domains: "Sequence[str]" = (),
     run_mcp_servers: "Mapping[str, McpRunServer] | None" = None,
     report_deliverable: bool = False,
+    existing_workspace: bool = False,
+    no_external_publication: bool = False,
 ) -> LaneResult:
     repo_path = _validate_worktree(repo)
     worktree_path = _validate_worktree(worktree)
@@ -389,6 +445,16 @@ def run_codex(
         provider, model, provider_config, model_config, mode
     )
     timeout = _resolve_timeout_seconds(model_config)
+    if existing_workspace and mode != "execute":
+        # Adapter-level fail-closed mirror of build_codex_command's refusal;
+        # run_codex may be called without going through that guard's inputs.
+        raise CodexAdapterError(
+            "an existing owner workspace is supported only in execute mode"
+        )
+    if existing_workspace and report_deliverable:
+        raise CodexAdapterError(
+            "an existing owner workspace cannot carry the report contract"
+        )
     if run_mcp_servers and mode != "execute":
         # Adapter-level fail-closed mirror of the build_codex_command guard;
         # run_codex may be called without going through that guard's inputs.
@@ -400,7 +466,23 @@ def run_codex(
     # Capabilities arrive only here in this adapter (`build_codex_command` takes
     # none), so this is the single boundary that can refuse them for a report
     # lane; nothing is launched past it.
+    if no_external_publication and mode != "execute":
+        raise CodexAdapterError(
+            "the publication refusal contract is execute mode only for the "
+            "Codex host"
+        )
     reject_report_write_capabilities(capabilities, report_deliverable)
+    if no_external_publication:
+        conflicts = publication_refusal_capability_conflicts(capabilities)
+        if conflicts:
+            raise CodexAdapterError(
+                "a lane whose task authority refuses external publication is "
+                "never granted "
+                + ", ".join(conflicts)
+                + ": the whole grant is the publication this lane must not "
+                "make. Drop the capability, or run an ordinary execute lane for "
+                "a task that authorizes publication."
+            )
     argv = build_codex_command(
         executable,
         repo_path,
@@ -415,6 +497,8 @@ def run_codex(
         web_domains=web_domains,
         run_mcp_servers=run_mcp_servers,
         report_deliverable=report_deliverable,
+        existing_workspace=existing_workspace,
+        no_external_publication=no_external_publication,
     )
     child_env = with_support_dir(
         build_transport_environment(

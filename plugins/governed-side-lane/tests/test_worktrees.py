@@ -350,10 +350,12 @@ class ScratchDirectoryTests(WorktreeTests):
 
     def test_devin_local_mcp_exclusion_is_root_anchored_and_appended_once(self) -> None:
         repo = self.make_repo()
-        exclude = worktrees.ensure_devin_local_mcp_exclusion(repo)
+        exclude, added = worktrees.ensure_devin_local_mcp_exclusion(repo)
+        self.assertTrue(added)
         lines = exclude.read_text(encoding="utf-8").splitlines()
         self.assertEqual(lines.count("/.devin/mcp_config.local.json"), 1)
-        worktrees.ensure_devin_local_mcp_exclusion(repo)
+        _, added = worktrees.ensure_devin_local_mcp_exclusion(repo)
+        self.assertFalse(added)
         self.assertEqual(exclude.read_text(encoding="utf-8").splitlines().count(
             "/.devin/mcp_config.local.json"), 1)
         generated = repo / ".devin" / "mcp_config.local.json"

@@ -270,3 +270,75 @@ own report collection remains authoritative for source changes, containment,
 sizes, and scrubbing; until that consumer is wired to this flag, a report-only
 lane's report must also satisfy it.
 
+## Task no-external-publication lanes (`--no-external-publication`)
+
+`--no-publish` is a decision about the **runner's** own push: it skips the
+automatic push of a delivered branch and records `published: null`. It never
+forbade the **worker** to push the branch itself, and a run that carried it was
+recorded in a way a reader could take as "nothing was published".
+`--no-external-publication` is the task-level authority, and it also suppresses
+the runner's own push of a delivered branch:
+
+```bash
+side-lane run --host claude --mode execute --provider <p> --model <m> \
+  --lane-name <lane> --prompt-file <task> --no-external-publication
+```
+
+It is execute mode only, rejected before a worktree, credential, or host
+executable is touched. A lane carrying it refuses `--capability git-push` at the
+CLI and at every direct adapter boundary — the guard denies the `git push`
+command family, so that grant could only render an allow rule the same run
+denies. Nothing else is refused: `workflow-write` stays a separate authority an
+approved task may name, and every read capability and `workspace-write` are
+untouched. The two options are not interchangeable: `--no-publish` alone is a
+runner-only decision and says nothing about the worker, while
+`--no-external-publication` also suppresses the runner's own push of a delivered
+branch — so a caller does not have to remember `--no-publish` as well, and a
+lane selected with the guard alone never has its branch pushed by the runner.
+Ordinary execute lanes are unchanged.
+
+`--verify` is refused in a lane carrying this guard, and refused before the
+worktree, the credential, the host process, or the command exists. The caller's
+command is arbitrary shell that runs in the lane before the runner reaches its
+own publication decision, so `--verify "git push origin HEAD"` would publish
+first and be *recorded* as a skipped push afterwards — the run's own record
+claiming the opposite of what happened. No command-string filter makes an
+arbitrary command safe to run under this authority, so the combination is
+refused rather than pretended to be contained; this is an argument check, not
+general arbitrary-process containment, which the flag never promised. Ordinary
+verification is unaffected: `--verify` keeps its meaning on every other execute
+lane, including one carrying `--no-publish`, which is the runner's own push
+decision and never forbade the worker to publish.
+
+The refusal is a section of the canonical governance document, rendered for
+every host, including a host where nothing in it can be enforced. Enforcement
+differs by host and is documented as such rather than assumed: Claude receives
+the canonical `no-external-publication (denied)` rules as `--disallowedTools`
+denials and Devin receives them in its native permission deny list plus its
+`PreToolUse` command policy (which normalises `git -C <path>`), while the Codex
+host carries the instruction only — a `danger-full-access` execute lane has no
+deny seam, so its refusal is never prevention. Those rules are an
+approval-boundary seam over command strings, not a sandbox: a `git -C <path>`
+invocation, reordered or bundled options, a compound command, and an allowed
+interpreter are not fully covered by them. The refused capability names come
+from the document's own machine-readable declaration
+(`Publication refusal never grants these capabilities:`), which the runner
+reads instead of a code-side list; a missing, malformed, reworded, or duplicated
+declaration stops the run.
+
+The run's summary carries a `publication` record beside the existing `published`
+outcome — `task_authority` (the flag, or `null`), `host_enforcement` (what that
+host's own controls could do with it, or `null`), `runner` and
+`runner_skip_reason` (what this runner itself did: `published`, `failed`, or
+`skipped` with the reason for the skip, and `not-delivered` when no branch was
+delivered to push), and `worker_publication_verified`, which is always
+`not-checked`. An execute lane's audit file carries the same record without the
+two runner fields. It is written after the worker returns and before the runner
+decides its own push, so it carries nothing about that push, and an adapter that
+fails leaves no audit at all. The audit states the authority the run was given,
+what the host could enforce, and that the worker's own publication is
+unverified. Neither artifact observes the worker — no code here checks whether
+the worker published — so no field is evidence that no publication happened:
+`not-checked` is the honest answer for the worker, and the runner's own
+`skipped` describes this runner's push alone.
+

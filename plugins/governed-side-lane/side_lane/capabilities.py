@@ -52,6 +52,17 @@ USER_SCOPE_MCP_CAPABILITIES = frozenset(
     }
 )
 
+#: Capabilities whose Codex evidence is connector-NAME presence rather than an
+#: exact registration.  A Codex lane inherits its configured MCP servers
+#: directly, with no ``mcp__<server>__`` allowlist, so the server it actually
+#: gets may be registered under a near name (``gitnexus-local``); every other
+#: capability's grants embed the exact server name even on Codex, and every
+#: other host renders grants that do.  This is the one class
+#: ``_graph_connector_evidence``'s ``require_exact`` argument distinguishes, and
+#: the staffing promotion in ``cli._recommendation_host_snapshot`` reads the
+#: same class so the two decide a Codex graph capability identically.
+CODEX_CONNECTOR_NAME_CAPABILITIES = frozenset({"gitnexus", "codegraph"})
+
 #: Subset of ``USER_SCOPE_MCP_CAPABILITIES`` whose servers live at the
 #: cm-services entry in the user-global config.  Excluded from project-approval
 #: logic (``_approved_mcp_servers``) because those servers are user-global, not
