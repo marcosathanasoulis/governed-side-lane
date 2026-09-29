@@ -1456,7 +1456,8 @@ class AllowedToolsTests(unittest.TestCase):
         gcp = tuple(f"mcp__cm-services__{name}" for name in (
             "gcp_logs", "gcp_run_services", "gcp_run_jobs", "gcp_run_job",
             "gcp_scheduler_jobs",
-            "gcp_functions", "gcp_billing_mtd", "gcp_billing_daily", "gcp_menu"))
+            "gcp_functions", "gcp_billing_mtd", "gcp_billing_daily", "gcp_menu",
+            "gcp_translate_languages"))
         database = ("mcp__cm-services__postgres_select",)
         algolia = (
             "mcp__cm-services__algolia_list_indexes",

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.53 - 2026-09-29
+
+- Allow the exact read-only `gcp_translate_languages` tool under the existing `gcloud-read` capability, granting the Translate API languages listing through the governed proxy without widening the capability scope.
+
 ## 0.4.52 - 2026-09-29
 
 - Allow the exact read-only Algolia index-list tool for inventory queries and the current-user Asana tool for workspace identity queries. Both calls use the existing governed proxy and retain per-account MCP grants.

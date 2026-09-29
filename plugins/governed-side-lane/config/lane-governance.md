@@ -157,7 +157,8 @@ backup is allowed, but no alternate GLM model is.
   With the `gcloud-read` capability, that same server may be called only
   through its read-only GCP operations `gcp_logs`, `gcp_run_services`,
   `gcp_run_jobs`, `gcp_run_job`, `gcp_scheduler_jobs`, `gcp_functions`,
-  `gcp_billing_mtd`, `gcp_billing_daily`, and `gcp_menu`. The singular
+  `gcp_billing_mtd`, `gcp_billing_daily`, `gcp_menu`, and
+  `gcp_translate_languages`. The singular
   `gcp_run_job` reads the metadata of one Cloud Run job named by a required
   job shortname and answers with that job's name, container images,
   create/update timestamps, condition state and reason, latest execution
@@ -814,6 +815,7 @@ from host registration files, never values.
 - `mcp__cm-services__gcp_billing_mtd`
 - `mcp__cm-services__gcp_billing_daily`
 - `mcp__cm-services__gcp_menu`
+- `mcp__cm-services__gcp_translate_languages`
 
 ### database-read
 

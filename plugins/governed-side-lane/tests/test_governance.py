@@ -317,6 +317,7 @@ class ToolPolicyTests(unittest.TestCase):
                 "mcp__cm-services__gcp_billing_mtd",
                 "mcp__cm-services__gcp_billing_daily",
                 "mcp__cm-services__gcp_menu",
+                "mcp__cm-services__gcp_translate_languages",
             ),
         )
         self.assertEqual(
