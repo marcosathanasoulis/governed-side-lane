@@ -1996,7 +1996,11 @@ class LaunchCapabilityGateTests(SideLaneTests):
         """
         config = cli.load_config()
         repo = self.repo()
-        for capability in ("contentful-env-read", "postmark-templates-read"):
+        for capability in (
+            "contentful-env-read",
+            "postmark-templates-read",
+            "postmark-servers-read",
+        ):
             with self.subTest(capability=capability):
                 with tempfile.TemporaryDirectory() as home:
                     home_path = Path(home)

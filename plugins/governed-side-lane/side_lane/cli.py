@@ -1490,6 +1490,9 @@ def _capability_report(
         "postmark-templates-read": _cm_services_evidence(
             "postmark-templates-read", mcp_names, host, out_of_scope
         ),
+        "postmark-servers-read": _cm_services_evidence(
+            "postmark-servers-read", mcp_names, host, out_of_scope
+        ),
         "gateway-read": _cm_services_evidence(
             "gateway-read", mcp_names, host, out_of_scope
         ),

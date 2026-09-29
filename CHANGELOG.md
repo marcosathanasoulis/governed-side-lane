@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.56 - 2026-09-29
+
+- Add the `postmark-servers-read` capability with the exact read-only `postmark_servers_streams_list` tool, and add the exact read-only `postmark_stats_outbound` tool to the existing `postmark-templates-read` capability (GCF PR #2457). The fixed GCF proxy lists the configured Postmark server's message streams and returns outbound send statistics; no direct Postmark API credential is exposed, no wildcard is admitted, and every other Contentful/Postmark/Gateway capability stays unchanged.
+
+## 0.4.55 - 2026-09-29
+
+- Allow the exact read-only `contentful_list_content_types` tool under the existing `contentful-env-read` capability. The fixed GCF proxy returns the bounded content-type list for the named `o6q5esfvflvg/new_app` space with no arguments; the existing `contentful_get_environment` grant and every other Contentful capability stay unchanged.
+
 ## 0.4.54 - 2026-09-29
 
 - Allow the exact read-only `gcp_compute_instances` tool under the existing `gcloud-read` capability. The fixed proxy returns VM name, zone, and power state for the approved project and region without adding a general Compute API grant.

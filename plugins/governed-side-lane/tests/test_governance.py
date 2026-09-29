@@ -295,6 +295,7 @@ class ToolPolicyTests(unittest.TestCase):
             | set(policy.allowed["contentful-master-read"])
             | set(policy.allowed["contentful-env-read"])
             | set(policy.allowed["postmark-templates-read"])
+            | set(policy.allowed["postmark-servers-read"])
             | set(policy.allowed["gateway-read"])
         )
         for rules in list(policy.allowed.values()) + list(policy.denied.values()) + [policy.always]:
@@ -359,17 +360,39 @@ class ToolPolicyTests(unittest.TestCase):
         )
         self.assertEqual(
             policy.allowed["contentful-env-read"],
-            ("WaitForMcpServers", "mcp__cm-services__contentful_get_environment"),
+            (
+                "WaitForMcpServers",
+                "mcp__cm-services__contentful_get_environment",
+                "mcp__cm-services__contentful_list_content_types",
+            ),
         )
         self.assertEqual(
             policy.allowed["postmark-templates-read"],
-            ("WaitForMcpServers", "mcp__cm-services__postmark_list_templates"),
+            (
+                "WaitForMcpServers",
+                "mcp__cm-services__postmark_list_templates",
+                "mcp__cm-services__postmark_stats_outbound",
+            ),
+        )
+        self.assertEqual(
+            policy.allowed["postmark-servers-read"],
+            (
+                "WaitForMcpServers",
+                "mcp__cm-services__postmark_servers_streams_list",
+            ),
         )
         # contentful-env-read shares the contentful-new-app account with
         # contentful-read but is a distinct, disjoint tool grant.
         self.assertFalse(
             set(policy.allowed["contentful-env-read"])
             & set(policy.allowed["contentful-read"])
+            - {"WaitForMcpServers"}
+        )
+        # The two Postmark capabilities share the configured Postmark
+        # account but are distinct, disjoint tool grants.
+        self.assertFalse(
+            set(policy.allowed["postmark-templates-read"])
+            & set(policy.allowed["postmark-servers-read"])
             - {"WaitForMcpServers"}
         )
 
@@ -419,6 +442,70 @@ class ToolPolicyTests(unittest.TestCase):
         self.assertFalse(any(rule.endswith("*") for rule in rules))
         prompt = " ".join(lane_system_prompt("execute", Path("/tmp/repo")).split())
         self.assertIn("gcp_compute_instances", prompt)
+
+    def test_contentful_list_content_types_is_read_only_listing(self) -> None:
+        """The ``contentful_list_content_types`` tool is granted on contentful-env-read.
+
+        The GCF proxy exposes it for the fixed ``o6q5esfvflvg/new_app`` space
+        with no arguments; the canonical prose names the tool alongside the
+        other Contentful environment reads, and the allowlist entry is
+        exactly enumerated with no wildcard.
+        """
+        from side_lane.governance import tool_policy
+
+        rules = tool_policy().allowed["contentful-env-read"]
+        self.assertIn(
+            "mcp__cm-services__contentful_list_content_types", rules
+        )
+        self.assertIn(
+            "mcp__cm-services__contentful_get_environment", rules
+        )
+        self.assertFalse(any(rule.endswith("*") for rule in rules))
+        prompt = " ".join(lane_system_prompt("execute", Path("/tmp/repo")).split())
+        self.assertIn("contentful_list_content_types", prompt)
+        self.assertIn("contentful_get_environment", prompt)
+
+    def test_postmark_servers_streams_list_is_read_only_listing(self) -> None:
+        """The ``postmark_servers_streams_list`` tool is granted on postmark-servers-read.
+
+        GCF PR #2457 adds the bounded server-streams listing for the
+        configured Postmark server; the canonical prose names the tool
+        alongside the other Postmark reads, and the allowlist entry is
+        exactly enumerated with no wildcard and no direct API credential.
+        """
+        from side_lane.governance import tool_policy
+
+        rules = tool_policy().allowed["postmark-servers-read"]
+        self.assertIn(
+            "mcp__cm-services__postmark_servers_streams_list", rules
+        )
+        self.assertFalse(any(rule.endswith("*") for rule in rules))
+        prompt = " ".join(lane_system_prompt("execute", Path("/tmp/repo")).split())
+        self.assertIn("postmark_servers_streams_list", prompt)
+        self.assertIn("postmark-servers-read", prompt)
+
+    def test_postmark_stats_outbound_is_read_only_listing(self) -> None:
+        """The ``postmark_stats_outbound`` tool is granted on postmark-templates-read.
+
+        GCF PR #2457 adds the outbound-stats read to the existing
+        ``postmark-templates-read`` capability; the canonical prose names
+        the tool alongside the list-templates read, and the allowlist
+        entry is exactly enumerated with no wildcard and no broader Postmark
+        operation.
+        """
+        from side_lane.governance import tool_policy
+
+        rules = tool_policy().allowed["postmark-templates-read"]
+        self.assertIn(
+            "mcp__cm-services__postmark_stats_outbound", rules
+        )
+        self.assertIn(
+            "mcp__cm-services__postmark_list_templates", rules
+        )
+        self.assertFalse(any(rule.endswith("*") for rule in rules))
+        prompt = " ".join(lane_system_prompt("execute", Path("/tmp/repo")).split())
+        self.assertIn("postmark_stats_outbound", prompt)
+        self.assertIn("postmark_list_templates", prompt)
 
     def test_gateway_read_names_no_deployment_url_or_credential(self) -> None:
         """The Gateway grant is a capability boundary, not a deployment handle.

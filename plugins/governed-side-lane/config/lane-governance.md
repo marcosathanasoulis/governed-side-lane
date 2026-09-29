@@ -183,18 +183,33 @@ backup is allowed, but no alternate GLM model is.
   `mcp__cm-services__contentful_master_search_entries`), mapped to the
   `contentful-master` account. With the `contentful-env-read` capability,
   that same server may be called only through its read-only Contentful
-  environment tool `contentful_get_environment` (exact tool ID
-  `mcp__cm-services__contentful_get_environment`), mapped to the same
-  `contentful-new-app` account as `contentful-read`; it answers only
-  environment metadata (name, identifiers, aliasing state) and grants no
-  entry content access beyond what `contentful-read` already grants — the
-  two capabilities remain separate grants over disjoint tool sets on the
-  same account. With the `postmark-templates-read` capability, that same
-  server may be called only through its read-only Postmark tool
-  `postmark_list_templates` (exact tool ID
-  `mcp__cm-services__postmark_list_templates`), mapped to the configured
-  Postmark account; it lists template metadata only and grants no send,
-  edit, or delete authority. With the `gateway-read` capability, that same
+  environment tools `contentful_get_environment` and
+  `contentful_list_content_types` (exact tool IDs
+  `mcp__cm-services__contentful_get_environment` and
+  `mcp__cm-services__contentful_list_content_types`), mapped to the same
+  `contentful-new-app` account as `contentful-read`; the first answers only
+  environment metadata (name, identifiers, aliasing state) and the second
+  lists the bounded content types of the fixed space `o6q5esfvflvg/new_app`
+  with no arguments, and neither grants any entry content access beyond
+  what `contentful-read` already grants — the two capabilities remain
+  separate grants over disjoint tool sets on the same account. With the
+  `postmark-templates-read` capability, that same
+  server may be called only through its read-only Postmark tools
+  `postmark_list_templates` and `postmark_stats_outbound` (exact tool IDs
+  `mcp__cm-services__postmark_list_templates` and
+  `mcp__cm-services__postmark_stats_outbound`), mapped to the configured
+  Postmark account; the first lists template metadata and the second
+  returns outbound send statistics, and neither grants any send, edit, or
+  delete authority. With the `postmark-servers-read` capability, that
+  same server may be called only through its read-only Postmark tool
+  `postmark_servers_streams_list` (exact tool ID
+  `mcp__cm-services__postmark_servers_streams_list`), mapped to the same
+  configured Postmark account as `postmark-templates-read`; it lists
+  message streams for the configured server with no arguments, grants no
+  send, edit, or delete authority, and the two Postmark capabilities
+  remain separate grants over disjoint tool sets on the same account — no
+  server-wide wildcard and no direct Postmark API credential is exposed
+  to the worker. With the `gateway-read` capability, that same
   server may be called only through its read-only Gateway run tools
   `gateway_run_status` and `gateway_run_report` (exact tool IDs
   `mcp__cm-services__gateway_run_status` and
@@ -845,11 +860,18 @@ from host registration files, never values.
 
 - `WaitForMcpServers`
 - `mcp__cm-services__contentful_get_environment`
+- `mcp__cm-services__contentful_list_content_types`
 
 ### postmark-templates-read
 
 - `WaitForMcpServers`
 - `mcp__cm-services__postmark_list_templates`
+- `mcp__cm-services__postmark_stats_outbound`
+
+### postmark-servers-read
+
+- `WaitForMcpServers`
+- `mcp__cm-services__postmark_servers_streams_list`
 
 ### gateway-read
 
