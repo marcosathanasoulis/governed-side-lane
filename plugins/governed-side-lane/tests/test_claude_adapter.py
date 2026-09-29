@@ -1275,6 +1275,7 @@ class ProjectMcpServerApprovalTests(unittest.TestCase):
         self.assertIn("mcp__cm-services__gcp_menu", prompt)
         self.assertIn("mcp__cm-services__postgres_select", prompt)
         self.assertIn("mcp__cm-services__algolia_get_settings", prompt)
+        self.assertIn("mcp__cm-services__algolia_list_indexes", prompt)
 
     def test_cm_services_probe_failure_fails_closed_before_the_worker(self) -> None:
         probe = mock.Mock(return_value=subprocess.CompletedProcess(
@@ -1448,7 +1449,7 @@ class AllowedToolsTests(unittest.TestCase):
 
     def test_cm_services_grants_are_exact_and_disjoint(self) -> None:
         asana = tuple(f"mcp__cm-services__{name}" for name in (
-            "asana_get_task", "asana_get_project", "asana_list_project_tasks",
+            "asana_get_task", "asana_get_project", "asana_get_user", "asana_list_project_tasks",
             "asana_list_workspaces", "asana_list_workspace_projects"))
         drive = tuple(f"mcp__cm-services__{name}" for name in (
             "drive_file_info", "drive_sheet_tabs", "drive_sheet_get", "drive_doc_get"))
@@ -1457,7 +1458,10 @@ class AllowedToolsTests(unittest.TestCase):
             "gcp_scheduler_jobs",
             "gcp_functions", "gcp_billing_mtd", "gcp_billing_daily", "gcp_menu"))
         database = ("mcp__cm-services__postgres_select",)
-        algolia = ("mcp__cm-services__algolia_get_settings",)
+        algolia = (
+            "mcp__cm-services__algolia_list_indexes",
+            "mcp__cm-services__algolia_get_settings",
+        )
         base = claude.allowed_tools("execute", ())
         self.assertEqual(
             claude.allowed_tools("execute", ("asana-read",)),

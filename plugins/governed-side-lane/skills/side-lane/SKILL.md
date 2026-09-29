@@ -275,7 +275,8 @@ reported mismatch rather than a wildcard fallback.
 `--capability asana-read`, `--capability drive-read`, and `--capability
 algolia-read` grant disjoint exact read-only tool sets on the fixed local MCP
 server registered exactly as `cm-services` (`mcp__cm-services__asana_*` /
-`mcp__cm-services__drive_*` / `mcp__cm-services__algolia_get_settings`),
+`mcp__cm-services__drive_*` / the two exact `algolia_list_indexes` and
+`algolia_get_settings` tools),
 which the coordinator provisions into the worker host's user-global config
 under the same account before the run. Granting one capability never grants
 the other's tools, there is no server-wide wildcard, and every capability is

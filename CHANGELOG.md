@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.52 - 2026-09-29
+
+- Allow the exact read-only Algolia index-list tool for inventory queries and the current-user Asana tool for workspace identity queries. Both calls use the existing governed proxy and retain per-account MCP grants.
+
 ## 0.4.51 - 2026-09-29
 
 - Admit exact read-only Contentful environment and Postmark template metadata capabilities in the model catalog, runner readiness, and canonical tool grants. Add the two Asana workspace-list tools to the existing Asana read grant so workspace project queries can run without a permission prompt. Keep all grants scoped to their named accounts and tools.

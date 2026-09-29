@@ -266,6 +266,7 @@ class ToolPolicyTests(unittest.TestCase):
                 "WaitForMcpServers",
                 "mcp__cm-services__asana_get_task",
                 "mcp__cm-services__asana_get_project",
+                "mcp__cm-services__asana_get_user",
                 "mcp__cm-services__asana_list_project_tasks",
                 "mcp__cm-services__asana_list_workspaces",
                 "mcp__cm-services__asana_list_workspace_projects",
@@ -324,7 +325,11 @@ class ToolPolicyTests(unittest.TestCase):
         )
         self.assertEqual(
             policy.allowed["algolia-read"],
-            ("WaitForMcpServers", "mcp__cm-services__algolia_get_settings"),
+            (
+                "WaitForMcpServers",
+                "mcp__cm-services__algolia_list_indexes",
+                "mcp__cm-services__algolia_get_settings",
+            ),
         )
         self.assertEqual(
             policy.allowed["contentful-read"],

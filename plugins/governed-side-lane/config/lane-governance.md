@@ -131,7 +131,7 @@ backup is allowed, but no alternate GLM model is.
   happened.
 - With the `asana-read` capability, only the MCP server registered exactly
   as `cm-services` may be called, and only through its read-only Asana
-  tools `asana_get_task`, `asana_get_project`,
+  tools `asana_get_task`, `asana_get_project`, `asana_get_user`,
   `asana_list_project_tasks`, `asana_list_workspaces`, and
   `asana_list_workspace_projects` (exact tool IDs
   `mcp__cm-services__<name>`).
@@ -168,8 +168,9 @@ backup is allowed, but no alternate GLM model is.
   this is the distinct read-only Postgres account and proxy. With the
   `algolia-read` capability, only the MCP server registered exactly as
   `cm-services` may be called, and
-  only through its read-only Algolia tool `algolia_get_settings` (exact tool
-  ID `mcp__cm-services__algolia_get_settings`). With the `contentful-read`
+  only through its read-only Algolia tools `algolia_list_indexes` and
+  `algolia_get_settings` (exact tool IDs `mcp__cm-services__algolia_list_indexes`
+  and `mcp__cm-services__algolia_get_settings`). With the `contentful-read`
   capability, that same server may be called only through its read-only
   Contentful tools `contentful_get_entry` and `contentful_search_entries`
   (exact tool IDs `mcp__cm-services__contentful_get_entry` and
@@ -789,6 +790,7 @@ from host registration files, never values.
 
 - `mcp__cm-services__asana_get_task`
 - `mcp__cm-services__asana_get_project`
+- `mcp__cm-services__asana_get_user`
 - `mcp__cm-services__asana_list_project_tasks`
 - `mcp__cm-services__asana_list_workspaces`
 - `mcp__cm-services__asana_list_workspace_projects`
@@ -821,6 +823,7 @@ from host registration files, never values.
 ### algolia-read
 
 - `WaitForMcpServers`
+- `mcp__cm-services__algolia_list_indexes`
 - `mcp__cm-services__algolia_get_settings`
 
 ### contentful-read
