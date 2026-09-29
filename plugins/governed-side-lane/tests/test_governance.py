@@ -318,6 +318,7 @@ class ToolPolicyTests(unittest.TestCase):
                 "mcp__cm-services__gcp_billing_daily",
                 "mcp__cm-services__gcp_menu",
                 "mcp__cm-services__gcp_translate_languages",
+                "mcp__cm-services__gcp_compute_instances",
             ),
         )
         self.assertEqual(
@@ -403,6 +404,21 @@ class ToolPolicyTests(unittest.TestCase):
             "`gcp_run_jobs`, which remains the execution listing",
         ):
             self.assertIn(phrase, prompt)
+
+    def test_gcloud_compute_instances_is_read_only_listing(self) -> None:
+        """The ``gcp_compute_instances`` tool lists Compute Engine instances.
+
+        It is a read-only listing with no arguments; the canonical prose
+        names it alongside the other GCP read tools, and the allowlist
+        entry is exactly enumerated with no wildcard.
+        """
+        from side_lane.governance import tool_policy
+
+        rules = tool_policy().allowed["gcloud-read"]
+        self.assertIn("mcp__cm-services__gcp_compute_instances", rules)
+        self.assertFalse(any(rule.endswith("*") for rule in rules))
+        prompt = " ".join(lane_system_prompt("execute", Path("/tmp/repo")).split())
+        self.assertIn("gcp_compute_instances", prompt)
 
     def test_gateway_read_names_no_deployment_url_or_credential(self) -> None:
         """The Gateway grant is a capability boundary, not a deployment handle.

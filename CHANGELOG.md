@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.54 - 2026-09-29
+
+- Allow the exact read-only `gcp_compute_instances` tool under the existing `gcloud-read` capability. The fixed proxy returns VM name, zone, and power state for the approved project and region without adding a general Compute API grant.
+
 ## 0.4.53 - 2026-09-29
 
 - Allow the exact read-only `gcp_translate_languages` tool under the existing `gcloud-read` capability, granting the Translate API languages listing through the governed proxy without widening the capability scope.
