@@ -131,8 +131,10 @@ backup is allowed, but no alternate GLM model is.
   happened.
 - With the `asana-read` capability, only the MCP server registered exactly
   as `cm-services` may be called, and only through its read-only Asana
-  tools `asana_get_task`, `asana_get_project`, and
-  `asana_list_project_tasks` (exact tool IDs `mcp__cm-services__<name>`).
+  tools `asana_get_task`, `asana_get_project`,
+  `asana_list_project_tasks`, `asana_list_workspaces`, and
+  `asana_list_workspace_projects` (exact tool IDs
+  `mcp__cm-services__<name>`).
   With the `drive-read` capability, that same server may be called only
   through its read-only Drive tools `drive_file_info`, `drive_sheet_tabs`,
   `drive_sheet_get`, and `drive_doc_get`. `cm-services` is a fixed local
@@ -177,7 +179,20 @@ backup is allowed, but no alternate GLM model is.
   tools `contentful_master_get_entry` and `contentful_master_search_entries`
   (exact tool IDs `mcp__cm-services__contentful_master_get_entry` and
   `mcp__cm-services__contentful_master_search_entries`), mapped to the
-  `contentful-master` account. With the `gateway-read` capability, that same
+  `contentful-master` account. With the `contentful-env-read` capability,
+  that same server may be called only through its read-only Contentful
+  environment tool `contentful_get_environment` (exact tool ID
+  `mcp__cm-services__contentful_get_environment`), mapped to the same
+  `contentful-new-app` account as `contentful-read`; it answers only
+  environment metadata (name, identifiers, aliasing state) and grants no
+  entry content access beyond what `contentful-read` already grants — the
+  two capabilities remain separate grants over disjoint tool sets on the
+  same account. With the `postmark-templates-read` capability, that same
+  server may be called only through its read-only Postmark tool
+  `postmark_list_templates` (exact tool ID
+  `mcp__cm-services__postmark_list_templates`), mapped to the configured
+  Postmark account; it lists template metadata only and grants no send,
+  edit, or delete authority. With the `gateway-read` capability, that same
   server may be called only through its read-only Gateway run tools
   `gateway_run_status` and `gateway_run_report` (exact tool IDs
   `mcp__cm-services__gateway_run_status` and
@@ -775,6 +790,8 @@ from host registration files, never values.
 - `mcp__cm-services__asana_get_task`
 - `mcp__cm-services__asana_get_project`
 - `mcp__cm-services__asana_list_project_tasks`
+- `mcp__cm-services__asana_list_workspaces`
+- `mcp__cm-services__asana_list_workspace_projects`
 
 ### drive-read
 
@@ -817,6 +834,16 @@ from host registration files, never values.
 - `WaitForMcpServers`
 - `mcp__cm-services__contentful_master_get_entry`
 - `mcp__cm-services__contentful_master_search_entries`
+
+### contentful-env-read
+
+- `WaitForMcpServers`
+- `mcp__cm-services__contentful_get_environment`
+
+### postmark-templates-read
+
+- `WaitForMcpServers`
+- `mcp__cm-services__postmark_list_templates`
 
 ### gateway-read
 

@@ -1448,7 +1448,8 @@ class AllowedToolsTests(unittest.TestCase):
 
     def test_cm_services_grants_are_exact_and_disjoint(self) -> None:
         asana = tuple(f"mcp__cm-services__{name}" for name in (
-            "asana_get_task", "asana_get_project", "asana_list_project_tasks"))
+            "asana_get_task", "asana_get_project", "asana_list_project_tasks",
+            "asana_list_workspaces", "asana_list_workspace_projects"))
         drive = tuple(f"mcp__cm-services__{name}" for name in (
             "drive_file_info", "drive_sheet_tabs", "drive_sheet_get", "drive_doc_get"))
         gcp = tuple(f"mcp__cm-services__{name}" for name in (
@@ -1488,6 +1489,42 @@ class AllowedToolsTests(unittest.TestCase):
         self.assertIn("mcp__cm-services__asana_get_task", prompt)
         self.assertNotIn("mcp__cm-services__drive_doc_get", prompt)
 
+    def test_contentful_env_and_postmark_templates_grant_exact_disjoint_tools(self) -> None:
+        """New cm-services capabilities from GCF PR #2438/#2439.
+
+        `contentful-env-read` grants only `contentful_get_environment` and
+        `postmark-templates-read` grants only `postmark_list_templates`; each
+        is disjoint from every existing cm-services-family grant, in
+        particular from `contentful-read`'s CDA entry tools, and neither is a
+        wildcard.
+        """
+        contentful_env = ("mcp__cm-services__contentful_get_environment",)
+        postmark_templates = ("mcp__cm-services__postmark_list_templates",)
+        base = claude.allowed_tools("execute", ())
+        self.assertEqual(
+            claude.allowed_tools("execute", ("contentful-env-read",)),
+            base + ("WaitForMcpServers",) + contentful_env)
+        self.assertEqual(
+            claude.allowed_tools("execute", ("postmark-templates-read",)),
+            base + ("WaitForMcpServers",) + postmark_templates)
+        both = claude.allowed_tools(
+            "execute", ("contentful-env-read", "postmark-templates-read"))
+        self.assertEqual(
+            both, base + ("WaitForMcpServers",) + contentful_env + postmark_templates)
+        for tool in both:
+            self.assertNotRegex(tool, r"__\*$")
+        # contentful-read's CDA tools stay untouched by the new environment grant.
+        contentful_read = claude.allowed_tools("execute", ("contentful-read",))
+        self.assertNotIn("mcp__cm-services__contentful_get_environment", contentful_read)
+        self.assertNotIn(
+            "mcp__cm-services__contentful_get_entry",
+            claude.allowed_tools("execute", ("contentful-env-read",)),
+        )
+        self.assertEqual(
+            claude.allowed_tools("review", ("contentful-env-read", "postmark-templates-read")),
+            (),
+        )
+
     def test_gcloud_run_job_grant_is_exact_and_never_widens(self) -> None:
         """The singular Cloud Run job-metadata read is granted by gcloud-read only.
 
@@ -1512,7 +1549,8 @@ class AllowedToolsTests(unittest.TestCase):
         self.assertFalse(any(tool.startswith("mcp__cm-services__") for tool in base))
         # No unrelated capability's grant carries it, and it is not a wildcard.
         for capability in ("asana-read", "drive-read", "database-read", "algolia-read",
-                           "contentful-read", "contentful-master-read", "gateway-read",
+                           "contentful-read", "contentful-master-read", "contentful-env-read",
+                           "postmark-templates-read", "gateway-read",
                            "gitnexus", "codegraph", "shell", "workspace-write", "git-push"):
             self.assertNotIn(singular, claude.allowed_tools("execute", (capability,)))
         # Review mode never receives it, granted or not.

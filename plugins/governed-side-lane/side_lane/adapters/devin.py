@@ -700,7 +700,8 @@ def _runtime_config(model: str, capabilities: Sequence[str],
     # permission-ID documentation substitutes for a successful call. A missing
     # grant makes Devin prompt, and a prompt ends a non-interactive run.
     # Every cm-services-family capability — asana, drive, gcloud, database,
-    # algolia, contentful, and Gateway — shares the fixed user-global
+    # algolia, contentful, contentful environment, Postmark templates, and
+    # Gateway — shares the fixed user-global
     # ``cm-services`` registration the coordinator provisions into the worker
     # host's Devin user config; each capability admits only its own exact
     # ``mcp__cm-services__<tool>`` rules from the canonical policy — the shared

@@ -1984,6 +1984,57 @@ class LaunchCapabilityGateTests(SideLaneTests):
                     cli._launch(args, config, repo, "Use algolia")
                 create.assert_not_called()
 
+    def test_contentful_env_and_postmark_templates_launch_gate_with_cm_services_evidence(
+        self,
+    ) -> None:
+        """contentful-env-read and postmark-templates-read gate on cm-services.
+
+        Both are new cm-services-family capabilities (the GCF worker's
+        `contentful-env-read` and `postmark-templates-read` grants); each is
+        admitted only when the exact `cm-services` server is registered, and
+        each is rejected before any worktree is created when it is absent.
+        """
+        config = cli.load_config()
+        repo = self.repo()
+        for capability in ("contentful-env-read", "postmark-templates-read"):
+            with self.subTest(capability=capability):
+                with tempfile.TemporaryDirectory() as home:
+                    home_path = Path(home)
+                    (home_path / ".claude.json").write_text(
+                        json.dumps({"mcpServers": {"cm-services": {"command": "cm-services"}}}),
+                        encoding="utf-8",
+                    )
+                    args = mock.Mock(
+                        host="claude", mode="execute", provider="claude", model="claude-sonnet-5",
+                        capability=[capability], lane_name="cap", skill=[],
+                        approve_billable_route=False, worktree_root=None, verify=None,
+                        read_root=[], mcp_config=None,
+                    )
+                    with (
+                        mock.patch.dict(os.environ, {"HOME": home}, clear=False),
+                        mock.patch("side_lane.cli.shutil.which", side_effect=lambda name: None if name in {"gcloud", "psql"} else "/bin/tool"),
+                        mock.patch("side_lane.cli._require_host_executable", side_effect=cli.SideLaneError("stop here")),
+                        mock.patch("side_lane.cli.create_worktree") as create,
+                    ):
+                        with self.assertRaisesRegex(cli.SideLaneError, "stop here"):
+                            cli._launch(args, config, repo, "Use the capability")
+                        create.assert_not_called()
+                        # Remove the exact server: the gate must reject it.
+                        (home_path / ".claude.json").write_text(
+                            json.dumps({"mcpServers": {}}), encoding="utf-8"
+                        )
+                        args = mock.Mock(
+                            host="claude", mode="execute", provider="claude", model="claude-sonnet-5",
+                            capability=[capability], lane_name="cap", skill=[],
+                            approve_billable_route=False, worktree_root=None, verify=None,
+                            read_root=[], mcp_config=None,
+                        )
+                        with self.assertRaisesRegex(
+                            cli.SideLaneError, f"unavailable: {capability}"
+                        ):
+                            cli._launch(args, config, repo, "Use the capability")
+                        create.assert_not_called()
+
     def test_gateway_read_launch_gate_with_cm_services_evidence(self) -> None:
         """gateway-read is admitted only on the exact cm-services registration.
 

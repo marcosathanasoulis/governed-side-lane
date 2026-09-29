@@ -1484,6 +1484,12 @@ def _capability_report(
         "contentful-master-read": _cm_services_evidence(
             "contentful-master-read", mcp_names, host, out_of_scope
         ),
+        "contentful-env-read": _cm_services_evidence(
+            "contentful-env-read", mcp_names, host, out_of_scope
+        ),
+        "postmark-templates-read": _cm_services_evidence(
+            "postmark-templates-read", mcp_names, host, out_of_scope
+        ),
         "gateway-read": _cm_services_evidence(
             "gateway-read", mcp_names, host, out_of_scope
         ),
@@ -1596,9 +1602,10 @@ def _cm_services_evidence(
     """Registration evidence for a ``cm-services`` read capability.
 
     Every cm-services-family capability (asana, drive, gcloud, database,
-    algolia, contentful, Gateway) grants exact ``mcp__cm-services__<tool>``
-    IDs, so the tool IDs embed the server name ``cm-services`` exactly on
-    every host — like ``slack-read`` the check demands the exact name (a
+    algolia, contentful, contentful environment, Postmark templates, Gateway)
+    grants exact ``mcp__cm-services__<tool>`` IDs, so the tool IDs embed the
+    server name ``cm-services`` exactly on every host — like ``slack-read``
+    the check demands the exact name (a
     near-miss is ``name-mismatch``). The server is a fixed local stdio
     registration the coordinator provisions into the worker host's
     user-global config under the same account the capability reads; a

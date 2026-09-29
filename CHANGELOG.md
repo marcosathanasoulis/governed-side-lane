@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.51 - 2026-09-29
+
+- Admit exact read-only Contentful environment and Postmark template metadata capabilities in the model catalog, runner readiness, and canonical tool grants. Add the two Asana workspace-list tools to the existing Asana read grant so workspace project queries can run without a permission prompt. Keep all grants scoped to their named accounts and tools.
+
 ## 0.4.50 - 2026-09-22
 
 - Resolve the execute profile from the route rather than the host name, and give the Devin adapter the seam that renders it. The profile is a property of where a lane runs and what the private table authorized, so an opted-in route declaring `execution_location: local-user-workspace` now selects it on every qualified host; the previous `claude`-only gate made the same authorized local route resolve `standard` on Devin, where the PreToolUse command policy held only the granted capabilities' literal `Bash` prefixes and therefore blocked an ordinary `gcloud run services describe` as "outside canonical capability grants". The Devin adapter now installs the canonical `local-developer (granted)` surface — the bare `Bash` rule, the host's own native shell class — which the policy hook reads as granting every command the deny list does not block; denials are matched first and are unchanged, so the profile widens the allow side only and promotes no command out of a denial. Codex needs no argv change, as an execute lane there already runs `danger-full-access`. No host or model is hardcoded, no bridge or proxy becomes required, and the `gcloud-read` MCP capability is untouched.

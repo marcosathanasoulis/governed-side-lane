@@ -267,6 +267,8 @@ class ToolPolicyTests(unittest.TestCase):
                 "mcp__cm-services__asana_get_task",
                 "mcp__cm-services__asana_get_project",
                 "mcp__cm-services__asana_list_project_tasks",
+                "mcp__cm-services__asana_list_workspaces",
+                "mcp__cm-services__asana_list_workspace_projects",
             ),
         )
         self.assertEqual(
@@ -290,6 +292,8 @@ class ToolPolicyTests(unittest.TestCase):
             | set(policy.allowed["algolia-read"])
             | set(policy.allowed["contentful-read"])
             | set(policy.allowed["contentful-master-read"])
+            | set(policy.allowed["contentful-env-read"])
+            | set(policy.allowed["postmark-templates-read"])
             | set(policy.allowed["gateway-read"])
         )
         for rules in list(policy.allowed.values()) + list(policy.denied.values()) + [policy.always]:
@@ -345,6 +349,21 @@ class ToolPolicyTests(unittest.TestCase):
                 "mcp__cm-services__gateway_run_status",
                 "mcp__cm-services__gateway_run_report",
             ),
+        )
+        self.assertEqual(
+            policy.allowed["contentful-env-read"],
+            ("WaitForMcpServers", "mcp__cm-services__contentful_get_environment"),
+        )
+        self.assertEqual(
+            policy.allowed["postmark-templates-read"],
+            ("WaitForMcpServers", "mcp__cm-services__postmark_list_templates"),
+        )
+        # contentful-env-read shares the contentful-new-app account with
+        # contentful-read but is a distinct, disjoint tool grant.
+        self.assertFalse(
+            set(policy.allowed["contentful-env-read"])
+            & set(policy.allowed["contentful-read"])
+            - {"WaitForMcpServers"}
         )
 
     def test_gcloud_run_job_is_distinct_from_the_plural_execution_listing(self) -> None:

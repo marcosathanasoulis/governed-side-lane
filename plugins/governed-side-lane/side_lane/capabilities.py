@@ -18,6 +18,8 @@ CAPABILITY_MCP_SERVERS: dict[str, str] = {
     "algolia-read": "cm-services",
     "contentful-read": "cm-services",
     "contentful-master-read": "cm-services",
+    "contentful-env-read": "cm-services",
+    "postmark-templates-read": "cm-services",
     "gateway-read": "cm-services",
     # host-native servers (registered by the user in their host config)
     "gitnexus": "gitnexus",
@@ -43,6 +45,8 @@ USER_SCOPE_MCP_CAPABILITIES = frozenset(
         "algolia-read",
         "contentful-read",
         "contentful-master-read",
+        "contentful-env-read",
+        "postmark-templates-read",
         "gateway-read",
         # host-native servers
         "gitnexus",
@@ -77,6 +81,8 @@ CM_SERVICES_CAPABILITIES = frozenset(
         "algolia-read",
         "contentful-read",
         "contentful-master-read",
+        "contentful-env-read",
+        "postmark-templates-read",
         "gateway-read",
     }
 )

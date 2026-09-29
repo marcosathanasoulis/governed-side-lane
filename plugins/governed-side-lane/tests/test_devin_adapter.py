@@ -234,7 +234,9 @@ class DevinAdapterTests(unittest.TestCase):
         self.assertEqual(
             {rule for rule in asana if rule.startswith("mcp__cm-services__")},
             {"mcp__cm-services__asana_get_task", "mcp__cm-services__asana_get_project",
-             "mcp__cm-services__asana_list_project_tasks"},
+             "mcp__cm-services__asana_list_project_tasks",
+             "mcp__cm-services__asana_list_workspaces",
+             "mcp__cm-services__asana_list_workspace_projects"},
         )
         drive = devin._runtime_config("swe-2-medium", ("drive-read",))["permissions"]["allow"]
         self.assertEqual(
@@ -262,7 +264,7 @@ class DevinAdapterTests(unittest.TestCase):
         both = devin._runtime_config("swe-2-medium", ("asana-read", "drive-read"))["permissions"]["allow"]
         self.assertNotIn("mcp__cm-services__*", both)
         self.assertEqual(
-            len([rule for rule in both if rule.startswith("mcp__cm-services__")]), 7)
+            len([rule for rule in both if rule.startswith("mcp__cm-services__")]), 9)
         # gateway-read follows the family: exact Gateway run tools only.
         gateway = devin._runtime_config("swe-2-medium", ("gateway-read",))["permissions"]["allow"]
         self.assertEqual(

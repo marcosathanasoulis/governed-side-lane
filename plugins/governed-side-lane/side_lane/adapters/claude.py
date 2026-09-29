@@ -184,7 +184,8 @@ AUTO_MEMORY_DISABLED_VALUE = "1"
 # never appear in
 # enabledMcpjsonServers because their registration is not a project .mcp.json
 # entry. Every cm-services-family capability — asana, drive, gcloud,
-# database, algolia, contentful, and Gateway — maps to the fixed local stdio
+# database, algolia, contentful, contentful environment, Postmark templates,
+# and Gateway — maps to the fixed local stdio
 # server registered as ``cm-services`` in the worker host's user-global config
 # (the controlled HOME the coordinator provisions); a user-scope registration
 # needs no project approval either. Server names must never be wildcarded and
@@ -200,7 +201,8 @@ AUTO_MEMORY_DISABLED_VALUE = "1"
 # granted.
 READINESS_REQUIRED_CAPABILITIES = frozenset(
     {"playwright", "asana-read", "drive-read", "gcloud-read", "database-read", "algolia-read",
-     "contentful-read", "contentful-master-read", "gateway-read"}
+     "contentful-read", "contentful-master-read", "contentful-env-read",
+     "postmark-templates-read", "gateway-read"}
 )
 
 
