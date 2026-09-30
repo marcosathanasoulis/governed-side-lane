@@ -1493,6 +1493,9 @@ def _capability_report(
         "postmark-servers-read": _cm_services_evidence(
             "postmark-servers-read", mcp_names, host, out_of_scope
         ),
+        "aws-lambda-read": _cm_services_evidence(
+            "aws-lambda-read", mcp_names, host, out_of_scope
+        ),
         "gateway-read": _cm_services_evidence(
             "gateway-read", mcp_names, host, out_of_scope
         ),

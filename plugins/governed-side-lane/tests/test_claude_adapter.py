@@ -1495,15 +1495,16 @@ class AllowedToolsTests(unittest.TestCase):
         self.assertNotIn("mcp__cm-services__drive_doc_get", prompt)
 
     def test_contentful_env_and_postmark_templates_grant_exact_disjoint_tools(self) -> None:
-        """New cm-services capabilities from GCF PR #2438/#2439, #2449, #2457.
+        """New cm-services capabilities from GCF PR #2438/#2439, #2449, #2457, #2459.
 
         `contentful-env-read` grants only `contentful_get_environment` and
         `contentful_list_content_types`, `postmark-templates-read` grants
-        only `postmark_list_templates` and `postmark_stats_outbound`, and
-        `postmark-servers-read` grants only `postmark_servers_streams_list`;
-        each is disjoint from every existing cm-services-family grant, in
-        particular from `contentful-read`'s CDA entry tools, and none is a
-        wildcard.
+        only `postmark_list_templates` and `postmark_stats_outbound`,
+        `postmark-servers-read` grants only `postmark_servers_streams_list`,
+        and `aws-lambda-read` grants only `aws_lambda_list` and
+        `aws_lambda_config`; each is disjoint from every existing
+        cm-services-family grant, in particular from `contentful-read`'s
+        CDA entry tools, and none is a wildcard.
         """
         contentful_env = (
             "mcp__cm-services__contentful_get_environment",
@@ -1514,6 +1515,10 @@ class AllowedToolsTests(unittest.TestCase):
             "mcp__cm-services__postmark_stats_outbound",
         )
         postmark_servers = ("mcp__cm-services__postmark_servers_streams_list",)
+        aws_lambda = (
+            "mcp__cm-services__aws_lambda_list",
+            "mcp__cm-services__aws_lambda_config",
+        )
         base = claude.allowed_tools("execute", ())
         self.assertEqual(
             claude.allowed_tools("execute", ("contentful-env-read",)),
@@ -1524,19 +1529,28 @@ class AllowedToolsTests(unittest.TestCase):
         self.assertEqual(
             claude.allowed_tools("execute", ("postmark-servers-read",)),
             base + ("WaitForMcpServers",) + postmark_servers)
-        all_three = claude.allowed_tools(
+        self.assertEqual(
+            claude.allowed_tools("execute", ("aws-lambda-read",)),
+            base + ("WaitForMcpServers",) + aws_lambda)
+        all_four = claude.allowed_tools(
             "execute",
-            ("contentful-env-read", "postmark-templates-read", "postmark-servers-read"),
+            (
+                "contentful-env-read",
+                "postmark-templates-read",
+                "postmark-servers-read",
+                "aws-lambda-read",
+            ),
         )
         self.assertEqual(
-            all_three,
+            all_four,
             base
             + ("WaitForMcpServers",)
             + contentful_env
             + postmark_templates
-            + postmark_servers,
+            + postmark_servers
+            + aws_lambda,
         )
-        for tool in all_three:
+        for tool in all_four:
             self.assertNotRegex(tool, r"__\*$")
         # contentful-read's CDA tools stay untouched by the new environment grant.
         contentful_read = claude.allowed_tools("execute", ("contentful-read",))
@@ -1559,10 +1573,51 @@ class AllowedToolsTests(unittest.TestCase):
         self.assertNotIn(
             "mcp__cm-services__contentful_get_entry", servers_grant
         )
+        # aws-lambda-read is a separate grant over its own disjoint tool set;
+        # no other cm-services-family capability carries either Lambda tool.
+        aws_grant = claude.allowed_tools("execute", ("aws-lambda-read",))
+        for capability in (
+            "asana-read",
+            "drive-read",
+            "gcloud-read",
+            "database-read",
+            "algolia-read",
+            "contentful-read",
+            "contentful-master-read",
+            "contentful-env-read",
+            "postmark-templates-read",
+            "postmark-servers-read",
+            "gateway-read",
+        ):
+            other = claude.allowed_tools("execute", (capability,))
+            self.assertNotIn(
+                "mcp__cm-services__aws_lambda_list", other
+            )
+            self.assertNotIn(
+                "mcp__cm-services__aws_lambda_config", other
+            )
+        # No sanitized-config write, no invoke, no secret-bearing operation.
+        self.assertNotIn(
+            "mcp__cm-services__aws_lambda_invoke", aws_grant
+        )
+        self.assertNotIn(
+            "mcp__cm-services__aws_lambda_update", aws_grant
+        )
+        self.assertNotIn(
+            "mcp__cm-services__aws_lambda_delete", aws_grant
+        )
+        self.assertNotIn(
+            "mcp__cm-services__aws_lambda_environment_variables", aws_grant
+        )
         self.assertEqual(
             claude.allowed_tools(
                 "review",
-                ("contentful-env-read", "postmark-templates-read", "postmark-servers-read"),
+                (
+                    "contentful-env-read",
+                    "postmark-templates-read",
+                    "postmark-servers-read",
+                    "aws-lambda-read",
+                ),
             ),
             (),
         )
@@ -1592,7 +1647,7 @@ class AllowedToolsTests(unittest.TestCase):
         # No unrelated capability's grant carries it, and it is not a wildcard.
         for capability in ("asana-read", "drive-read", "database-read", "algolia-read",
                            "contentful-read", "contentful-master-read", "contentful-env-read",
-                           "postmark-templates-read", "postmark-servers-read", "gateway-read",
+                           "postmark-templates-read", "postmark-servers-read", "aws-lambda-read", "gateway-read",
                            "gitnexus", "codegraph", "shell", "workspace-write", "git-push"):
             self.assertNotIn(singular, claude.allowed_tools("execute", (capability,)))
         # Review mode never receives it, granted or not.

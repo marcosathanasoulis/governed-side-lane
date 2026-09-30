@@ -1987,12 +1987,14 @@ class LaunchCapabilityGateTests(SideLaneTests):
     def test_contentful_env_and_postmark_templates_launch_gate_with_cm_services_evidence(
         self,
     ) -> None:
-        """contentful-env-read and postmark-templates-read gate on cm-services.
+        """contentful-env-read, postmark-templates-read, postmark-servers-read,
+        and aws-lambda-read gate on cm-services.
 
-        Both are new cm-services-family capabilities (the GCF worker's
-        `contentful-env-read` and `postmark-templates-read` grants); each is
-        admitted only when the exact `cm-services` server is registered, and
-        each is rejected before any worktree is created when it is absent.
+        All four are cm-services-family capabilities (the GCF worker's
+        `contentful-env-read`, `postmark-templates-read`, `postmark-servers-read`,
+        and `aws-lambda-read` grants); each is admitted only when the exact
+        `cm-services` server is registered, and each is rejected before any
+        worktree is created when it is absent.
         """
         config = cli.load_config()
         repo = self.repo()
@@ -2000,6 +2002,7 @@ class LaunchCapabilityGateTests(SideLaneTests):
             "contentful-env-read",
             "postmark-templates-read",
             "postmark-servers-read",
+            "aws-lambda-read",
         ):
             with self.subTest(capability=capability):
                 with tempfile.TemporaryDirectory() as home:

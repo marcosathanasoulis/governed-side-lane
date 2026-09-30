@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.57 - 2026-09-30
+
+- Add the `aws-lambda-read` capability with the exact read-only `aws_lambda_list` and `aws_lambda_config` tools (GCF PR #2459). The fixed GCF worker bridge lists configured Lambda functions and returns a sanitized function configuration summary; the worker never receives a raw Lambda configuration object, no secret-bearing operation or write is admitted, and every other cm-services-family capability stays unchanged.
+
 ## 0.4.56 - 2026-09-29
 
 - Add the `postmark-servers-read` capability with the exact read-only `postmark_servers_streams_list` tool, and add the exact read-only `postmark_stats_outbound` tool to the existing `postmark-templates-read` capability (GCF PR #2457). The fixed GCF proxy lists the configured Postmark server's message streams and returns outbound send statistics; no direct Postmark API credential is exposed, no wildcard is admitted, and every other Contentful/Postmark/Gateway capability stays unchanged.

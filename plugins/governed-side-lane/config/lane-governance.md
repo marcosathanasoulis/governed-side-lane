@@ -209,7 +209,19 @@ backup is allowed, but no alternate GLM model is.
   send, edit, or delete authority, and the two Postmark capabilities
   remain separate grants over disjoint tool sets on the same account — no
   server-wide wildcard and no direct Postmark API credential is exposed
-  to the worker. With the `gateway-read` capability, that same
+  to the worker. With the `aws-lambda-read` capability, that same
+  server may be called only through its read-only AWS Lambda tools
+  `aws_lambda_list` and `aws_lambda_config` (exact tool IDs
+  `mcp__cm-services__aws_lambda_list` and
+  `mcp__cm-services__aws_lambda_config`), mapped to the configured AWS
+  account; the first enumerates the configured Lambda functions and the
+  second returns a sanitized function configuration summary with
+  environment-variable values, role secrets, and other sensitive material
+  redacted, granting no invoke, update, delete, or any other write or
+  secret-bearing operation, and the capability remains a separate grant
+  over its own disjoint tool set on the same account — no server-wide
+  wildcard and no direct AWS API credential is exposed to the worker.
+  With the `gateway-read` capability, that same
   server may be called only through its read-only Gateway run tools
   `gateway_run_status` and `gateway_run_report` (exact tool IDs
   `mcp__cm-services__gateway_run_status` and
@@ -872,6 +884,12 @@ from host registration files, never values.
 
 - `WaitForMcpServers`
 - `mcp__cm-services__postmark_servers_streams_list`
+
+### aws-lambda-read
+
+- `WaitForMcpServers`
+- `mcp__cm-services__aws_lambda_list`
+- `mcp__cm-services__aws_lambda_config`
 
 ### gateway-read
 

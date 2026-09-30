@@ -296,6 +296,7 @@ class ToolPolicyTests(unittest.TestCase):
             | set(policy.allowed["contentful-env-read"])
             | set(policy.allowed["postmark-templates-read"])
             | set(policy.allowed["postmark-servers-read"])
+            | set(policy.allowed["aws-lambda-read"])
             | set(policy.allowed["gateway-read"])
         )
         for rules in list(policy.allowed.values()) + list(policy.denied.values()) + [policy.always]:
@@ -379,6 +380,14 @@ class ToolPolicyTests(unittest.TestCase):
             (
                 "WaitForMcpServers",
                 "mcp__cm-services__postmark_servers_streams_list",
+            ),
+        )
+        self.assertEqual(
+            policy.allowed["aws-lambda-read"],
+            (
+                "WaitForMcpServers",
+                "mcp__cm-services__aws_lambda_list",
+                "mcp__cm-services__aws_lambda_config",
             ),
         )
         # contentful-env-read shares the contentful-new-app account with
@@ -506,6 +515,51 @@ class ToolPolicyTests(unittest.TestCase):
         prompt = " ".join(lane_system_prompt("execute", Path("/tmp/repo")).split())
         self.assertIn("postmark_stats_outbound", prompt)
         self.assertIn("postmark_list_templates", prompt)
+
+    def test_aws_lambda_read_grants_exact_disjoint_listing_and_config_tools(self) -> None:
+        """The ``aws-lambda-read`` capability grants two sanitized read tools.
+
+        GCF PR #2459 adds ``aws_lambda_list`` and ``aws_lambda_config`` for
+        the configured AWS account; the canonical prose names the capability
+        alongside the other cm-services reads, and the allowlist entry is
+        exactly enumerated with no wildcard and no direct AWS API credential
+        — the sanitized ``aws_lambda_config`` returns summary fields with
+        environment-variable values, role secrets, and other sensitive
+        material redacted, and no invoke, update, delete, or other write
+        is admitted.
+        """
+        from side_lane.governance import tool_policy
+
+        rules = tool_policy().allowed["aws-lambda-read"]
+        self.assertIn("mcp__cm-services__aws_lambda_list", rules)
+        self.assertIn("mcp__cm-services__aws_lambda_config", rules)
+        self.assertFalse(any(rule.endswith("*") for rule in rules))
+        prompt = " ".join(lane_system_prompt("execute", Path("/tmp/repo")).split())
+        self.assertIn("aws_lambda_list", prompt)
+        self.assertIn("aws_lambda_config", prompt)
+        self.assertIn("aws-lambda-read", prompt)
+        # The capability is its own disjoint grant; no other cm-services
+        # capability carries either Lambda tool, and no wildcard is admitted.
+        for capability in (
+            "asana-read",
+            "drive-read",
+            "gcloud-read",
+            "database-read",
+            "algolia-read",
+            "contentful-read",
+            "contentful-master-read",
+            "contentful-env-read",
+            "postmark-templates-read",
+            "postmark-servers-read",
+            "gateway-read",
+        ):
+            other = set(tool_policy().allowed[capability])
+            self.assertNotIn(
+                "mcp__cm-services__aws_lambda_list", other
+            )
+            self.assertNotIn(
+                "mcp__cm-services__aws_lambda_config", other
+            )
 
     def test_gateway_read_names_no_deployment_url_or_credential(self) -> None:
         """The Gateway grant is a capability boundary, not a deployment handle.
