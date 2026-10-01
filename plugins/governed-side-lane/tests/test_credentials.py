@@ -104,6 +104,101 @@ class CredentialTests(unittest.TestCase):
             with self.assertRaisesRegex(credentials.CredentialError, "lookup failed"):
                 credentials.credential_present("service", "Darwin")
 
+    def test_store_credential_rejects_service_outside_allowlist(self) -> None:
+        with self.assertRaisesRegex(credentials.CredentialError, "writable allowlist"):
+            credentials.store_credential("not-allowlisted", "secret", "Darwin")
+        with self.assertRaisesRegex(credentials.CredentialError, "writable allowlist"):
+            credentials.delete_credential("not-allowlisted", "Darwin")
+
+    def test_store_credential_rejects_empty_secret(self) -> None:
+        with self.assertRaisesRegex(credentials.CredentialError, "non-empty"):
+            credentials.store_credential("governed-side-lane-openrouter", "   ", "Darwin")
+
+    def test_macos_store_pipes_secret_through_stdin_never_argv(self) -> None:
+        completed = mock.Mock(returncode=0)
+        with mock.patch("side_lane.credentials.subprocess.run", return_value=completed) as run:
+            credentials.store_credential(
+                "governed-side-lane-openrouter", "sk-super-secret-value", "Darwin"
+            )
+        call = run.call_args
+        self.assertEqual(call.args[0], ["security", "-i"])
+        self.assertNotIn("sk-super-secret-value", call.args[0])
+        self.assertIn("sk-super-secret-value", call.kwargs["input"])
+        self.assertIn("add-generic-password", call.kwargs["input"])
+
+    def test_macos_store_escapes_quotes_and_backslashes(self) -> None:
+        completed = mock.Mock(returncode=0)
+        with mock.patch("side_lane.credentials.subprocess.run", return_value=completed) as run:
+            credentials.store_credential(
+                "governed-side-lane-openrouter", 'weird"value\\here', "Darwin"
+            )
+        script = run.call_args.kwargs["input"]
+        self.assertIn('weird\\"value\\\\here', script)
+
+    def test_macos_store_failure_raises(self) -> None:
+        with mock.patch(
+            "side_lane.credentials.subprocess.run",
+            return_value=mock.Mock(returncode=1, stderr="nope"),
+        ):
+            with self.assertRaisesRegex(credentials.CredentialError, "could not store"):
+                credentials.store_credential("governed-side-lane-glm", "secret", "Darwin")
+
+    def test_macos_delete_is_idempotent(self) -> None:
+        with mock.patch(
+            "side_lane.credentials.subprocess.run", return_value=mock.Mock(returncode=44)
+        ) as run:
+            credentials.delete_credential("governed-side-lane-glm", "Darwin")
+        run.assert_called_once()
+
+    def test_windows_store_invokes_credential_script_via_stdin(self) -> None:
+        completed = mock.Mock(returncode=0)
+        with mock.patch("side_lane.credentials.subprocess.run", return_value=completed) as run:
+            credentials.store_credential(
+                "governed-side-lane-openrouter", "sk-secret", "Windows"
+            )
+        call = run.call_args
+        self.assertNotIn("sk-secret", call.args[0])
+        self.assertIn("sk-secret", call.kwargs["input"])
+        self.assertIn("set", call.args[0])
+        self.assertIn("governed-side-lane-openrouter", call.args[0])
+
+    def test_windows_delete_invokes_credential_script(self) -> None:
+        completed = mock.Mock(returncode=0)
+        with mock.patch("side_lane.credentials.subprocess.run", return_value=completed) as run:
+            credentials.delete_credential("governed-side-lane-openrouter", "Windows")
+        self.assertIn("delete", run.call_args.args[0])
+
+    def test_linux_store_without_secret_tool_refuses_with_no_plaintext_fallback(self) -> None:
+        with mock.patch("side_lane.credentials.shutil.which", return_value=None):
+            with self.assertRaisesRegex(credentials.CredentialError, "no Secret Service"):
+                credentials.store_credential(
+                    "governed-side-lane-openrouter", "secret", "Linux"
+                )
+
+    def test_linux_store_pipes_secret_through_stdin_via_secret_tool(self) -> None:
+        completed = mock.Mock(returncode=0)
+        with mock.patch("side_lane.credentials.shutil.which", return_value="/usr/bin/secret-tool"):
+            with mock.patch("side_lane.credentials.subprocess.run", return_value=completed) as run:
+                credentials.store_credential(
+                    "governed-side-lane-openrouter", "sk-linux-secret", "Linux"
+                )
+        call = run.call_args
+        self.assertNotIn("sk-linux-secret", call.args[0])
+        self.assertEqual(call.kwargs["input"], "sk-linux-secret\n")
+        self.assertEqual(call.args[0][:2], ["secret-tool", "store"])
+
+    def test_linux_delete_treats_not_found_as_success(self) -> None:
+        with mock.patch("side_lane.credentials.shutil.which", return_value="/usr/bin/secret-tool"):
+            with mock.patch(
+                "side_lane.credentials.subprocess.run",
+                return_value=mock.Mock(returncode=1),
+            ):
+                credentials.delete_credential("governed-side-lane-openrouter", "Linux")
+
+    def test_unsupported_platform_refuses_write(self) -> None:
+        with self.assertRaisesRegex(credentials.CredentialError, "supported credential stores"):
+            credentials.store_credential("governed-side-lane-glm", "secret", "Plan9")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.0 - 2026-09-30
+
+- Add a guided setup, `scripts/setup.py`. It detects Claude Code and Codex, links skills only for the hosts present, offers the Prompt it Ask first / Just go choice, and optionally stores an OpenRouter key in the OS credential store: macOS Keychain, Windows Credential Manager, or Linux Secret Service. Setup has no plaintext fallback. `setup.py openrouter-key` runs only the hidden key prompt, and `--non-interactive` and `--check` support scripted use.
+- Add an optional `openrouter` provider. It uses Bearer auth with an empty `ANTHROPIC_API_KEY`, as OpenRouter's Claude Code setup documents. Four exact model slugs are included; all are explicit-only and unqualified until an operator qualification run. A Claude-only or Codex-only install without an OpenRouter key is unaffected.
+- Add an optional per-user usage declaration (`side-lane prefs set-usage --host <h> --state included-oauth|extra-usage|unknown`). `recommend` uses it only for hosts a profile omits. The package never detects account usage.
+- Add the `model-select` skill and `side_lane.model_select` scorer. They rank the user's available routes by expected cost per successful task, using a frozen, de-identified snapshot of selector priors and past advisory decisions plus optional live OpenRouter prices. Unknown prices are never treated as free. An optional advisory (Jev) call runs only with explicit consent and is rechecked by the scorer. The snapshot never learns.
+
+## 0.4.58 - 2026-09-30
+
+- Treat undeclared Claude, Codex, and Devin billing state as unknown during cost-optimized routing instead of assuming included OAuth usage. Explicit host and route declarations continue to price included and extra usage, with route declarations taking precedence.
+
 ## 0.4.57 - 2026-09-30
 
 - Add the `aws-lambda-read` capability with the exact read-only `aws_lambda_list` and `aws_lambda_config` tools (GCF PR #2459). The fixed GCF worker bridge lists configured Lambda functions and returns a sanitized function configuration summary; the worker never receives a raw Lambda configuration object, no secret-bearing operation or write is admitted, and every other cm-services-family capability stays unchanged.

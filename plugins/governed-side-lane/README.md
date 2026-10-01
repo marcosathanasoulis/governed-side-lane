@@ -2,10 +2,29 @@
 
 This self-contained plugin provides the `side-lane` and optional
 `prompt-it-side-lane-routing` skills plus their standard-library Python runner
-and canonical governance/configuration.
+and canonical governance/configuration. It also provides the optional
+`model-select` skill: a frozen, versioned, de-identified snapshot of derived
+model-selection knowledge plus a small public scorer, for choosing the
+cheapest qualified route across whichever hosts (Claude, Codex, or both) and
+optional OpenRouter key a user actually has. It never learns or writes back;
+a new snapshot ships only with a new published package version.
 
 The core skill works without Prompt it or organization-specific configuration.
 It requires Git, Python 3.10+, and at least one signed-in native host CLI.
+
+## Setup
+
+Run `python3 scripts/setup.py` (or `pwsh scripts/install.ps1` on Windows) for a
+guided, interactive install: it detects whichever of Claude Code/Codex are
+present and signed in, links the skill for those hosts, offers to set the
+Prompt it approval mode, offers an optional OpenRouter route (the key is read
+with a hidden prompt and stored in the OS credential store, never echoed or
+logged), and lets you optionally declare per-host plan usage (this package
+never detects live account usage). Every question has a safe default; press
+Enter to keep it. For a scripted install use `--non-interactive` with explicit
+flags, or `setup.py --check` to see the current state and
+`setup.py openrouter-key` to set only the OpenRouter key. See `--help` for the
+full flag list.
 
 Optional model/account and connector setup guidance lives in the public
 [model guide](docs/model-guide.md),

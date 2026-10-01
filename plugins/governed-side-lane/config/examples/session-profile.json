@@ -26,6 +26,10 @@
     }
   ],
   "session_cost_basis": "hypothetical-workload",
+  "host_cost_state": {
+    "codex": "included-oauth",
+    "claude": "extra-usage"
+  },
   "route_spend_state": {},
   "declared_plan_state": {}
 }

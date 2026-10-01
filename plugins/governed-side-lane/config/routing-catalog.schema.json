@@ -12,7 +12,7 @@
       "type": "object",
       "required": ["native_default", "native_override", "glm", "policy"],
       "properties": {
-        "native_default": {"const": "included-oauth"},
+        "native_default": {"const": "unknown"},
         "native_override": {"const": "extra-usage"},
         "glm": {"const": "prepaid-flat-rate"},
         "policy": {"type": "string", "minLength": 1}
@@ -188,7 +188,7 @@
         "auth_method": {"enum": ["oauth", "provider-key"]},
         "billable": {"type": "boolean"},
         "explicit_only": {"type": "boolean"},
-        "model_vendor": {"enum": ["claude", "openai", "glm", "deepseek", "kimi", "minimax", "cognition", "google", "xai", "routed-pool"]},
+        "model_vendor": {"enum": ["claude", "openai", "glm", "deepseek", "kimi", "minimax", "cognition", "google", "xai", "openrouter", "routed-pool"]},
         "model": {"type": "string", "minLength": 1},
         "host": {"enum": ["codex", "claude", "devin"]},
         "mode": {"enum": ["review", "execute"]},

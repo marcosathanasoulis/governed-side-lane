@@ -136,6 +136,53 @@
       "routes": {
         "execute": {"claude": {"protocol": "anthropic-compatible", "models": ["glm-5.3"]}}
       }
+    },
+    "openrouter": {
+      "gateway": "openrouter",
+      "auth_method": "provider-key",
+      "credential_service": "governed-side-lane-openrouter",
+      "base_url": "https://openrouter.ai/api",
+      "billable": true,
+      "explicit_only": true,
+      "routes": {
+        "execute": {
+          "claude": {
+            "protocol": "anthropic-compatible",
+            "models": [
+              "anthropic/claude-sonnet-5",
+              "z-ai/glm-4.6",
+              "deepseek/deepseek-v3.2",
+              "moonshotai/kimi-k2"
+            ],
+            "model_configs": {
+              "anthropic/claude-sonnet-5": {
+                "identity_contract": {"requested_model": "anthropic/claude-sonnet-5", "resolved_model": "anthropic/claude-sonnet-5", "settings_precedence": "verified"},
+                "qualification": {"verified": false, "kind": "transport-and-local-adapter", "pending": "operator qualification smoke on this exact model slug"},
+                "execution_location": "local-user-workspace",
+                "timeout_seconds": 2700
+              },
+              "z-ai/glm-4.6": {
+                "identity_contract": {"requested_model": "z-ai/glm-4.6", "resolved_model": "z-ai/glm-4.6", "settings_precedence": "verified"},
+                "qualification": {"verified": false, "kind": "transport-and-local-adapter", "pending": "operator qualification smoke on this exact model slug"},
+                "execution_location": "local-user-workspace",
+                "timeout_seconds": 2700
+              },
+              "deepseek/deepseek-v3.2": {
+                "identity_contract": {"requested_model": "deepseek/deepseek-v3.2", "resolved_model": "deepseek/deepseek-v3.2", "settings_precedence": "verified"},
+                "qualification": {"verified": false, "kind": "transport-and-local-adapter", "pending": "operator qualification smoke on this exact model slug"},
+                "execution_location": "local-user-workspace",
+                "timeout_seconds": 2700
+              },
+              "moonshotai/kimi-k2": {
+                "identity_contract": {"requested_model": "moonshotai/kimi-k2", "resolved_model": "moonshotai/kimi-k2", "settings_precedence": "verified"},
+                "qualification": {"verified": false, "kind": "transport-and-local-adapter", "pending": "operator qualification smoke on this exact model slug"},
+                "execution_location": "local-user-workspace",
+                "timeout_seconds": 2700
+              }
+            }
+          }
+        }
+      }
     }
   },
   "capabilities": ["workspace-write", "shell", "git-push", "gitnexus", "codegraph", "slack-read", "aws-read", "omniroute-read", "asana-read", "drive-read", "gcloud-read", "secret-use", "database-read", "algolia-read", "contentful-read", "contentful-master-read", "contentful-env-read", "postmark-templates-read", "postmark-servers-read", "aws-lambda-read", "gateway-read", "workflow-write", "playwright"]

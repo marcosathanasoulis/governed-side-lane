@@ -84,9 +84,15 @@ source, observation time, and reason. A configured GLM route may appear in
 inventory before the user enables it; exclude it from staffing until explicit
 GLM permission exists. Authentication alone does not establish cost: native
 Devin can offer metered Gemini/Grok models. Use effective model billing metadata.
-Other native OAuth routes default to included subscription usage.
-When the user says a host is on extra usage, record only that statement (for
-example Claude `extra-usage`, Codex `included-oauth`).
+A host or route the user has not declared a cost state for is `unknown`, never
+assumed included subscription usage; `unknown` excludes a route from
+cost-optimized ranking rather than pricing it at zero.
+When the user says a host is on extra usage or included usage, record only
+that statement as the declared per-host state (for example Claude
+`extra-usage`, Codex `included-oauth`). When a Devin (or other multi-model)
+host has routes on different billing, record the narrower per-route state
+(`route_spend_state`) instead of the host-wide state; the per-route
+declaration always takes precedence over the host-wide one.
 
 This discovery is deterministic and presence-only. It must never read or infer
 provider quotas, consumer-product usage, billing, API keys, or credential

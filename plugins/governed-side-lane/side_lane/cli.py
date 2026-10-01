@@ -15,7 +15,7 @@ import subprocess
 import sys
 from typing import Any, Mapping, Sequence
 
-from side_lane import evaluation, report_stop_hook, routing, selector_policy
+from side_lane import evaluation, preferences, report_stop_hook, routing, selector_policy
 from side_lane.auth import AuthError, auth_status, require_native_oauth
 from side_lane.capabilities import (
     CODEX_CONNECTOR_NAME_CAPABILITIES,
@@ -615,6 +615,17 @@ def make_parser() -> argparse.ArgumentParser:
     )
     evaluate = sub.add_parser("evaluate", allow_abbrev=False)
     evaluate.add_argument("--input", required=True)
+    prefs = sub.add_parser("prefs", allow_abbrev=False)
+    prefs_sub = prefs.add_subparsers(dest="prefs_command", required=True)
+    prefs_show = prefs_sub.add_parser("show", allow_abbrev=False)
+    prefs_show.add_argument("--json", action="store_true")
+    prefs_set_usage = prefs_sub.add_parser("set-usage", allow_abbrev=False)
+    prefs_set_usage.add_argument(
+        "--host", choices=sorted(preferences.SUPPORTED_HOSTS), required=True
+    )
+    prefs_set_usage.add_argument(
+        "--state", choices=sorted(preferences.SUPPORTED_STATES), required=True
+    )
     run = sub.add_parser("run", allow_abbrev=False)
     run.add_argument("--host", choices=("codex", "claude", "devin"), required=True)
     run.add_argument("--mode", choices=("review", "execute"), default="review")
@@ -1192,6 +1203,18 @@ def _recommend(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
             },
         }
     )
+    # A host the profile omits falls back to this developer's own saved
+    # declaration (public package: no usage detection, so this is the user's
+    # own optional statement); a host the profile sets explicitly always wins.
+    # A malformed field is left untouched so validation still rejects it.
+    explicit_cost_state = profile.get("host_cost_state", {})
+    if isinstance(explicit_cost_state, Mapping) and all(
+        isinstance(host, str) and isinstance(state, str)
+        for host, state in explicit_cost_state.items()
+    ):
+        normalized["host_cost_state"] = preferences.merge_host_cost_state(
+            explicit_cost_state
+        )
     policy_snapshots = load_routed_policy_snapshots(args)
     catalog = routing.load_catalog()
     collection_evidence: list[dict[str, Any]] = []
@@ -4666,6 +4689,21 @@ def run(argv: Sequence[str] | None = None) -> int:
         return _recommend(args, config)
     if args.command == "evaluate":
         return _evaluate(args.input)
+    if args.command == "prefs":
+        if args.prefs_command == "show":
+            saved = preferences.load_preferences()
+            print(
+                json.dumps(saved, sort_keys=True)
+                if args.json
+                else "\n".join(f"{host}\t{state}" for host, state in sorted(saved.items()))
+                or "(no declared usage preferences)"
+            )
+            return 0
+        if args.prefs_command == "set-usage":
+            preferences.save_usage(args.host, args.state)
+            print(f"{args.host}\t{args.state}")
+            return 0
+        raise SideLaneError(f"unknown prefs command: {args.prefs_command}")
     repo = validate_governance(args.repo)
     # Validated before any worktree, credential or host executable is touched,
     # so an unsafe or unusable read root fails the run before it can leave a
@@ -4735,6 +4773,7 @@ def main() -> None:
         DevinAdapterError,
         evaluation.EvaluationError,
         routing.RoutingError,
+        preferences.PreferencesError,
     ) as exc:
         print(f"side-lane: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc

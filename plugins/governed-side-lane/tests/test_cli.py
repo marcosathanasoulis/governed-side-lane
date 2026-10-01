@@ -127,7 +127,7 @@ class SideLaneTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(cli.SideLaneError, "unknown provider"):
             cli.select_route(
-                config, "codex", "execute", "openrouter", "openai/gpt-5.6-terra"
+                config, "codex", "execute", "not-a-configured-provider", "openai/gpt-5.6-terra"
             )
 
     def test_config_requires_schema_three(self) -> None:

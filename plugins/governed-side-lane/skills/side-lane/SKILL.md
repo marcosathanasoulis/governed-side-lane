@@ -217,6 +217,21 @@ Claude Code, and side lanes, follow the installed pointer to
 `config/agent-context.md`. Host-private memory and connector sessions are hints,
 not synchronized authoritative project memory.
 
+## First run
+
+If `python3 <resolved package>/scripts/setup.py --check` reports the package
+unconfigured (no present host linked, or `--check` exits nonzero), ask the
+user the setup questions inline instead of pointing them at a terminal for
+everything: which hosts to link, the Prompt it approval mode (Ask first or
+Just go), and whether to declare per-host plan usage. Run the non-secret
+steps for them directly (`setup.py --non-interactive --hosts ... --prompt-it-mode
+... --usage host=state`); no detection happens in this public package, so a
+usage declaration is always the user's own optional statement, never inferred.
+For the OpenRouter key, never ask for it in chat: tell the user to run
+`python3 <resolved package>/scripts/setup.py openrouter-key` in their own
+terminal, where the prompt is hidden and the value goes straight to the OS
+credential store. Re-run `setup.py --check` afterward and report the result.
+
 ## Execute-lane permissions
 
 Execute-mode Claude-host lanes (native Claude and GLM) receive an explicit

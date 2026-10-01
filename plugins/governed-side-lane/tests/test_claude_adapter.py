@@ -1065,6 +1065,23 @@ class FirstPartyAnthropicKeyRouteTests(unittest.TestCase):
         self.assertEqual(child["ANTHROPIC_AUTH_TOKEN"], "selected")
         self.assertNotIn("ANTHROPIC_API_KEY", child)
 
+    def test_openrouter_gateway_sends_bearer_and_explicit_empty_api_key(self) -> None:
+        openrouter = {"gateway": "openrouter", "auth_method": "provider-key", "billable": True,
+                      "base_url": "https://openrouter.ai/api"}
+        child = claude.build_transport_environment(
+            {"PATH": "/bin", "ANTHROPIC_API_KEY": "inherited"},
+            provider="openrouter", model="anthropic/claude-sonnet-5",
+            provider_config=openrouter,
+            model_config=self.config("anthropic/claude-sonnet-5"),
+            mode="execute", secret="selected")
+        self.assertEqual(child["ANTHROPIC_AUTH_TOKEN"], "selected")
+        # OpenRouter's documented Claude Code setup requires the first-party
+        # key variable to be present but explicitly empty, not merely absent
+        # (which is what every other non-first-party gateway gets).
+        self.assertIn("ANTHROPIC_API_KEY", child)
+        self.assertEqual(child["ANTHROPIC_API_KEY"], "")
+        self.assertEqual(child["ANTHROPIC_BASE_URL"], "https://openrouter.ai/api")
+
     def test_direct_anthropic_without_identity_contract_is_rejected(self) -> None:
         with self.assertRaisesRegex(claude.ClaudeAdapterError, "identity contract"):
             claude.build_transport_environment({}, provider="anthropic", model="claude-opus-5",

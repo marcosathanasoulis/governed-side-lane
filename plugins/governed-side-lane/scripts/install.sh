@@ -30,21 +30,24 @@ context_helper="$repo_root/scripts/context_entrypoint.py"
 prompt_source="$repo_root/skills/prompt-it-side-lane-routing"
 codex_prompt_destination="${CODEX_HOME:-$HOME/.codex}/skills/prompt-it-side-lane-routing"
 claude_prompt_destination="$HOME/.claude/skills/prompt-it-side-lane-routing"
+model_select_source="$repo_root/skills/model-select"
+codex_model_select_destination="${CODEX_HOME:-$HOME/.codex}/skills/model-select"
+claude_model_select_destination="$HOME/.claude/skills/model-select"
 
 sources=("$runner_source")
 destinations=("$runner_destination")
 case "$host" in
   codex)
-    sources+=("$side_lane_source" "$prompt_source")
-    destinations+=("$codex_destination" "$codex_prompt_destination")
+    sources+=("$side_lane_source" "$prompt_source" "$model_select_source")
+    destinations+=("$codex_destination" "$codex_prompt_destination" "$codex_model_select_destination")
     ;;
   claude)
-    sources+=("$side_lane_source" "$prompt_source")
-    destinations+=("$claude_destination" "$claude_prompt_destination")
+    sources+=("$side_lane_source" "$prompt_source" "$model_select_source")
+    destinations+=("$claude_destination" "$claude_prompt_destination" "$claude_model_select_destination")
     ;;
   both)
-    sources+=("$side_lane_source" "$prompt_source" "$side_lane_source" "$prompt_source")
-    destinations+=("$codex_destination" "$codex_prompt_destination" "$claude_destination" "$claude_prompt_destination")
+    sources+=("$side_lane_source" "$prompt_source" "$model_select_source" "$side_lane_source" "$prompt_source" "$model_select_source")
+    destinations+=("$codex_destination" "$codex_prompt_destination" "$codex_model_select_destination" "$claude_destination" "$claude_prompt_destination" "$claude_model_select_destination")
     ;;
 esac
 
@@ -90,16 +93,20 @@ if [[ "$mode" == uninstall ]]; then
     codex)
       remove_if_ours "$side_lane_source" "$codex_destination"
       remove_if_ours "$prompt_source" "$codex_prompt_destination"
+      remove_if_ours "$model_select_source" "$codex_model_select_destination"
       ;;
     claude)
       remove_if_ours "$side_lane_source" "$claude_destination"
       remove_if_ours "$prompt_source" "$claude_prompt_destination"
+      remove_if_ours "$model_select_source" "$claude_model_select_destination"
       ;;
     both)
       remove_if_ours "$side_lane_source" "$codex_destination"
       remove_if_ours "$prompt_source" "$codex_prompt_destination"
+      remove_if_ours "$model_select_source" "$codex_model_select_destination"
       remove_if_ours "$side_lane_source" "$claude_destination"
       remove_if_ours "$prompt_source" "$claude_prompt_destination"
+      remove_if_ours "$model_select_source" "$claude_model_select_destination"
       ;;
   esac
 

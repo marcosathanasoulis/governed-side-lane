@@ -1,0 +1,232 @@
+{
+  "generated_from": {
+    "generated_at": "2026-10-01T02:16:20Z",
+    "method": "Deterministic extraction by the checked-in snapshot builder from the pinned upstream selector commit named in selector_commit, plus this package's own public native-host route inventory. No upstream source code is copied; only model identifiers, capability-support booleans, and a naming-convention quality tier are retained. Prices are not frozen here.",
+    "selector_commit": "ab30e5f274f2c91061ed028eb659600553a74f14"
+  },
+  "jev_decisions": [
+    {
+      "alternatives_considered": [
+        "bytedance/ui-tars-1.5-7b",
+        "openai/gpt-4o-mini",
+        "openai/o3-mini"
+      ],
+      "chosen_model": "qwen/qwen3-coder",
+      "date": "2026-09-27",
+      "outcome": null,
+      "task_family": "general_coding_execution"
+    },
+    {
+      "alternatives_considered": [
+        "qwen/qwen3-coder",
+        "openai/gpt-4o-mini",
+        "openai/o3-mini"
+      ],
+      "chosen_model": "bytedance/ui-tars-1.5-7b",
+      "date": "2026-09-27",
+      "outcome": null,
+      "task_family": "ui_navigation_repair"
+    },
+    {
+      "alternatives_considered": [
+        "qwen/qwen3-coder",
+        "bytedance/ui-tars-1.5-7b",
+        "openai/o3-mini"
+      ],
+      "chosen_model": "openai/gpt-4o-mini",
+      "date": "2026-09-27",
+      "outcome": null,
+      "task_family": "lightweight_high_volume_execution"
+    },
+    {
+      "alternatives_considered": [
+        "qwen/qwen3-coder",
+        "bytedance/ui-tars-1.5-7b",
+        "openai/gpt-4o-mini"
+      ],
+      "chosen_model": "openai/o3-mini",
+      "date": "2026-09-27",
+      "outcome": null,
+      "task_family": "reasoning_heavy_backend_repair"
+    }
+  ],
+  "notes": {
+    "learning": "This snapshot is frozen; it never learns or writes back.",
+    "price_policy": "Prices are fetched live from OpenRouter's public models API at run time, or treated as unknown. Unknown price is never treated as free; included-usage hosts carry a nonzero opportunity cost once a comparable reference price is known.",
+    "scope": "Claude and Codex native hosts plus OpenRouter. Devin and other providers are out of scope for this public skill."
+  },
+  "schema_version": 1,
+  "snapshot_id": "model-select-ab30e5f2-2026-10-01",
+  "task_families": {
+    "general_coding_execution": {
+      "description": "General-purpose coding task execution: read, edit, and test loops needing tool calling and moderate reasoning.",
+      "models": {
+        "claude-fable-5-1": {
+          "capabilities": {
+            "code_edit": true,
+            "long_context": null,
+            "tools": true
+          },
+          "quality_tier": "low",
+          "success_probability": null,
+          "token_multiplier": null
+        },
+        "claude-haiku-4-5-20251001": {
+          "capabilities": {
+            "code_edit": true,
+            "long_context": null,
+            "tools": true
+          },
+          "quality_tier": "low",
+          "success_probability": null,
+          "token_multiplier": null
+        },
+        "claude-opus-5": {
+          "capabilities": {
+            "code_edit": true,
+            "long_context": null,
+            "tools": true
+          },
+          "quality_tier": "high",
+          "success_probability": null,
+          "token_multiplier": null
+        },
+        "claude-sonnet-5": {
+          "capabilities": {
+            "code_edit": true,
+            "long_context": null,
+            "tools": true
+          },
+          "quality_tier": "medium",
+          "success_probability": null,
+          "token_multiplier": null
+        },
+        "gpt-5.5": {
+          "capabilities": {
+            "code_edit": true,
+            "long_context": null,
+            "tools": true
+          },
+          "quality_tier": "medium",
+          "success_probability": null,
+          "token_multiplier": null
+        },
+        "gpt-5.6-luna": {
+          "capabilities": {
+            "code_edit": true,
+            "long_context": null,
+            "tools": true
+          },
+          "quality_tier": "medium",
+          "success_probability": null,
+          "token_multiplier": null
+        },
+        "gpt-5.6-sol": {
+          "capabilities": {
+            "code_edit": true,
+            "long_context": null,
+            "tools": true
+          },
+          "quality_tier": "medium",
+          "success_probability": null,
+          "token_multiplier": null
+        },
+        "gpt-5.6-terra": {
+          "capabilities": {
+            "code_edit": true,
+            "long_context": null,
+            "tools": true
+          },
+          "quality_tier": "medium",
+          "success_probability": null,
+          "token_multiplier": null
+        },
+        "gpt-6-astra": {
+          "capabilities": {
+            "code_edit": true,
+            "long_context": null,
+            "tools": true
+          },
+          "quality_tier": "high",
+          "success_probability": null,
+          "token_multiplier": null
+        },
+        "gpt-6-luna": {
+          "capabilities": {
+            "code_edit": true,
+            "long_context": null,
+            "tools": true
+          },
+          "quality_tier": "high",
+          "success_probability": null,
+          "token_multiplier": null
+        },
+        "gpt-6-sol": {
+          "capabilities": {
+            "code_edit": true,
+            "long_context": null,
+            "tools": true
+          },
+          "quality_tier": "high",
+          "success_probability": null,
+          "token_multiplier": null
+        },
+        "qwen/qwen3-coder": {
+          "capabilities": {
+            "code_edit": true,
+            "long_context": null,
+            "tools": true
+          },
+          "quality_tier": "medium",
+          "success_probability": null,
+          "token_multiplier": null
+        }
+      }
+    },
+    "lightweight_high_volume_execution": {
+      "description": "Cheap, high-volume, low-complexity execution (e.g. small fixes, simple extraction) where unit cost dominates.",
+      "models": {
+        "openai/gpt-4o-mini": {
+          "capabilities": {
+            "code_edit": true,
+            "long_context": null,
+            "tools": true
+          },
+          "quality_tier": "low",
+          "success_probability": null,
+          "token_multiplier": null
+        }
+      }
+    },
+    "reasoning_heavy_backend_repair": {
+      "description": "Backend or logic-heavy repair tasks that benefit from stronger step-by-step reasoning.",
+      "models": {
+        "openai/o3-mini": {
+          "capabilities": {
+            "code_edit": true,
+            "long_context": null,
+            "tools": true
+          },
+          "quality_tier": "medium",
+          "success_probability": null,
+          "token_multiplier": null
+        }
+      }
+    },
+    "ui_navigation_repair": {
+      "description": "UI-focused navigation or small visual repair tasks.",
+      "models": {
+        "bytedance/ui-tars-1.5-7b": {
+          "capabilities": {
+            "code_edit": false,
+            "long_context": null,
+            "tools": false
+          },
+          "quality_tier": "low",
+          "success_probability": null,
+          "token_multiplier": null
+        }
+      }
+    }
+  }
+}

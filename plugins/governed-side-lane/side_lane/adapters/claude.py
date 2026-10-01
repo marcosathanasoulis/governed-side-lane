@@ -77,7 +77,14 @@ FIRST_WAVE_ENDPOINTS = {
     "kimi": "https://api.kimi.com/coding/",
     "minimax": "https://api.minimax.io/anthropic",
     "anthropic": "https://api.anthropic.com",
+    "openrouter": "https://openrouter.ai/api",
 }
+# OpenRouter's documented Claude Code setup (openrouter.ai/docs) requires the
+# first-party key variable to be present but empty, alongside the Bearer
+# ``ANTHROPIC_AUTH_TOKEN`` every non-first-party gateway already receives
+# below; every OpenRouter model is otherwise an ordinary anthropic-compatible
+# Bearer route and needs no other special-casing here.
+OPENROUTER_PROVIDER = "openrouter"
 
 #: The two execute-lane tool profiles.  ``standard`` is the PUBLIC default and
 #: keeps every existing lane's argv byte-identical: the literal per-command
@@ -1504,6 +1511,12 @@ def build_transport_environment(
         child["ANTHROPIC_API_KEY"] = secret
     else:
         child["ANTHROPIC_AUTH_TOKEN"] = secret
+        if provider == OPENROUTER_PROVIDER:
+            # OpenRouter's documented Claude Code integration requires
+            # ANTHROPIC_API_KEY="" explicitly set alongside the Bearer token,
+            # not merely absent; scrub_environment above only ever removes
+            # the inherited value, it never adds this empty one.
+            child["ANTHROPIC_API_KEY"] = ""
     child["ANTHROPIC_BASE_URL"] = _nonempty(provider_config.get("base_url"), "base_url").rstrip("/")
     for name in EXACT_MODEL_ENV_NAMES:
         child[name] = runtime_model

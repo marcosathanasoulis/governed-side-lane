@@ -3,7 +3,7 @@ param(
     [ValidateSet("set", "delete")]
     [string]$Mode,
     [Parameter(Position=1, Mandatory=$true)]
-    [ValidateSet("governed-side-lane-glm")]
+    [ValidateSet("governed-side-lane-glm", "governed-side-lane-openrouter")]
     [string]$Service
 )
 

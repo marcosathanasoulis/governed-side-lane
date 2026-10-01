@@ -7,10 +7,10 @@
     "evidence": 180
   },
   "cost_contexts": {
-    "native_default": "included-oauth",
+    "native_default": "unknown",
     "native_override": "extra-usage",
     "glm": "prepaid-flat-rate",
-    "policy": "Zero incremental cost ranks first only after exact worker-host and task-relative capability gates. Live account state is user-declared, never inspected."
+    "policy": "Undeclared native billing state is unknown. Explicit included or extra usage is compared only after exact worker-host and task-relative capability gates. Live account state is user-declared, never inspected."
   },
   "evidence_policy": {
     "hard_gates": [
@@ -678,6 +678,94 @@
         "basis": "external-billable",
         "verified_on": "2026-09-18",
         "source": "rate_cards.anthropic-api-list-price-usd-2026-09-18"
+      },
+      "execution_location": "local-user-workspace"
+    },
+    {
+      "id": "claude-execute-openrouter-anthropic-claude-sonnet-5",
+      "provider": "openrouter",
+      "gateway": "openrouter",
+      "auth_method": "provider-key",
+      "billable": true,
+      "explicit_only": true,
+      "model_vendor": "openrouter",
+      "model": "anthropic/claude-sonnet-5",
+      "host": "claude",
+      "mode": "execute",
+      "state": "discoverable",
+      "execution_allowlisted": false,
+      "allowlist_ref": "config/models.json#providers.openrouter.routes.execute.claude",
+      "protocol": "anthropic-compatible",
+      "cost_model": {
+        "basis": "external-billable",
+        "verified_on": "2026-09-30",
+        "source": "OpenRouter publishes per-model pricing; this route's price has not yet been captured into this catalog snapshot and the model is unqualified until an operator records a qualification smoke (side_lane.qualification)."
+      },
+      "execution_location": "local-user-workspace"
+    },
+    {
+      "id": "claude-execute-openrouter-z-ai-glm-4-6",
+      "provider": "openrouter",
+      "gateway": "openrouter",
+      "auth_method": "provider-key",
+      "billable": true,
+      "explicit_only": true,
+      "model_vendor": "openrouter",
+      "model": "z-ai/glm-4.6",
+      "host": "claude",
+      "mode": "execute",
+      "state": "discoverable",
+      "execution_allowlisted": false,
+      "allowlist_ref": "config/models.json#providers.openrouter.routes.execute.claude",
+      "protocol": "anthropic-compatible",
+      "cost_model": {
+        "basis": "external-billable",
+        "verified_on": "2026-09-30",
+        "source": "OpenRouter publishes per-model pricing; this route's price has not yet been captured into this catalog snapshot and the model is unqualified until an operator records a qualification smoke (side_lane.qualification)."
+      },
+      "execution_location": "local-user-workspace"
+    },
+    {
+      "id": "claude-execute-openrouter-deepseek-deepseek-v3-2",
+      "provider": "openrouter",
+      "gateway": "openrouter",
+      "auth_method": "provider-key",
+      "billable": true,
+      "explicit_only": true,
+      "model_vendor": "openrouter",
+      "model": "deepseek/deepseek-v3.2",
+      "host": "claude",
+      "mode": "execute",
+      "state": "discoverable",
+      "execution_allowlisted": false,
+      "allowlist_ref": "config/models.json#providers.openrouter.routes.execute.claude",
+      "protocol": "anthropic-compatible",
+      "cost_model": {
+        "basis": "external-billable",
+        "verified_on": "2026-09-30",
+        "source": "OpenRouter publishes per-model pricing; this route's price has not yet been captured into this catalog snapshot and the model is unqualified until an operator records a qualification smoke (side_lane.qualification)."
+      },
+      "execution_location": "local-user-workspace"
+    },
+    {
+      "id": "claude-execute-openrouter-moonshotai-kimi-k2",
+      "provider": "openrouter",
+      "gateway": "openrouter",
+      "auth_method": "provider-key",
+      "billable": true,
+      "explicit_only": true,
+      "model_vendor": "openrouter",
+      "model": "moonshotai/kimi-k2",
+      "host": "claude",
+      "mode": "execute",
+      "state": "discoverable",
+      "execution_allowlisted": false,
+      "allowlist_ref": "config/models.json#providers.openrouter.routes.execute.claude",
+      "protocol": "anthropic-compatible",
+      "cost_model": {
+        "basis": "external-billable",
+        "verified_on": "2026-09-30",
+        "source": "OpenRouter publishes per-model pricing; this route's price has not yet been captured into this catalog snapshot and the model is unqualified until an operator records a qualification smoke (side_lane.qualification)."
       },
       "execution_location": "local-user-workspace"
     }

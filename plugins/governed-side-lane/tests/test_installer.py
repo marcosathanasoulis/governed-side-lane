@@ -49,8 +49,10 @@ class InstallerTests(unittest.TestCase):
                 home / ".local/bin/side-lane",
                 home / ".codex/skills/side-lane",
                 home / ".codex/skills/prompt-it-side-lane-routing",
+                home / ".codex/skills/model-select",
                 home / ".claude/skills/side-lane",
                 home / ".claude/skills/prompt-it-side-lane-routing",
+                home / ".claude/skills/model-select",
             )
             self.assertTrue(all(path.is_symlink() for path in destinations))
             checked = self.run_installer("check", home, env)
@@ -80,16 +82,20 @@ class InstallerTests(unittest.TestCase):
             runner = home / ".local/bin/side-lane"
             codex_skill = home / ".codex/skills/side-lane"
             codex_prompt = home / ".codex/skills/prompt-it-side-lane-routing"
+            codex_model_select = home / ".codex/skills/model-select"
             claude_skill = home / ".claude/skills/side-lane"
             claude_prompt = home / ".claude/skills/prompt-it-side-lane-routing"
+            claude_model_select = home / ".claude/skills/model-select"
 
             codex_install = self.run_installer("install", home, env, "codex")
             self.assertEqual(codex_install.returncode, 0, codex_install.stderr)
             self.assertTrue(runner.is_symlink())
             self.assertTrue(codex_skill.is_symlink())
             self.assertTrue(codex_prompt.is_symlink())
+            self.assertTrue(codex_model_select.is_symlink())
             self.assertFalse(claude_skill.exists())
             self.assertFalse(claude_prompt.exists())
+            self.assertFalse(claude_model_select.exists())
             self.assertEqual(
                 self.run_installer("check", home, env, "codex").returncode, 0
             )
@@ -98,14 +104,17 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(claude_install.returncode, 0, claude_install.stderr)
             self.assertTrue(claude_skill.is_symlink())
             self.assertTrue(claude_prompt.is_symlink())
+            self.assertTrue(claude_model_select.is_symlink())
 
             self.assertEqual(
                 self.run_installer("uninstall", home, env, "codex").returncode, 0
             )
             self.assertFalse(codex_skill.exists())
             self.assertFalse(codex_prompt.exists())
+            self.assertFalse(codex_model_select.exists())
             self.assertTrue(claude_skill.is_symlink())
             self.assertTrue(claude_prompt.is_symlink())
+            self.assertTrue(claude_model_select.is_symlink())
             self.assertTrue(runner.is_symlink())
 
             self.assertEqual(
@@ -114,6 +123,7 @@ class InstallerTests(unittest.TestCase):
             )
             self.assertFalse(claude_skill.exists())
             self.assertFalse(claude_prompt.exists())
+            self.assertFalse(claude_model_select.exists())
             self.assertFalse(runner.exists())
 
 

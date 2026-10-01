@@ -63,6 +63,67 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(best["winner"]["gateway"], "native-claude")
         self.assertTrue(best["winner"]["connector_identity_changed"])
 
+    def test_cost_optimized_does_not_assume_unspecified_native_usage_is_included(self) -> None:
+        result = routing.recommend(
+            self.catalog, self.profile(policy="cost-optimized"),
+            runtime_allowlist=self.allowlist, credential_present_routes=self.allowlist,
+            today=TODAY,
+        )
+        self.assertIsNone(result["winner"])
+        for route_id in ("terra", "sol", "fable"):
+            excluded = next(item for item in result["exclusions"] if item["route_id"] == route_id)
+            self.assertIn("cost-basis-missing-or-stale", excluded["reasons"])
+
+    def test_catalog_rejects_metadata_that_advertises_included_default(self) -> None:
+        catalog = copy.deepcopy(self.catalog)
+        catalog["cost_contexts"] = {
+            "native_default": "unknown", "native_override": "extra-usage",
+            "glm": "prepaid-flat-rate", "policy": "requester-declared",
+        }
+        routing.validate_catalog(catalog)
+        catalog["cost_contexts"]["native_default"] = "included-oauth"
+        with self.assertRaises(routing.RoutingError):
+            routing.validate_catalog(catalog)
+
+    def test_explicit_included_and_extra_usage_states_change_cost_ranking(self) -> None:
+        included_codex = routing.recommend(
+            self.catalog,
+            self.profile(policy="cost-optimized", host_cost_state={"codex": "included-oauth", "claude": "extra-usage"}),
+            runtime_allowlist=self.allowlist, credential_present_routes=self.allowlist,
+            today=TODAY,
+        )
+        self.assertEqual(included_codex["winner"]["route_id"], "sol")
+        self.assertEqual(included_codex["winner"]["estimated_cost"]["value"], 0)
+        included_claude = routing.recommend(
+            self.catalog,
+            self.profile(policy="cost-optimized", host_cost_state={"codex": "extra-usage", "claude": "included-oauth"}),
+            runtime_allowlist=self.allowlist, credential_present_routes=self.allowlist,
+            today=TODAY,
+        )
+        self.assertEqual(included_claude["winner"]["route_id"], "fable")
+        self.assertEqual(included_claude["winner"]["estimated_cost"]["value"], 0)
+
+    def test_devin_route_override_takes_precedence_over_host_extra_usage(self) -> None:
+        catalog = copy.deepcopy(self.catalog)
+        devin = route("devin-included", "swe-2-medium", 95, 4, provider="devin", host="devin", vendor="cognition")
+        devin.update(gateway="native-devin", protocol="native-devin")
+        catalog["routes"].append(devin)
+        allowlist = self.allowlist | frozenset({("devin", "devin", "execute", "swe-2-medium")})
+        profile = self.profile(
+            policy="cost-optimized",
+            host_cost_state={"devin": "extra-usage"},
+            route_spend_state={"devin-included": "included-oauth"},
+        )
+        profile["host_capabilities"]["devin"] = {
+            "available_connectors": [], "available_capabilities": ["workspace-write", "gitnexus"]
+        }
+        result = routing.recommend(
+            catalog, profile, runtime_allowlist=allowlist,
+            credential_present_routes=allowlist, today=TODAY,
+        )
+        self.assertEqual(result["winner"]["route_id"], "devin-included")
+        self.assertEqual(result["winner"]["estimated_cost"]["host_cost_state"], "included-oauth")
+
     def test_glm_requires_opt_in_then_flat_rate_can_rank_cheapest(self) -> None:
         result = routing.recommend(self.catalog, self.profile(prefer="glm"), runtime_allowlist=self.allowlist, credential_present_routes=self.allowlist, today=TODAY)
         self.assertIsNone(result["winner"])

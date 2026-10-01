@@ -22,16 +22,21 @@ $ContextHelper = Join-Path $RepoRoot "scripts\context_entrypoint.py"
 $PromptSource = Join-Path $RepoRoot "skills\prompt-it-side-lane-routing"
 $CodexPromptDestination = Join-Path $UserHome ".codex\skills\prompt-it-side-lane-routing"
 $ClaudePromptDestination = Join-Path $UserHome ".claude\skills\prompt-it-side-lane-routing"
+$ModelSelectSource = Join-Path $RepoRoot "skills\model-select"
+$CodexModelSelectDestination = Join-Path $UserHome ".codex\skills\model-select"
+$ClaudeModelSelectDestination = Join-Path $UserHome ".claude\skills\model-select"
 
 function Managed-Items {
     $items = @(@{ Source = (Join-Path $RepoRoot "bin\side-lane"); Destination = $RunnerDestination; Kind = "runner" })
     if ($HostName -eq "codex" -or $HostName -eq "both") {
         $items += @{ Source = $SideLaneSource; Destination = $CodexDestination; Kind = "codex" }
         $items += @{ Source = $PromptSource; Destination = $CodexPromptDestination; Kind = "prompt-it-codex" }
+        $items += @{ Source = $ModelSelectSource; Destination = $CodexModelSelectDestination; Kind = "model-select-codex" }
     }
     if ($HostName -eq "claude" -or $HostName -eq "both") {
         $items += @{ Source = $SideLaneSource; Destination = $ClaudeDestination; Kind = "claude" }
         $items += @{ Source = $PromptSource; Destination = $ClaudePromptDestination; Kind = "prompt-it-claude" }
+        $items += @{ Source = $ModelSelectSource; Destination = $ClaudeModelSelectDestination; Kind = "model-select-claude" }
     }
     return $items
 }

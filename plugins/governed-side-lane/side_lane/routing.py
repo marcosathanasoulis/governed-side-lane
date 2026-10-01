@@ -88,7 +88,11 @@ def validate_catalog(catalog: Mapping[str, Any]) -> None:
     _positive_int(limits.get("evidence"), "freshness_days.evidence", allow_zero=False)
     cost_contexts = catalog.get("cost_contexts")
     if cost_contexts is not None:
-        if not isinstance(cost_contexts, Mapping) or cost_contexts.get("native_default") != "included-oauth" or cost_contexts.get("native_override") != "extra-usage" or cost_contexts.get("glm") != "prepaid-flat-rate":
+        # Fail closed: the catalog's declared native default must be
+        # "unknown", matching validate_task_profile's per-host default.
+        # A caller declares actual included or extra usage through
+        # host_cost_state or the narrower route_spend_state.
+        if not isinstance(cost_contexts, Mapping) or cost_contexts.get("native_default") != "unknown" or cost_contexts.get("native_override") != "extra-usage" or cost_contexts.get("glm") != "prepaid-flat-rate":
             raise RoutingError("routing catalog cost_contexts are invalid")
     evidence_policy = catalog.get("evidence_policy")
     if evidence_policy is not None:
@@ -459,7 +463,12 @@ def validate_task_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
     host_cost_state = profile.get("host_cost_state", {})
     if not isinstance(host_cost_state, Mapping):
         raise RoutingError("host_cost_state must be an object")
-    normalized_cost_state = {name: "included-oauth" for name in SUPPORTED_PROTOCOLS}
+    # Fail closed: a host the caller never declared is priced as "unknown",
+    # never assumed "included-oauth". A cost-optimized ranking must never
+    # price a host at zero on the caller's silence — only an explicit
+    # per-host or per-route (route_spend_state) declaration can represent
+    # included or extra usage.
+    normalized_cost_state = {name: "unknown" for name in SUPPORTED_PROTOCOLS}
     for candidate_host, state in host_cost_state.items():
         if candidate_host not in SUPPORTED_PROTOCOLS or state not in SUPPORTED_HOST_COST_STATES:
             raise RoutingError("host_cost_state contains an invalid host or state")
