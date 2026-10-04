@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.1 - 2026-10-04
+
+- Detect the Codex CLI bundled with current ChatGPT desktop builds (`ChatGPT.app/Contents/Resources/codex-cli/bin/codex`) when `codex` is not on `PATH`, so setup and routing find a Codex-only-through-ChatGPT install.
+
 ## 0.6.0 - 2026-10-04
 
 - Add `side-lane auto-route` and `side_lane.auto_route`: one decision for which model runs a task, using only what the user can reach. Order: an explicit pin; a signed-in Claude or Codex host with included usage (its own CLI, no key needed); the OpenRouter Auto Router when a key is stored (metered, with hosts in extra usage excluded from its pool); otherwise blocked with setup steps. Extra usage is never used without per-run authorization.

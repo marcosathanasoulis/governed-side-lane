@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from decimal import Decimal
 from pathlib import Path
 
@@ -12,6 +13,26 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from side_lane import model_select as ms  # noqa: E402
+
+
+# Host detection must be decided only by each test's injected ``which``: a
+# developer machine with the ChatGPT or Codex desktop app installed would
+# otherwise "find" Codex through the real bundled-app locations.
+_BUNDLED_PATCH = None
+
+
+def setUpModule():
+    global _BUNDLED_PATCH
+    from side_lane import hosts as _hosts_module
+
+    _BUNDLED_PATCH = mock.patch.object(_hosts_module, "BUNDLED_CODEX_CANDIDATES", ())
+    _BUNDLED_PATCH.start()
+
+
+def tearDownModule():
+    if _BUNDLED_PATCH is not None:
+        _BUNDLED_PATCH.stop()
+
 
 
 FIXTURE_SNAPSHOT = {
@@ -315,7 +336,19 @@ class CliTests(unittest.TestCase):
                 "SIDE_LANE_CODEX_EXECUTABLE": "",
             }
             result = subprocess.run(
-                [sys.executable, "-m", "side_lane.model_select", "--profile", str(profile_path)],
+                [
+                    sys.executable,
+                    "-c",
+                    # Same as ``-m side_lane.model_select`` but with the real
+                    # bundled desktop-app locations cleared, so an installed
+                    # ChatGPT/Codex app on the test machine cannot add Codex.
+                    "import runpy, sys; from side_lane import hosts; "
+                    "hosts.BUNDLED_CODEX_CANDIDATES = (); "
+                    "sys.argv = ['model_select'] + sys.argv[1:]; "
+                    "runpy.run_module('side_lane.model_select', run_name='__main__')",
+                    "--profile",
+                    str(profile_path),
+                ],
                 cwd=str(ROOT),
                 env=env,
                 stdout=subprocess.PIPE,

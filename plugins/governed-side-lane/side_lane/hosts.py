@@ -36,6 +36,9 @@ BUNDLED_CODEX_CANDIDATES: tuple[str, ...] = (
     "~/Applications/Codex.app/Contents/Resources/codex",
     "/Applications/ChatGPT.app/Contents/Resources/codex",
     "~/Applications/ChatGPT.app/Contents/Resources/codex",
+    # Current ChatGPT desktop builds ship the CLI under codex-cli/bin.
+    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+    "~/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
 )
 
 # Helper binaries a host spawns from its own directory. codex-cli 0.152+ launches

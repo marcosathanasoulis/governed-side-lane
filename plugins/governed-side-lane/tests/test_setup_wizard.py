@@ -21,6 +21,26 @@ from side_lane import credentials, preferences  # noqa: E402
 from side_lane.auth import AuthStatus  # noqa: E402
 
 
+# Host detection must be decided only by each test's injected ``which``: a
+# developer machine with the ChatGPT or Codex desktop app installed would
+# otherwise "find" Codex through the real bundled-app locations.
+_BUNDLED_PATCH = None
+
+
+def setUpModule():
+    global _BUNDLED_PATCH
+    from side_lane import hosts as _hosts_module
+
+    _BUNDLED_PATCH = mock.patch.object(_hosts_module, "BUNDLED_CODEX_CANDIDATES", ())
+    _BUNDLED_PATCH.start()
+
+
+def tearDownModule():
+    if _BUNDLED_PATCH is not None:
+        _BUNDLED_PATCH.stop()
+
+
+
 def fake_which(present: dict[str, str]):
     return lambda name: present.get(name)
 

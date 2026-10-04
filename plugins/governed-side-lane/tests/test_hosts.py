@@ -99,3 +99,11 @@ class HostSupportDirTests(unittest.TestCase):
         self.assertEqual(hosts.with_support_dir(env, "/opt/bundle")["PATH"], "/opt/bundle:/usr/bin:/bin")
         self.assertEqual(hosts.with_support_dir({"PATH": "/bin"}, None), {"PATH": "/bin"})
         self.assertEqual(hosts.with_support_dir({}, "/opt/bundle")["PATH"], "/opt/bundle")
+
+
+class ChatGPTBundledCodexPathTests(unittest.TestCase):
+    def test_current_chatgpt_app_codex_cli_location_is_a_candidate(self):
+        self.assertIn(
+            "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+            hosts.BUNDLED_CODEX_CANDIDATES,
+        )
