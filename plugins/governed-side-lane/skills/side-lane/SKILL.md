@@ -232,6 +232,24 @@ For the OpenRouter key, never ask for it in chat: tell the user to run
 terminal, where the prompt is hidden and the value goes straight to the OS
 credential store. Re-run `setup.py --check` afterward and report the result.
 
+## Choosing a model (Auto Router)
+
+Run `side-lane auto-route --task "<one line>"` before staffing. It uses only what
+this user can reach, in this order: an explicit model pin; a signed-in host with
+included usage (Claude or Codex, through its own CLI, no key needed); the
+OpenRouter Auto Router when a key is stored (metered, so only when nothing
+included can run the task, with hosts in extra usage excluded from its pool);
+otherwise `blocked` with the setup steps. Included usage is declared with
+`side-lane prefs set-usage`; an undeclared host is treated as included. The same
+policy backs Prompt it staffing and the `model-select` skill, so improvements
+reach all three. Extra usage is never used unless the user authorizes it for
+the run (`--authorize-extra <host>`). Without OpenRouter there is no router, so a
+`native` decision carries a `staffing` menu: every model the user can run on
+included usage, with strengths, weaknesses and relative cost. The coordinating
+model (already running, no extra spend) picks the cheapest one that fits the
+task from that menu, then confirms it with `--choose <model>`, which refuses
+anything not listed. The `default` is the tier-based fallback.
+
 ## Execute-lane permissions
 
 Execute-mode Claude-host lanes (native Claude and GLM) receive an explicit

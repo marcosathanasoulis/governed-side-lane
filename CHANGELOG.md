@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0 - 2026-10-04
+
+- Add `side-lane auto-route` and `side_lane.auto_route`: one decision for which model runs a task, using only what the user can reach. Order: an explicit pin; a signed-in Claude or Codex host with included usage (its own CLI, no key needed); the OpenRouter Auto Router when a key is stored (metered, with hosts in extra usage excluded from its pool); otherwise blocked with setup steps. Extra usage is never used without per-run authorization.
+- Add `side_lane.auto_route_policy`, a port of the hosted Auto Router policy, and an optional selection probe (about 16 output tokens, task digest only) whose served model must fall inside the requested pool.
+- Without OpenRouter, a native decision carries a staffing menu of each reachable model with strengths, weaknesses and relative cost. The coordinating model picks, and `--choose <model>` refuses anything not listed.
+- Add `config/examples/declared-plans.example.json`. Update the `side-lane` and `model-select` skills. OpenRouter remains optional; a Claude-only or Codex-only install is unaffected.
+
 ## 0.5.0 - 2026-09-30
 
 - Add a guided setup, `scripts/setup.py`. It detects Claude Code and Codex, links skills only for the hosts present, offers the Prompt it Ask first / Just go choice, and optionally stores an OpenRouter key in the OS credential store: macOS Keychain, Windows Credential Manager, or Linux Secret Service. Setup has no plaintext fallback. `setup.py openrouter-key` runs only the hidden key prompt, and `--non-interactive` and `--check` support scripted use.

@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "notes": "Optional. Declare which of your own subscriptions have included usage. Names and patterns only; never a credential. Without this file, side_lane auto-route derives plans from `side_lane prefs` (included-oauth / extra-usage / unknown).",
+  "plans": [
+    {
+      "provider": "claude",
+      "mode": "included",
+      "quota_status": "declared",
+      "expires_at": null,
+      "model_patterns": ["anthropic/*"],
+      "native_handoff": true,
+      "notes": "Claude subscription used through the claude CLI"
+    },
+    {
+      "provider": "codex",
+      "mode": "included",
+      "quota_status": "declared",
+      "expires_at": null,
+      "model_patterns": ["openai/*"],
+      "native_handoff": true,
+      "notes": "ChatGPT/Codex plan used through the codex CLI"
+    }
+  ]
+}

@@ -21,6 +21,19 @@ published package version.
   native host the user has declared to be in extra usage), to decide which
   model to use and confirm the user is fine with the expected cost.
 
+## 0. Start from the Auto Router decision
+
+`side-lane auto-route --task "<one line>"` applies the shared policy first:
+pin, then included OAuth usage on a host the user is signed in to, then the
+OpenRouter Auto Router (metered, only when nothing included can run the task),
+else `blocked` with setup steps. A `native` decision includes a `staffing` menu
+for the coordinator to choose from when there is no OpenRouter. Use this skill's ranking when the user wants to
+compare routes in detail or the decision is `auto` and they want a cost view.
+OpenRouter is optional: without a key everything works on the user's own hosts,
+and you may mention once that a free OpenRouter account (key stored through the
+setup wizard, never pasted into chat) lets the Auto Router pick cheaper models
+when included usage is out.
+
 ## 1. Gather inputs without guessing
 
 - Detect which native hosts are present: call

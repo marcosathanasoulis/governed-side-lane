@@ -15,7 +15,7 @@ import subprocess
 import sys
 from typing import Any, Mapping, Sequence
 
-from side_lane import evaluation, preferences, report_stop_hook, routing, selector_policy
+from side_lane import auto_route, evaluation, preferences, report_stop_hook, routing, selector_policy
 from side_lane.auth import AuthError, auth_status, require_native_oauth
 from side_lane.capabilities import (
     CODEX_CONNECTOR_NAME_CAPABILITIES,
@@ -615,6 +615,8 @@ def make_parser() -> argparse.ArgumentParser:
     )
     evaluate = sub.add_parser("evaluate", allow_abbrev=False)
     evaluate.add_argument("--input", required=True)
+    auto_route_parser = sub.add_parser("auto-route", allow_abbrev=False)
+    auto_route.add_arguments(auto_route_parser)
     prefs = sub.add_parser("prefs", allow_abbrev=False)
     prefs_sub = prefs.add_subparsers(dest="prefs_command", required=True)
     prefs_show = prefs_sub.add_parser("show", allow_abbrev=False)
@@ -4689,6 +4691,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         return _recommend(args, config)
     if args.command == "evaluate":
         return _evaluate(args.input)
+    if args.command == "auto-route":
+        return auto_route.run(args)
     if args.command == "prefs":
         if args.prefs_command == "show":
             saved = preferences.load_preferences()
