@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.3 - 2026-10-05
+
+- A plain `openai/gpt-6-sol` (or `gpt-5.6-sol`) pick from the Auto Router now maps to `swe-2-medium` when Devin is available and nothing else has included usage.
+- Devin counts as available only when its CLI is installed and signed in (`devin auth status`); it is simply absent for everyone else.
+
 ## 0.6.2 - 2026-10-05
 
 - Auto Router: with included usage and an OpenRouter key, the router now picks the best model inside the providers that still have included usage (a probe well under a cent), and a native hand-off or Devin equivalent is returned.

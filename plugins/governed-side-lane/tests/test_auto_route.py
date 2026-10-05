@@ -242,6 +242,19 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual((other["route"]["action"], other["route"]["model"], other["route"]["metered"]),
                          ("devin-default", "swe-2-medium", False))
 
+    def test_plain_gpt_6_sol_maps_to_devin_medium_when_nothing_is_included(self):
+        d = self.extra_with_devin()
+        out = ar.probe_auto_router(d, "x", read_key=lambda: "k",
+                                   transport=lambda b, h: {"model": "openai/gpt-6-sol"})
+        self.assertEqual((out["route"]["action"], out["route"]["model"]), ("devin-equivalent", "swe-2-medium"))
+
+    def test_devin_needs_a_signed_in_cli(self):
+        class Hosts:
+            @staticmethod
+            def resolve_host_executable(name):
+                return None
+        self.assertFalse(ar.devin_ready(Hosts))
+
     def test_no_devin_means_no_devin_equivalent(self):
         d = self.auto_decision()
         out = ar.probe_auto_router(d, "x", read_key=lambda: "k",

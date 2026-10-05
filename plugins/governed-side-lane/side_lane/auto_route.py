@@ -104,6 +104,7 @@ DEVIN_EQUIVALENTS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("anthropic/claude-fable-*", "openai/gpt-6-astra*", "openai/gpt-6.1-sol-pro",
       "openai/gpt-6-sol-pro"), "swe-2-max"),
     (("anthropic/claude-opus-*", "openai/gpt-6.1-sol*"), "swe-2-high"),
+    (("openai/gpt-6-sol", "openai/gpt-5.6-sol"), "swe-2-medium"),
 )
 #: OpenRouter model patterns that belong to each host's plan.
 HOST_MODEL_PATTERNS: Mapping[str, tuple[str, ...]] = {
@@ -184,6 +185,21 @@ class Inventory:
                 raise AutoRouteError(f"unsupported usage state for {host}: {state!r}")
 
 
+def devin_ready(host_lookup=None) -> bool:
+    """Devin counts only when its CLI is installed *and* signed in (``devin auth status``)."""
+    from side_lane import auth
+    from side_lane import hosts as _hosts
+
+    host_lookup = host_lookup or _hosts
+    executable = host_lookup.resolve_host_executable("devin")
+    if executable is None:
+        return False
+    try:
+        return auth.auth_status("devin", executable=str(executable)).state == "ready"
+    except Exception:  # noqa: BLE001 - a broken status call just means Devin is not usable
+        return False
+
+
 def build_inventory(
     *,
     hosts: Mapping[str, bool] | None = None,
@@ -199,7 +215,7 @@ def build_inventory(
         from side_lane import hosts as host_lookup
 
         hosts = dict(model_select.detect_available_hosts())
-        hosts["devin"] = host_lookup.resolve_host_executable("devin") is not None
+        hosts["devin"] = devin_ready(host_lookup)
     if host_usage is None:
         host_usage = preferences.load_preferences()
     if openrouter is None:
