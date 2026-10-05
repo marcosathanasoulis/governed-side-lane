@@ -249,6 +249,18 @@ included usage, with strengths, weaknesses and relative cost. The coordinating
 model (already running, no extra spend) picks the cheapest one that fits the
 task from that menu, then confirms it with `--choose <model>`, which refuses
 anything not listed. The `default` is the tier-based fallback.
+With a key, `side-lane auto-route --probe --task "<one line, de-identified>"`
+rates the task's difficulty (Jev, about $0.00002) and sets the tier that caps the
+model pool; it sends that one line to OpenRouter. With a key and included usage the
+decision carries a `selection` block:
+call `side_lane.auto_route.probe_auto_router` (well under a cent) and the Auto
+Router picks the best model inside the providers that still have included usage;
+the returned `route` is a native hand-off (or a Devin equivalent for a very high
+coding pick when Devin is installed). A host in extra usage is not hidden from
+the Auto Router: its models compete on metered price like any other. Within a
+provider the cheaper model is the default (Claude haiku, sonnet 5.5, opus 5.5;
+Codex luna, sol), and the top model (fable, astra; the same price) is only for
+work that truly needs it.
 
 ## Execute-lane permissions
 

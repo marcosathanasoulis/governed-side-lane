@@ -27,6 +27,7 @@ injected transport; tests never use a real one.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import sys
 import time
@@ -43,70 +44,126 @@ PROBE_DIGEST_MAX_CHARS = 1500
 PROBE_TIMEOUT_SECONDS = 30
 
 #: Local default tier. The hosted policy defaults to ``high``; locally the tier
-#: also picks a native model, and spending Opus-class included capacity on
-#: every task wastes it, so the local default is ``medium``. Request words
-#: ("use the best model", "use the cheapest model") still override it.
+#: also picks a native model, and spending top-tier capacity on every task wastes
+#: it, so the local default is ``medium``. Request words ("use the best model",
+#: "use the cheapest model") still override it.
 LOCAL_DEFAULT_COST_TIER = "medium"
 
-#: Native model ladder per host and cost tier (ids match ``model_select``).
+#: Native model ladder per host and cost tier, ordered by price (OpenRouter
+#: list prices per million tokens in/out, 2026-10-05): Claude haiku 1/5, sonnet
+#: 2/10, opus 4/20, fable 10/50; Codex luna 0.1/0.5, sol 2/10, astra 10/50.
+#: The top model of each host (fable, astra) is only for tasks that really need
+#: it, so it sits at ``max`` and nothing below that reaches it. Devin runs on
+#: its own subscription and is used for the equivalents below or when it is the
+#: only included host.
 NATIVE_LADDER: Mapping[str, Mapping[str, str]] = {
     "claude": {
         "low": "claude-haiku-4-5-20251001",
-        "medium": "claude-sonnet-5",
-        "high": "claude-opus-5",
-        "xhigh": "claude-opus-5",
-        "max": "claude-opus-5",
+        "medium": "claude-sonnet-5-5",
+        "high": "claude-opus-5-5",
+        "xhigh": "claude-opus-5-5",
+        "max": "claude-fable-5-1",
     },
     "codex": {
         "low": "gpt-6-luna",
-        "medium": "gpt-6-astra",
+        "medium": "gpt-6-sol",
         "high": "gpt-6-sol",
         "xhigh": "gpt-6-sol",
-        "max": "gpt-6-sol",
+        "max": "gpt-6-astra",
+    },
+    "devin": {
+        "low": "swe-1-7-medium",
+        "medium": "swe-2-medium",
+        "high": "swe-2-high",
+        "xhigh": "swe-2-high",
+        "max": "swe-2-max",
     },
 }
+#: OpenRouter model id -> the native CLI model that is the same model.
+OPENROUTER_TO_NATIVE: Mapping[str, tuple[str, str]] = {
+    "anthropic/claude-haiku-4.5": ("claude", "claude-haiku-4-5-20251001"),
+    "anthropic/claude-sonnet-5.5": ("claude", "claude-sonnet-5-5"),
+    "anthropic/claude-opus-5.5": ("claude", "claude-opus-5-5"),
+    "anthropic/claude-fable-5.1": ("claude", "claude-fable-5-1"),
+    "openai/gpt-6-luna": ("codex", "gpt-6-luna"),
+    "openai/gpt-6-sol": ("codex", "gpt-6-sol"),
+    "openai/gpt-6-astra": ("codex", "gpt-6-astra"),
+}
+#: The lowest cost tier at which a native model may be used. A model is only in
+#: the Auto Router's pool when the task's tier reaches it, so fable and astra
+#: (the same price) are reserved for ``max`` and opus for ``high`` and up.
+NATIVE_MIN_TIER: Mapping[str, str] = {
+    "claude-haiku-4-5-20251001": "low", "claude-sonnet-5-5": "medium",
+    "claude-opus-5-5": "high", "claude-fable-5-1": "max",
+    "gpt-6-luna": "low", "gpt-6-sol": "medium", "gpt-6-astra": "max",
+}
+#: Very high coding models and the Devin model used in their place when Auto
+#: recommends one and Devin is available (Auto does not know Devin). Pattern
+#: lists are checked in order. To be confirmed by the maintainers.
+DEVIN_EQUIVALENTS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("anthropic/claude-fable-*", "openai/gpt-6-astra*", "openai/gpt-6.1-sol-pro",
+      "openai/gpt-6-sol-pro"), "swe-2-max"),
+    (("anthropic/claude-opus-*", "openai/gpt-6.1-sol*"), "swe-2-high"),
+)
 #: OpenRouter model patterns that belong to each host's plan.
 HOST_MODEL_PATTERNS: Mapping[str, tuple[str, ...]] = {
     "claude": ("anthropic/*",),
     "codex": ("openai/*",),
+    "devin": (),
 }
+HOST_ORDER = ("claude", "codex", "devin")
+USAGE_STATES = ("included-oauth", "extra-usage", "unknown")
+
+
 #: Planning notes the coordinating model reads when OpenRouter is not set up.
-#: These are coarse priors for choosing staffing, not benchmarks; the user's
-#: own experience and the task win over them.
+#: Coarse priors for choosing staffing, not benchmarks; the task wins over them.
 MODEL_PROFILES: Mapping[str, Mapping[str, Any]] = {
     "claude-haiku-4-5-20251001": {
         "host": "claude", "tier": "low", "relative_cost": "lowest",
-        "strengths": "fast, cheap; good for mechanical edits, lookups, summaries, simple tests",
-        "weaknesses": "weaker on multi-file design, subtle bugs, long-horizon agentic work",
+        "strengths": "fast and cheap; mechanical edits, lookups, summaries, simple tests",
+        "weaknesses": "small context for large repos; weaker on multi-file design and subtle bugs",
     },
-    "claude-sonnet-5": {
+    "claude-sonnet-5-5": {
         "host": "claude", "tier": "medium", "relative_cost": "moderate",
-        "strengths": "strong everyday coding, tool use and review; best default balance",
-        "weaknesses": "can miss deep architectural trade-offs that the top model catches",
+        "strengths": "strong everyday coding, tool use and review; the default balance",
+        "weaknesses": "can miss deep architectural trade-offs that the top models catch",
     },
-    "claude-opus-5": {
-        "host": "claude", "tier": "high", "relative_cost": "highest",
-        "strengths": "best for hard design, risky refactors, security-sensitive or ambiguous work",
-        "weaknesses": "uses included allowance fastest; overkill for routine tasks",
+    "claude-opus-5-5": {
+        "host": "claude", "tier": "high", "relative_cost": "high",
+        "strengths": "hard design, risky refactors, ambiguous or security-sensitive work",
+        "weaknesses": "uses included allowance faster; more than routine work needs",
+    },
+    "claude-fable-5-1": {
+        "host": "claude", "tier": "max", "relative_cost": "highest",
+        "strengths": "the strongest Claude model; only for work that truly needs it",
+        "weaknesses": "same price as the top Codex model; wasteful for anything routine",
     },
     "gpt-6-luna": {
         "host": "codex", "tier": "low", "relative_cost": "lowest",
-        "strengths": "fast and cheap; good for small scripted changes and boilerplate",
-        "weaknesses": "limited depth on complex reasoning and unfamiliar codebases",
-    },
-    "gpt-6-astra": {
-        "host": "codex", "tier": "medium", "relative_cost": "moderate",
-        "strengths": "solid general coding and repo-wide edits; good test-writing",
-        "weaknesses": "less careful than the top model on ambiguous requirements",
+        "strengths": "very cheap and fast; boilerplate and small scripted changes",
+        "weaknesses": "limited depth; asks few clarifying questions; not for unfamiliar code",
     },
     "gpt-6-sol": {
-        "host": "codex", "tier": "high", "relative_cost": "highest",
-        "strengths": "strongest Codex model for hard implementation and debugging",
-        "weaknesses": "highest burn of the included plan; overkill for routine work",
+        "host": "codex", "tier": "medium", "relative_cost": "moderate",
+        "strengths": "solid general coding, repo-wide edits and test writing; the Codex default",
+        "weaknesses": "less careful than astra on ambiguous or high-risk work",
+    },
+    "gpt-6-astra": {
+        "host": "codex", "tier": "max", "relative_cost": "highest",
+        "strengths": "the strongest Codex model; best at spotting risks in hard problems",
+        "weaknesses": "same price as the top Claude model; only for really high-thinking tasks",
+    },
+    "swe-2-high": {
+        "host": "devin", "tier": "high", "relative_cost": "subscription",
+        "strengths": "included-cost coding agent for implementation work",
+        "weaknesses": "hosted; can burn many steps on large tasks",
+    },
+    "swe-2-max": {
+        "host": "devin", "tier": "max", "relative_cost": "subscription",
+        "strengths": "highest-effort Devin coding model",
+        "weaknesses": "no evidence of an advantage on routine work",
     },
 }
-HOST_ORDER = ("claude", "codex")
-USAGE_STATES = ("included-oauth", "extra-usage", "unknown")
 
 
 class AutoRouteError(ValueError):
@@ -139,7 +196,10 @@ def build_inventory(
     from side_lane import model_select, preferences
 
     if hosts is None:
-        hosts = model_select.detect_available_hosts()
+        from side_lane import hosts as host_lookup
+
+        hosts = dict(model_select.detect_available_hosts())
+        hosts["devin"] = host_lookup.resolve_host_executable("devin") is not None
     if host_usage is None:
         host_usage = preferences.load_preferences()
     if openrouter is None:
@@ -155,11 +215,13 @@ def build_inventory(
 def plans_for(inventory: Inventory, *, unknown_usage: str = "included") -> tuple[policy.DeclaredPlan, ...]:
     """Declared plans derived from the per-host usage states.
 
-    ``included-oauth`` is an included plan. ``extra-usage`` means the included
-    allowance is spent, so the plan is exhausted (not runnable, excluded from
-    Auto). ``unknown`` follows ``unknown_usage``: the public default treats a
-    host the user is signed in to as included; the private package passes
-    ``excluded`` so an unattested host is never used silently.
+    ``included-oauth`` is an included plan the host can run on. ``extra-usage``
+    means the included allowance is spent: the plan is *extra*, so that host is
+    not run natively and its models are not hidden from the Auto Router either,
+    where they compete on metered price like any other model. ``unknown``
+    follows ``unknown_usage``: the public default treats a host the user is
+    signed in to as included; the private package passes ``excluded`` so an
+    unattested host is never used silently (it is then treated as extra).
     """
     if unknown_usage not in {"included", "excluded"}:
         raise AutoRouteError("unknown_usage must be 'included' or 'excluded'")
@@ -169,18 +231,17 @@ def plans_for(inventory: Inventory, *, unknown_usage: str = "included") -> tuple
             continue
         state = inventory.host_usage.get(host, "unknown")
         if state == "included-oauth":
-            quota = "declared"
+            mode, quota = "included", "declared"
         elif state == "extra-usage":
-            quota = "exhausted"
+            mode, quota = "extra", "declared"
+        elif unknown_usage == "included":
+            mode, quota = "included", "unknown"
         else:
-            quota = "unknown" if unknown_usage == "included" else "exhausted"
+            mode, quota = "extra", "declared"
         plans.append(
             policy.DeclaredPlan(
-                provider=host,
-                mode="included",
-                quota_status=quota,
-                model_patterns=HOST_MODEL_PATTERNS[host],
-                route_ids=(f"native-{host}",),
+                provider=host, mode=mode, quota_status=quota,
+                model_patterns=HOST_MODEL_PATTERNS[host], route_ids=(f"native-{host}",),
             )
         )
     return tuple(plans)
@@ -191,7 +252,54 @@ def _host_for_model(model: str) -> str | None:
         return "claude"
     if model.startswith("gpt-"):
         return "codex"
+    if model.startswith("swe-"):
+        return "devin"
     return None
+
+
+def _usable_hosts(plans: Sequence[policy.DeclaredPlan], inventory: Inventory, now: float) -> list[str]:
+    return [
+        host for host in HOST_ORDER
+        if inventory.hosts.get(host)
+        and any(p.provider == host and p.usable_included(now) for p in plans)
+    ]
+
+
+def build_handoff(usable: Sequence[str], tier: str = "max") -> dict[str, Any]:
+    """What a served OpenRouter model turns into: a native model on a host with
+    included usage (only models the task's tier reaches), or the Devin
+    equivalent of a very high coding model."""
+    order = list(policy.COST_TIERS)
+    native = {
+        or_id: {"host": host, "model": model}
+        for or_id, (host, model) in OPENROUTER_TO_NATIVE.items()
+        if host in usable and order.index(NATIVE_MIN_TIER[model]) <= order.index(tier)
+    }
+    devin = (
+        [{"patterns": list(patterns), "model": model} for patterns, model in DEVIN_EQUIVALENTS]
+        if "devin" in usable else []
+    )
+    return {"native": native, "devin": devin}
+
+
+def resolve_served(handoff: Mapping[str, Any], served: str) -> dict[str, Any]:
+    """Map the model the Auto Router served to the route that runs it."""
+    import fnmatch
+
+    hit = (handoff.get("native") or {}).get(served)
+    if hit:
+        return {"action": "native-handoff", "host": hit["host"], "model": hit["model"],
+                "served_model": served, "metered": False}
+    for entry in handoff.get("devin") or []:
+        if any(fnmatch.fnmatchcase(served, pat) for pat in entry["patterns"]):
+            return {"action": "devin-equivalent", "host": "devin", "model": entry["model"],
+                    "served_model": served, "metered": False}
+    if handoff.get("devin_default"):
+        # Devin is the only included host: anything that is not a very high coding
+        # model still runs on Devin's own tier rather than buying a metered model.
+        return {"action": "devin-default", "host": "devin", "model": handoff["devin_default"],
+                "served_model": served, "metered": False}
+    return {"action": "openrouter-exact", "model": served, "served_model": served, "metered": True}
 
 
 def decide(
@@ -206,24 +314,35 @@ def decide(
     service_names: Iterable[str] = (),
     session_key: str = "local",
     now: float | None = None,
+    tier_override: str | None = None,
 ) -> dict[str, Any]:
     """Return the routing decision as a JSON-safe dict.
 
-    ``action`` is one of ``native`` (run through that host's CLI, included
-    usage), ``auto`` (ask the Auto Router; metered), ``pinned`` or
-    ``blocked`` (nothing can run; ``next_steps`` says what to set up).
+    ``action`` is one of ``native`` (run through a host's CLI on included
+    usage), ``auto`` (ask the Auto Router across everything not excluded;
+    metered), ``pinned`` or ``blocked`` (``next_steps`` says what to set up).
+
+    With included usage and an OpenRouter key, a ``native`` decision carries a
+    ``selection`` block: run :func:`probe_auto_router` so the Auto Router picks
+    the best model *inside* the providers that still have included usage (the
+    probe costs well under a cent), then follow :func:`resolve_served`. Without
+    a key the tier ladder and a staffing menu are used instead.
     """
     current = time.time() if now is None else now
     settings = settings or policy.AutoRouterSettings(default_cost_tier=LOCAL_DEFAULT_COST_TIER)
     plan_list = tuple(plans) if plans is not None else plans_for(inventory, unknown_usage=unknown_usage)
     authorized = set(authorize_extra_hosts)
-    tier = policy.cost_tier_for(
+    tier = tier_override or policy.cost_tier_for(
         query, default=settings.default_cost_tier, complexity=settings.complexity_tiers
     )
+    if tier not in policy.COST_TIERS:
+        raise AutoRouteError(f"unsupported cost tier {tier!r}")
     out_providers = policy.providers_out(plan_list, {}, (), now=current)
+    usable = _usable_hosts(plan_list, inventory, current)
     receipt: dict[str, Any] = {
         "policy": POLICY_ID,
         "cost_tier": tier,
+        "tier_source": "override" if tier_override else "words-or-default",
         "inventory": {
             "hosts": {h: bool(inventory.hosts.get(h)) for h in HOST_ORDER},
             "host_usage": dict(inventory.host_usage),
@@ -231,22 +350,28 @@ def decide(
         },
         "plans": policy.plans_summary(plan_list, current),
         "providers_out": list(out_providers),
+        "usable_included_hosts": usable,
         "authorized_extra_hosts": sorted(authorized),
     }
 
+    def turn_for(allowed: Sequence[str] = (), excluded_providers: Sequence[str] = ()) -> dict[str, Any]:
+        base = policy.build_turn_settings(
+            settings, thread=("local", session_key), query=query, granted_capabilities=(),
+            service_names=service_names, plans=plan_list, excluded_providers=excluded_providers,
+        )
+        base = dataclasses.replace(base, cost_tier=tier)
+        if allowed:
+            base = dataclasses.replace(base, allowed_models=tuple(allowed))
+        return base.to_context()
+
     def native(host: str, reason: str, extra: bool = False) -> dict[str, Any]:
         result: dict[str, Any] = {
-            "action": "native",
-            "host": host,
-            "model": NATIVE_LADDER[host][tier],
-            "metered": extra,
-            "reason": reason,
-            "receipt": receipt,
+            "action": "native", "host": host, "model": NATIVE_LADDER[host][tier],
+            "metered": extra, "reason": reason, "receipt": receipt,
         }
         if not extra:
             result["staffing"] = {
-                "mode": "coordinator-choice",
-                "default": result["model"],
+                "mode": "coordinator-choice", "default": result["model"],
                 "instructions": STAFFING_INSTRUCTIONS,
                 "candidates": staffing_candidates(inventory, plan_list, current),
             }
@@ -258,50 +383,48 @@ def decide(
         if host is not None:
             if not inventory.hosts.get(host):
                 return _blocked(receipt, [f"pinned model needs the {host} CLI, which is not installed"], inventory)
-            usable = any(p.provider == host and p.usable_included(current) for p in plan_list)
-            if not usable and host not in authorized:
+            runnable = host in usable
+            if not runnable and host not in authorized:
                 return _blocked(
                     receipt,
                     [f"{host} has no included usage; authorize extra usage for this run to use {pinned_model}"],
                     inventory,
                 )
-            return {
-                "action": "pinned", "host": host, "model": pinned_model,
-                "metered": not usable, "reason": "explicit pin", "receipt": receipt,
-            }
+            return {"action": "pinned", "host": host, "model": pinned_model,
+                    "metered": not runnable, "reason": "explicit pin", "receipt": receipt}
         if not inventory.openrouter:
             return _blocked(receipt, ["pinned OpenRouter model needs an OpenRouter key"], inventory)
         if not policy.SERVED_MODEL_RE.fullmatch(pinned_model):
             raise AutoRouteError("invalid pinned model id")
-        return {
-            "action": "pinned", "host": "openrouter", "model": pinned_model,
-            "metered": True, "reason": "explicit pin", "receipt": receipt,
-        }
+        return {"action": "pinned", "host": "openrouter", "model": pinned_model,
+                "metered": True, "reason": "explicit pin", "receipt": receipt}
 
-    # 2. Included OAuth usage first.
-    for host in HOST_ORDER:
-        if inventory.hosts.get(host) and any(
-            p.provider == host and p.usable_included(current) for p in plan_list
-        ):
-            return native(host, "included usage available; no metered call needed")
+    # 2. Included usage first. With a key, the Auto Router picks inside the included providers.
+    if usable:
+        first = "claude" if "claude" in usable else "codex" if "codex" in usable else usable[0]
+        result = native(first, "included usage available; no metered call needed")
+        handoff = build_handoff(usable, tier)
+        if "devin" in usable and not handoff["native"]:
+            handoff["devin_default"] = NATIVE_LADDER["devin"][tier]
+        if inventory.openrouter and (handoff["native"] or handoff["devin"]):
+            result["selection"] = {
+                "mode": "auto-within-included",
+                "instructions": "Run probe_auto_router with this decision; it returns the model to use.",
+                # Native hosts: Auto picks only inside their models. Devin only: Auto
+                # looks across everything and a very high coding pick maps to Devin.
+                "turn_settings": turn_for(allowed=list(handoff["native"])),
+                "handoff": handoff,
+            }
+        return result
 
-    # 3. Auto Router, metered. Providers whose included usage is out are excluded.
+    # 3. Auto Router, metered, across everything not excluded.
     if inventory.openrouter:
-        turn = policy.build_turn_settings(
-            settings,
-            thread=("local", session_key),
-            query=query,
-            granted_capabilities=(),
-            service_names=service_names,
-            plans=plan_list,
-            excluded_providers=out_providers,
-        )
+        handoff = build_handoff(_usable_hosts(plan_list, inventory, current), tier)
         return {
-            "action": "auto",
-            "metered": True,
+            "action": "auto", "metered": True,
             "reason": "no included usage can run this task; the Auto Router chooses (metered)",
-            "turn_settings": turn.to_context(),
-            "receipt": receipt,
+            "turn_settings": turn_for(excluded_providers=out_providers),
+            "handoff": handoff, "receipt": receipt,
         }
 
     # 4. Explicitly authorized extra usage on a host the user is signed in to.
@@ -423,29 +546,30 @@ def probe_auto_router(
 ) -> dict[str, Any]:
     """Run the selection probe and resolve the served model to a route.
 
-    Returns ``{"served_model", "cost_usd", "route"}`` where ``route`` is a
-    native hand-off (the served model belongs to a host with included usage)
-    or an exact OpenRouter model. Raises :class:`AutoRouteError` on a refused
-    answer; never retries or substitutes another route.
+    Works on an ``auto`` decision or on a ``native`` decision that carries a
+    ``selection`` block (Auto picking inside the providers with included
+    usage). Returns ``{"served_model", "cost_usd", "route"}`` where ``route`` is
+    a native hand-off, a Devin equivalent, or an exact OpenRouter model. Raises
+    :class:`AutoRouteError` on a refused answer; never retries or substitutes.
     """
-    if decision.get("action") != "auto":
-        raise AutoRouteError("probe requires an 'auto' decision")
-    turn_context = decision["turn_settings"]
+    selection = decision.get("selection") if decision.get("action") == "native" else decision
+    if not selection or not selection.get("turn_settings"):
+        raise AutoRouteError("probe requires an 'auto' decision or a native decision with a selection block")
+    turn_context = selection["turn_settings"]
     body = build_probe_body(turn_context, task_digest)
-    headers = {"X-OpenRouter-Metadata": "enabled"}
     send = transport or _urllib_transport(read_key)
-    response = send(body, headers)
+    response = send(body, {"X-OpenRouter-Metadata": "enabled"})
     served = response.get("model")
     turn = policy.parse_turn_settings(dict(turn_context))
     if not policy.model_allowed(served, turn.allowed_models, turn.excluded_models):
         raise AutoRouteError("auto router served a model outside the requested pool")
     usage = response.get("usage") if isinstance(response.get("usage"), Mapping) else {}
     cost = usage.get("cost")
-    route: dict[str, Any] = {"action": "openrouter-exact", "model": served}
-    handoff = policy.native_handoff_route(turn_context, served, list((turn_context.get("included_native") or {})))
-    if handoff:
-        route = {"action": "native-handoff", "route_id": handoff, "model": served}
-    return {"served_model": served, "cost_usd": cost if isinstance(cost, (int, float)) else None, "route": route}
+    return {
+        "served_model": served,
+        "cost_usd": cost if isinstance(cost, (int, float)) else None,
+        "route": resolve_served(selection.get("handoff") or {}, served),
+    }
 
 
 def _urllib_transport(read_key: Callable[[], str]) -> Transport:
@@ -469,6 +593,75 @@ def _urllib_transport(read_key: Callable[[], str]) -> Transport:
 
 
 # --------------------------------------------------------------------------
+# Difficulty rating (Jev typed decision, a few thousandths of a cent)
+# --------------------------------------------------------------------------
+
+JEV_ENDPOINT = "https://openrouter.ai/api/alpha/decisions"
+JEV_MODEL = "typesafe/jev-1.13"
+TIER_CRITERIA = {
+    "low": "Mechanical or small and well specified: a rename, a one-file fix, boilerplate, a lookup or summary",
+    "medium": "Ordinary engineering: a typical feature or bug across a few files with clear requirements",
+    "high": "Hard: multi-file design, real ambiguity, tricky concurrency, security or data-safety risk",
+    "max": "Hardest: architecture or safety-critical work that needs the very strongest model's judgment",
+}
+
+
+def tier_from_words(query: str) -> str | None:
+    """A tier the request itself asks for ("use the best model", "cheapest"), else None."""
+    text = query if isinstance(query, str) else ""
+    if policy._MAX_TIER_RE.search(text):
+        return "max"
+    if policy._CHEAP_TIER_RE.search(text):
+        return "low"
+    return None
+
+
+def rate_difficulty(
+    task_digest: str,
+    *,
+    read_key: Callable[[], str],
+    transport: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Rate how hard the task is so the cheapest model that can do it well is used.
+
+    Returns ``{"tier", "confidence", "cost_usd"}``. Only the (de-identified,
+    truncated) digest leaves the machine. Never retried; a refused or malformed
+    answer raises :class:`AutoRouteError` and the caller falls back to the default tier.
+    """
+    payload = {
+        "model": JEV_MODEL,
+        "state": {"task": task_digest[:PROBE_DIGEST_MAX_CHARS]},
+        "questions": {
+            "tier": {
+                "type": "choice",
+                "instructions": "How demanding is this software task? Choose the lowest tier whose model "
+                "could still do it well, because a stronger model costs much more.",
+                "criteria": TIER_CRITERIA,
+            }
+        },
+    }
+    if transport is None:
+        import urllib.request
+
+        def transport(body: Mapping[str, Any]) -> Mapping[str, Any]:  # noqa: F811
+            request = urllib.request.Request(
+                JEV_ENDPOINT, data=json.dumps(body).encode("utf-8"), method="POST",
+                headers={"Content-Type": "application/json", "Authorization": "Bearer " + read_key()},
+            )
+            with urllib.request.urlopen(request, timeout=PROBE_TIMEOUT_SECONDS) as handle:
+                return json.loads(handle.read(1_000_000))
+
+    response = transport(payload)
+    answer = (response.get("answers") or {}).get("tier") or {}
+    tier = answer.get("choice")
+    if tier not in TIER_CRITERIA:
+        raise AutoRouteError("difficulty rating returned no valid tier")
+    usage = response.get("usage") if isinstance(response.get("usage"), Mapping) else {}
+    return {"tier": tier, "confidence": answer.get("confidence"),
+            "cost_usd": usage.get("cost") if isinstance(usage.get("cost"), (int, float)) else None}
+
+
+# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 
@@ -480,18 +673,43 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
                         help="allow extra (metered) usage on this host for this run")
     parser.add_argument("--unknown-usage", choices=("included", "excluded"), default="included")
     parser.add_argument("--plans", type=Path, default=None, help="declared-plans JSON (see config/examples)")
+    parser.add_argument("--probe", action="store_true",
+                        help="rate the task's difficulty and run the Auto Router probe (needs an OpenRouter key; "
+                        "sends the task text, truncated, to OpenRouter and Jev: use a de-identified description)")
     parser.add_argument("--choose", default=None, metavar="MODEL",
                         help="validate the coordinator's staffing choice against the listed candidates")
 
 
-def run(args: argparse.Namespace, inventory: Inventory | None = None) -> int:
+def run(args: argparse.Namespace, inventory: Inventory | None = None,
+        read_key: Callable[[], str] | None = None) -> int:
     inventory = inventory or build_inventory()
     plans = policy.load_declared_plans(args.plans) if args.plans else None
+    if read_key is None:
+        from side_lane import credentials, model_select
+
+        def read_key() -> str:
+            return credentials.read_credential(model_select.OPENROUTER_CREDENTIAL_SERVICE)
+
+    tier = tier_from_words(args.task)
+    rated = None
+    if args.probe and inventory.openrouter and not args.pin and tier is None:
+        try:
+            rated = rate_difficulty(args.task, read_key=read_key)
+            tier = rated["tier"]
+        except (AutoRouteError, OSError, ValueError) as exc:
+            print(f"note: difficulty rating unavailable ({type(exc).__name__}); using the default tier", file=sys.stderr)
     decision = decide(
         inventory, args.task, pinned_model=args.pin,
         authorize_extra_hosts=args.authorize_extra, plans=plans or None,
-        unknown_usage=args.unknown_usage,
+        unknown_usage=args.unknown_usage, tier_override=tier,
     )
+    if rated:
+        decision["receipt"]["difficulty_rating"] = rated
+    if args.probe and (decision.get("selection") or decision["action"] == "auto"):
+        try:
+            decision["probe"] = probe_auto_router(decision, args.task, read_key=read_key)
+        except (AutoRouteError, OSError, ValueError) as exc:
+            print(f"note: Auto Router probe unavailable ({type(exc).__name__}); using the decision as is", file=sys.stderr)
     if args.choose:
         try:
             decision = validate_choice(decision, args.choose)

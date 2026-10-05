@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.2 - 2026-10-05
+
+- Auto Router: with included usage and an OpenRouter key, the router now picks the best model inside the providers that still have included usage (a probe well under a cent), and a native hand-off or Devin equivalent is returned.
+- A host in extra usage is no longer hidden from the Auto Router; its models compete on metered price like any other.
+- `side-lane auto-route --probe` rates the task's difficulty (a Jev decision, about $0.00002) and caps the model pool by that tier, so a rename gets haiku and a hard design gets opus, not fable. Live check: a rename rated low and ran on haiku; a hard design rated high and ran on opus 5.5.
+- Corrected model tiers by price: Claude haiku, sonnet 5.5, opus 5.5, with fable only at the top tier; Codex luna and sol, with astra (same price as fable) only at the top tier. Added Devin: a very high coding model recommended by the router maps to the Devin equivalent when Devin is installed, and Devin-only users keep their own tier ladder.
+
 ## 0.6.1 - 2026-10-04
 
 - Detect the Codex CLI bundled with current ChatGPT desktop builds (`ChatGPT.app/Contents/Resources/codex-cli/bin/codex`) when `codex` is not on `PATH`, so setup and routing find a Codex-only-through-ChatGPT install.
