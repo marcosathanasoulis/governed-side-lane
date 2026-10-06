@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.4 - 2026-10-05
+
+- OpenRouter can run any model on its list: the `openrouter` provider is now `any_model`, so a well-formed `provider/model` slug that the Auto Router picks is dispatched even when it is not individually configured. The identity contract is pinned to that exact slug and the run reports it as unqualified. Other providers still require a listed model. Live check: Auto-picked `deepseek/deepseek-v4.1-flash` and `z-ai/glm-5.3` each wrote a file and committed through the OpenRouter lane.
+
 ## 0.6.3 - 2026-10-05
 
 - A plain `openai/gpt-6-sol` (or `gpt-5.6-sol`) pick from the Auto Router now maps to `swe-2-medium` when Devin is available and nothing else has included usage.

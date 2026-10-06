@@ -273,6 +273,9 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     return config
 
 
+ANY_MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,60}/[A-Za-z0-9][A-Za-z0-9._:+-]{0,100}")
+
+
 def select_route(
     config: Mapping[str, Any], host: str, mode: str, provider: str, model: str
 ) -> tuple[Mapping[str, Any], dict[str, Any]]:
@@ -282,7 +285,16 @@ def select_route(
     route = provider_config.get("routes", {}).get(mode, {}).get(host)
     if route is None:
         raise SideLaneError(f"unsupported route: {host}/{mode}/{provider}")
-    if model not in route["models"]:
+    # A provider flagged ``any_model`` (OpenRouter) can run any model on its list: the
+    # Auto Router may pick one that is not individually configured. The id must be a
+    # well-formed provider/model slug; its identity contract is pinned to that exact slug.
+    unlisted_any_model = (
+        model not in route["models"]
+        and provider_config.get("any_model") is True
+        and isinstance(model, str)
+        and ANY_MODEL_ID_RE.fullmatch(model) is not None
+    )
+    if model not in route["models"] and not unlisted_any_model:
         raise SideLaneError(
             f"model {model!r} is not allowed for {host}/{mode}/{provider}"
         )
@@ -302,7 +314,16 @@ def select_route(
     ):
         if key in route:
             model_config[key] = route[key]
-    model_config.update(route.get("model_configs", {}).get(model, {}))
+    if unlisted_any_model:
+        template = route.get("model_configs", {}).get(route["models"][0], {})
+        unlisted = {key: value for key, value in template.items() if key not in {"identity_contract", "qualification"}}
+        unlisted["identity_contract"] = {
+            "requested_model": model, "resolved_model": model, "settings_precedence": "verified",
+        }
+        unlisted["qualification"] = {"verified": False, "kind": "auto-router-selected"}
+        model_config.update(unlisted)
+    else:
+        model_config.update(route.get("model_configs", {}).get(model, {}))
     billable = model_config["billable"]
     if not isinstance(billable, bool):
         raise SideLaneError("model billable metadata must be boolean")

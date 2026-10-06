@@ -4100,3 +4100,27 @@ class ArtifactIdentitySafeOpenTests(unittest.TestCase):
 
         self.artifact.write_bytes(b"Artifact\n")
         self.assertNotEqual(first, cli._artifact_identity(self.artifact))
+
+
+class OpenRouterAnyModelTests(unittest.TestCase):
+    def test_openrouter_accepts_any_well_formed_model_slug_and_pins_its_identity(self):
+        config = cli.load_config() if hasattr(cli, "load_config") else None
+        if config is None:
+            self.skipTest("no config loader")
+        provider, model_config = cli.select_route(
+            config, "claude", "execute", "openrouter", "deepseek/deepseek-v4.1-flash"
+        )
+        self.assertTrue(provider["billable"])
+        self.assertEqual(model_config["identity_contract"]["requested_model"], "deepseek/deepseek-v4.1-flash")
+        self.assertEqual(model_config["identity_contract"]["resolved_model"], "deepseek/deepseek-v4.1-flash")
+        self.assertFalse(model_config["qualification"]["verified"])
+        for bad in ("no-slash", "a/b c", "../x/y", "a/b;rm"):
+            with self.assertRaises(cli.SideLaneError, msg=bad):
+                cli.select_route(config, "claude", "execute", "openrouter", bad)
+
+    def test_other_providers_still_refuse_unlisted_models(self):
+        config = cli.load_config() if hasattr(cli, "load_config") else None
+        if config is None:
+            self.skipTest("no config loader")
+        with self.assertRaises(cli.SideLaneError):
+            cli.select_route(config, "claude", "execute", "glm", "z-ai/anything")

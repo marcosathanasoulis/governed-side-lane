@@ -142,6 +142,7 @@
       "auth_method": "provider-key",
       "credential_service": "governed-side-lane-openrouter",
       "base_url": "https://openrouter.ai/api",
+      "any_model": true,
       "billable": true,
       "explicit_only": true,
       "routes": {
