@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.0 - 2026-10-07
+
+- `side-lane auto-route --nodes nodes.json` routes every node of a task graph on its own (own difficulty rating, own Auto Router pick), instead of one decision for the whole job. The Auto Router picks one model per request and does not split a task itself.
+- GLM and Google Gemini are now plans the router knows: a `z-ai/glm-*` pick runs on the direct GLM route (`glm-5.3`) and a `google/gemini-*` pick on the Gemini CLI's default model while that plan has usage, and the included-usage pool covers them.
+
 ## 0.6.4 - 2026-10-05
 
 - OpenRouter can run any model on its list: the `openrouter` provider is now `any_model`, so a well-formed `provider/model` slug that the Auto Router picks is dispatched even when it is not individually configured. The identity contract is pinned to that exact slug and the run reports it as unqualified. Other providers still require a listed model. Live check: Auto-picked `deepseek/deepseek-v4.1-flash` and `z-ai/glm-5.3` each wrote a file and committed through the OpenRouter lane.

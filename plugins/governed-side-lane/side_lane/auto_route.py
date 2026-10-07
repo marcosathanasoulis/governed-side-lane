@@ -71,6 +71,8 @@ NATIVE_LADDER: Mapping[str, Mapping[str, str]] = {
         "xhigh": "gpt-6-sol",
         "max": "gpt-6-astra",
     },
+    "glm": {tier: "glm-5.3" for tier in ("low", "medium", "high", "xhigh", "max")},
+    "gemini": {tier: "gemini-default" for tier in ("low", "medium", "high", "xhigh", "max")},
     "devin": {
         "low": "swe-1-7-medium",
         "medium": "swe-2-medium",
@@ -89,6 +91,13 @@ OPENROUTER_TO_NATIVE: Mapping[str, tuple[str, str]] = {
     "openai/gpt-6-sol": ("codex", "gpt-6-sol"),
     "openai/gpt-6-astra": ("codex", "gpt-6-astra"),
 }
+#: OpenRouter picks that run on a subscription plan the router does not know by name:
+#: any ``z-ai/glm-*`` pick runs on the direct GLM route (glm-5.3) and any
+#: ``google/gemini-*`` pick on the Gemini CLI's default model, while that plan has usage.
+PATTERN_TO_NATIVE: tuple[tuple[str, str, str], ...] = (
+    ("z-ai/glm-*", "glm", "glm-5.3"),
+    ("google/gemini-*", "gemini", "gemini-default"),
+)
 #: The lowest cost tier at which a native model may be used. A model is only in
 #: the Auto Router's pool when the task's tier reaches it, so fable and astra
 #: (the same price) are reserved for ``max`` and opus for ``high`` and up.
@@ -110,9 +119,11 @@ DEVIN_EQUIVALENTS: tuple[tuple[tuple[str, ...], str], ...] = (
 HOST_MODEL_PATTERNS: Mapping[str, tuple[str, ...]] = {
     "claude": ("anthropic/*",),
     "codex": ("openai/*",),
+    "glm": ("z-ai/*",),
+    "gemini": ("google/*",),
     "devin": (),
 }
-HOST_ORDER = ("claude", "codex", "devin")
+HOST_ORDER = ("claude", "codex", "glm", "gemini", "devin")
 USAGE_STATES = ("included-oauth", "extra-usage", "unknown")
 
 
@@ -153,6 +164,16 @@ MODEL_PROFILES: Mapping[str, Mapping[str, Any]] = {
         "host": "codex", "tier": "max", "relative_cost": "highest",
         "strengths": "the strongest Codex model; best at spotting risks in hard problems",
         "weaknesses": "same price as the top Claude model; only for really high-thinking tasks",
+    },
+    "glm-5.3": {
+        "host": "glm", "tier": "medium", "relative_cost": "subscription",
+        "strengths": "included-cost coding model on the GLM plan; good everyday implementation",
+        "weaknesses": "less careful than the top Claude and Codex models on hard or ambiguous work",
+    },
+    "gemini-default": {
+        "host": "gemini", "tier": "medium", "relative_cost": "subscription",
+        "strengths": "included-cost model on the Google plan; fast, large context",
+        "weaknesses": "tool use and long agentic runs are less proven here than Claude or Codex",
     },
     "swe-2-high": {
         "host": "devin", "tier": "high", "relative_cost": "subscription",
@@ -268,6 +289,10 @@ def _host_for_model(model: str) -> str | None:
         return "claude"
     if model.startswith("gpt-"):
         return "codex"
+    if model.startswith("glm-"):
+        return "glm"
+    if model.startswith("gemini"):
+        return "gemini"
     if model.startswith("swe-"):
         return "devin"
     return None
@@ -295,7 +320,11 @@ def build_handoff(usable: Sequence[str], tier: str = "max") -> dict[str, Any]:
         [{"patterns": list(patterns), "model": model} for patterns, model in DEVIN_EQUIVALENTS]
         if "devin" in usable else []
     )
-    return {"native": native, "devin": devin}
+    patterns = [
+        {"pattern": pattern, "host": host, "model": model}
+        for pattern, host, model in PATTERN_TO_NATIVE if host in usable
+    ]
+    return {"native": native, "devin": devin, "patterns": patterns}
 
 
 def resolve_served(handoff: Mapping[str, Any], served: str) -> dict[str, Any]:
@@ -306,6 +335,10 @@ def resolve_served(handoff: Mapping[str, Any], served: str) -> dict[str, Any]:
     if hit:
         return {"action": "native-handoff", "host": hit["host"], "model": hit["model"],
                 "served_model": served, "metered": False}
+    for entry in handoff.get("patterns") or []:
+        if fnmatch.fnmatchcase(served, entry["pattern"]):
+            return {"action": "native-handoff", "host": entry["host"], "model": entry["model"],
+                    "served_model": served, "metered": False}
     for entry in handoff.get("devin") or []:
         if any(fnmatch.fnmatchcase(served, pat) for pat in entry["patterns"]):
             return {"action": "devin-equivalent", "host": "devin", "model": entry["model"],
@@ -417,18 +450,20 @@ def decide(
 
     # 2. Included usage first. With a key, the Auto Router picks inside the included providers.
     if usable:
-        first = "claude" if "claude" in usable else "codex" if "codex" in usable else usable[0]
+        first = usable[0]
         result = native(first, "included usage available; no metered call needed")
         handoff = build_handoff(usable, tier)
-        if "devin" in usable and not handoff["native"]:
+        if "devin" in usable and not handoff["native"] and not handoff["patterns"]:
             handoff["devin_default"] = NATIVE_LADDER["devin"][tier]
-        if inventory.openrouter and (handoff["native"] or handoff["devin"]):
+        if inventory.openrouter and (handoff["native"] or handoff["patterns"] or handoff["devin"]):
             result["selection"] = {
                 "mode": "auto-within-included",
                 "instructions": "Run probe_auto_router with this decision; it returns the model to use.",
                 # Native hosts: Auto picks only inside their models. Devin only: Auto
                 # looks across everything and a very high coding pick maps to Devin.
-                "turn_settings": turn_for(allowed=list(handoff["native"])),
+                "turn_settings": turn_for(
+                    allowed=list(handoff["native"]) + [entry["pattern"] for entry in handoff["patterns"]]
+                ),
                 "handoff": handoff,
             }
         return result
@@ -683,7 +718,10 @@ def rate_difficulty(
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--task", required=True, help="task description (used for cost tier only; never sent anywhere)")
+    parser.add_argument("--task", default=None, help="task description (used for cost tier only; never sent anywhere)")
+    parser.add_argument("--nodes", type=Path, default=None,
+                        help="JSON list of {id, task, pin?}: route every node of a task graph on its own "
+                        "(own difficulty rating, own pick), instead of one decision for the whole job")
     parser.add_argument("--pin", default=None, help="explicit model id; wins over everything")
     parser.add_argument("--authorize-extra", action="append", default=[], choices=HOST_ORDER,
                         help="allow extra (metered) usage on this host for this run")
@@ -696,8 +734,59 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
                         help="validate the coordinator's staffing choice against the listed candidates")
 
 
+def route_task(
+    task: str,
+    *,
+    inventory: Inventory,
+    plans: Sequence[policy.DeclaredPlan] | None,
+    read_key: Callable[[], str],
+    pin: str | None = None,
+    authorize_extra: Iterable[str] = (),
+    unknown_usage: str = "included",
+    probe: bool = False,
+) -> dict[str, Any]:
+    """One routed decision for one task (a whole job, or one node of its task graph)."""
+    tier = tier_from_words(task)
+    rated = None
+    if probe and inventory.openrouter and not pin and tier is None:
+        try:
+            rated = rate_difficulty(task, read_key=read_key)
+            tier = rated["tier"]
+        except (AutoRouteError, OSError, ValueError) as exc:
+            print(f"note: difficulty rating unavailable ({type(exc).__name__}); using the default tier", file=sys.stderr)
+    decision = decide(
+        inventory, task, pinned_model=pin, authorize_extra_hosts=authorize_extra,
+        plans=plans or None, unknown_usage=unknown_usage, tier_override=tier,
+    )
+    if rated:
+        decision["receipt"]["difficulty_rating"] = rated
+    if probe and (decision.get("selection") or decision["action"] == "auto"):
+        try:
+            decision["probe"] = probe_auto_router(decision, task, read_key=read_key)
+        except (AutoRouteError, OSError, ValueError) as exc:
+            print(f"note: Auto Router probe unavailable ({type(exc).__name__}); using the decision as is", file=sys.stderr)
+    return decision
+
+
+def load_nodes(path: Path) -> list[dict[str, Any]]:
+    nodes = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(nodes, list) or not nodes:
+        raise AutoRouteError("nodes file must be a non-empty JSON list")
+    seen = set()
+    for node in nodes:
+        if not isinstance(node, dict) or not isinstance(node.get("id"), str) or not isinstance(node.get("task"), str):
+            raise AutoRouteError("each node needs a string id and task")
+        if node["id"] in seen:
+            raise AutoRouteError(f"duplicate node id {node['id']!r}")
+        seen.add(node["id"])
+    return nodes
+
+
 def run(args: argparse.Namespace, inventory: Inventory | None = None,
         read_key: Callable[[], str] | None = None) -> int:
+    if bool(args.task) == bool(args.nodes):
+        print("error: give exactly one of --task or --nodes", file=sys.stderr)
+        return 2
     inventory = inventory or build_inventory()
     plans = policy.load_declared_plans(args.plans) if args.plans else None
     if read_key is None:
@@ -706,26 +795,18 @@ def run(args: argparse.Namespace, inventory: Inventory | None = None,
         def read_key() -> str:
             return credentials.read_credential(model_select.OPENROUTER_CREDENTIAL_SERVICE)
 
-    tier = tier_from_words(args.task)
-    rated = None
-    if args.probe and inventory.openrouter and not args.pin and tier is None:
+    common = dict(inventory=inventory, plans=plans, read_key=read_key, authorize_extra=args.authorize_extra,
+                  unknown_usage=args.unknown_usage, probe=args.probe)
+    if args.nodes:
         try:
-            rated = rate_difficulty(args.task, read_key=read_key)
-            tier = rated["tier"]
+            nodes = load_nodes(args.nodes)
         except (AutoRouteError, OSError, ValueError) as exc:
-            print(f"note: difficulty rating unavailable ({type(exc).__name__}); using the default tier", file=sys.stderr)
-    decision = decide(
-        inventory, args.task, pinned_model=args.pin,
-        authorize_extra_hosts=args.authorize_extra, plans=plans or None,
-        unknown_usage=args.unknown_usage, tier_override=tier,
-    )
-    if rated:
-        decision["receipt"]["difficulty_rating"] = rated
-    if args.probe and (decision.get("selection") or decision["action"] == "auto"):
-        try:
-            decision["probe"] = probe_auto_router(decision, args.task, read_key=read_key)
-        except (AutoRouteError, OSError, ValueError) as exc:
-            print(f"note: Auto Router probe unavailable ({type(exc).__name__}); using the decision as is", file=sys.stderr)
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        routed = [{"id": n["id"], "decision": route_task(n["task"], pin=n.get("pin"), **common)} for n in nodes]
+        print(json.dumps({"nodes": routed}, indent=2, sort_keys=True))
+        return 3 if any(r["decision"]["action"] == "blocked" for r in routed) else 0
+    decision = route_task(args.task, pin=args.pin, **common)
     if args.choose:
         try:
             decision = validate_choice(decision, args.choose)

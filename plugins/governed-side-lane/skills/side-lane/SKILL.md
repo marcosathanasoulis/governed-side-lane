@@ -234,7 +234,10 @@ credential store. Re-run `setup.py --check` afterward and report the result.
 
 ## Choosing a model (Auto Router)
 
-Run `side-lane auto-route --task "<one line>"` before staffing. It uses only what
+Run `side-lane auto-route --task "<one line>"` before staffing. For a task graph, route every
+node on its own with `side-lane auto-route --nodes nodes.json` (a JSON list of `{id, task}`): the
+Auto Router picks one model per request and does not split a task itself, so each node gets its
+own difficulty rating and its own pick. It uses only what
 this user can reach, in this order: an explicit model pin; a signed-in host with
 included usage (Claude or Codex, through its own CLI, no key needed); the
 OpenRouter Auto Router when a key is stored (metered, so only when nothing

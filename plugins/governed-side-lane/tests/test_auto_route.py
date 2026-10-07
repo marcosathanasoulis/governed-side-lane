@@ -266,6 +266,71 @@ class ProbeTests(unittest.TestCase):
             ar.probe_auto_router({"action": "native"}, "d", read_key=lambda: "k")
 
 
+class GlmGeminiAndNodesTests(unittest.TestCase):
+    def test_glm_and_gemini_picks_run_on_their_own_plans(self):
+        handoff = ar.build_handoff(["glm", "gemini"], "medium")
+        glm = ar.resolve_served(handoff, "z-ai/glm-5.3")
+        self.assertEqual((glm["action"], glm["host"], glm["model"], glm["metered"]), ("native-handoff", "glm", "glm-5.3", False))
+        gem = ar.resolve_served(handoff, "google/gemini-3.8-flash")
+        self.assertEqual((gem["host"], gem["model"]), ("gemini", "gemini-default"))
+        self.assertEqual(ar.resolve_served(handoff, "deepseek/deepseek-v4.1-flash")["action"], "openrouter-exact")
+        # without the plans a glm pick is just a metered OpenRouter model
+        self.assertEqual(ar.resolve_served(ar.build_handoff(["claude"], "medium"), "z-ai/glm-5.3")["action"], "openrouter-exact")
+
+    def test_glm_only_pool_is_limited_to_glm_models(self):
+        i = ar.Inventory({"claude": False, "codex": False, "glm": True}, {"glm": "included-oauth"}, True)
+        d = ar.decide(i, "x", now=NOW)
+        self.assertEqual((d["host"], d["model"]), ("glm", "glm-5.3"))
+        self.assertEqual(d["selection"]["turn_settings"]["allowed_models"], ["z-ai/glm-*"])
+
+    def test_pins_for_glm_and_gemini(self):
+        i = ar.Inventory({"glm": True, "gemini": True}, {"glm": "included-oauth", "gemini": "included-oauth"}, False)
+        self.assertEqual(ar.decide(i, "x", pinned_model="glm-5.3", now=NOW)["action"], "pinned")
+        self.assertEqual(ar.decide(i, "x", pinned_model="gemini-default", now=NOW)["host"], "gemini")
+
+    def test_nodes_file_validation(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "n.json"
+            for bad in ([], [{"id": "a"}], [{"id": "a", "task": "x"}, {"id": "a", "task": "y"}], {"id": "a"}):
+                path.write_text(json.dumps(bad))
+                with self.assertRaises(ar.AutoRouteError):
+                    ar.load_nodes(path)
+            path.write_text(json.dumps([{"id": "a", "task": "x"}]))
+            self.assertEqual(ar.load_nodes(path)[0]["id"], "a")
+
+    def test_each_node_is_routed_on_its_own(self):
+        import argparse
+        import contextlib
+        import io
+        import tempfile
+        parser = argparse.ArgumentParser()
+        ar.add_arguments(parser)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "n.json"
+            path.write_text(json.dumps([
+                {"id": "small", "task": "use the cheapest model to rename a variable"},
+                {"id": "big", "task": "use the best model to design a storage layer"},
+            ]))
+            args = parser.parse_args(["--nodes", str(path)])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = ar.run(args, inventory=inv(claude=True, usage={"claude": "included-oauth"}),
+                            read_key=lambda: "k")
+        self.assertEqual(rc, 0)
+        nodes = {n["id"]: n["decision"] for n in json.loads(out.getvalue())["nodes"]}
+        self.assertEqual(nodes["small"]["model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(nodes["big"]["model"], "claude-fable-5-1")
+
+    def test_task_and_nodes_are_mutually_exclusive(self):
+        import argparse
+        parser = argparse.ArgumentParser()
+        ar.add_arguments(parser)
+        self.assertEqual(ar.run(parser.parse_args([]), inventory=inv(), read_key=lambda: "k"), 2)
+        self.assertEqual(ar.run(parser.parse_args(["--task", "x", "--nodes", "/tmp/x.json"]),
+                                inventory=inv(), read_key=lambda: "k"), 2)
+
+
 class DifficultyTests(unittest.TestCase):
     def test_tier_from_words_only_when_the_request_asks(self):
         self.assertEqual(ar.tier_from_words("please use the best model"), "max")
