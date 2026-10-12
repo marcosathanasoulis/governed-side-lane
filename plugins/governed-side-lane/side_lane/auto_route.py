@@ -49,63 +49,55 @@ PROBE_TIMEOUT_SECONDS = 30
 #: "use the cheapest model") still override it.
 LOCAL_DEFAULT_COST_TIER = "medium"
 
-#: Native model ladder per host and cost tier, ordered by price (OpenRouter
-#: list prices per million tokens in/out, 2026-10-05): Claude haiku 1/5, sonnet
-#: 2/10, opus 4/20, fable 10/50; Codex luna 0.1/0.5, sol 2/10, astra 10/50.
-#: The top model of each host (fable, astra) is only for tasks that really need
-#: it, so it sits at ``max`` and nothing below that reaches it. Devin runs on
-#: its own subscription and is used for the equivalents below or when it is the
-#: only included host.
-NATIVE_LADDER: Mapping[str, Mapping[str, str]] = {
-    "claude": {
-        "low": "claude-haiku-4-5-20251001",
-        "medium": "claude-sonnet-5-5",
-        "high": "claude-opus-5-5",
-        "xhigh": "claude-opus-5-5",
-        "max": "claude-fable-5-1",
-    },
-    "codex": {
-        "low": "gpt-6-luna",
-        "medium": "gpt-6-sol",
-        "high": "gpt-6-sol",
-        "xhigh": "gpt-6-sol",
-        "max": "gpt-6-astra",
-    },
-    "glm": {tier: "glm-5.3" for tier in ("low", "medium", "high", "xhigh", "max")},
-    "gemini": {tier: "gemini-default" for tier in ("low", "medium", "high", "xhigh", "max")},
-    "devin": {
-        "low": "swe-1-7-medium",
-        "medium": "swe-2-medium",
-        "high": "swe-2-high",
-        "xhigh": "swe-2-high",
-        "max": "swe-2-max",
-    },
-}
-#: OpenRouter model id -> the native CLI model that is the same model.
-OPENROUTER_TO_NATIVE: Mapping[str, tuple[str, str]] = {
-    "anthropic/claude-haiku-4.5": ("claude", "claude-haiku-4-5-20251001"),
-    "anthropic/claude-sonnet-5.5": ("claude", "claude-sonnet-5-5"),
-    "anthropic/claude-opus-5.5": ("claude", "claude-opus-5-5"),
-    "anthropic/claude-fable-5.1": ("claude", "claude-fable-5-1"),
-    "openai/gpt-6-luna": ("codex", "gpt-6-luna"),
-    "openai/gpt-6-sol": ("codex", "gpt-6-sol"),
-    "openai/gpt-6-astra": ("codex", "gpt-6-astra"),
-}
-#: OpenRouter picks that run on a subscription plan the router does not know by name:
-#: any ``z-ai/glm-*`` pick runs on the direct GLM route (glm-5.3) and any
-#: ``google/gemini-*`` pick on the Gemini CLI's default model, while that plan has usage.
+#: Native model ladder per host and cost tier, DERIVED from the shared mapping (config/model-tiers.json) so this
+#: legacy path can never disagree with the selector: the first included (or owner-declarable) native model of each
+#: host at each tier. ``max`` is the legacy top tier and follows xhigh. A host with no model at a tier (Gemini Flash is
+#: low only, GLM medium only, Devin has no low model) is simply not offered at that tier. Prices (OpenRouter list,
+#: USD per million tokens in/out): Claude haiku 0.1/0.5, sonnet 2/10, opus 4/20, fable 10/50; Codex luna 0.1/0.5,
+#: sol 2/10, astra 10/50.
+_LADDER_HOSTS = ("claude", "codex", "glm", "gemini", "devin")
+
+
+def _derive_tables():
+    from side_lane.model_selection import tiers as _tiers
+
+    table = _tiers.load()
+    order = list(policy.COST_TIERS)
+    ladder: dict[str, dict[str, str]] = {host: {} for host in _LADDER_HOSTS}
+    min_tier: dict[str, str] = {}
+    exact: dict[str, tuple[str, str]] = {}
+    probe_required: set[str] = set()
+    declarable: set[str] = set()
+    for c in table.entries:
+        if c.provider not in ladder or not (c.plan == "included" or c.declarable_included):
+            continue
+        ladder[c.provider].setdefault(c.tier, c.model)
+        if c.model not in min_tier or order.index(c.tier) < order.index(min_tier[c.model]):
+            min_tier[c.model] = c.tier
+        if c.declarable_included:
+            declarable.add(c.provider)
+        if c.probe_required:
+            probe_required.add(c.provider)
+        if c.openrouter_slug and c.provider in ("claude", "codex", "gemini"):
+            exact.setdefault(c.openrouter_slug, (c.provider, c.model))
+    for tiers_by_host in ladder.values():
+        if "xhigh" in tiers_by_host:
+            tiers_by_host["max"] = tiers_by_host["xhigh"]
+    return ladder, min_tier, exact, frozenset(probe_required), frozenset(declarable)
+
+
+#: ``DECLARABLE_HOSTS`` are providers whose paid-by-default route an owner can declare included (GLM, Gemini):
+#: undeclared means not included. ``PROBE_REQUIRED_HOSTS`` (Gemini) are also only automatic with a successful live probe.
+NATIVE_LADDER, NATIVE_MIN_TIER, OPENROUTER_TO_NATIVE, PROBE_REQUIRED_HOSTS, DECLARABLE_HOSTS = _derive_tables()
+#: OpenRouter picks that run on a subscription plan the router does not know by name: any ``z-ai/glm-*`` pick runs
+#: on the direct GLM route (glm-5.3) while that plan has usage. Gemini has no pattern: only the exact
+#: ``google/gemini-3.8-flash`` maps to the Gemini CLI (see OPENROUTER_TO_NATIVE), so no other Google model is
+#: substituted with it.
 PATTERN_TO_NATIVE: tuple[tuple[str, str, str], ...] = (
     ("z-ai/glm-*", "glm", "glm-5.3"),
-    ("google/gemini-*", "gemini", "gemini-default"),
 )
-#: The lowest cost tier at which a native model may be used. A model is only in
-#: the Auto Router's pool when the task's tier reaches it, so fable and astra
-#: (the same price) are reserved for ``max`` and opus for ``high`` and up.
-NATIVE_MIN_TIER: Mapping[str, str] = {
-    "claude-haiku-4-5-20251001": "low", "claude-sonnet-5-5": "medium",
-    "claude-opus-5-5": "high", "claude-fable-5-1": "max",
-    "gpt-6-luna": "low", "gpt-6-sol": "medium", "gpt-6-astra": "max",
-}
+#: Models offered at exactly one tier (not "this tier and above"): Gemini Flash is a low-tier model.
+NATIVE_ONLY_TIER: Mapping[str, str] = {"gemini-3.8-flash": "low"}
 #: Very high coding models and the Devin model used in their place when Auto
 #: recommends one and Devin is available (Auto does not know Devin). Pattern
 #: lists are checked in order. To be confirmed by the maintainers.
@@ -120,7 +112,7 @@ HOST_MODEL_PATTERNS: Mapping[str, tuple[str, ...]] = {
     "claude": ("anthropic/*",),
     "codex": ("openai/*",),
     "glm": ("z-ai/*",),
-    "gemini": ("google/*",),
+    "gemini": ("google/gemini-3.8-flash",),  # exact: no other Google model is part of the included pool
     "devin": (),
 }
 HOST_ORDER = ("claude", "codex", "glm", "gemini", "devin")
@@ -130,7 +122,7 @@ USAGE_STATES = ("included-oauth", "extra-usage", "unknown")
 #: Planning notes the coordinating model reads when OpenRouter is not set up.
 #: Coarse priors for choosing staffing, not benchmarks; the task wins over them.
 MODEL_PROFILES: Mapping[str, Mapping[str, Any]] = {
-    "claude-haiku-4-5-20251001": {
+    "claude-haiku-5-5": {
         "host": "claude", "tier": "low", "relative_cost": "lowest",
         "strengths": "fast and cheap; mechanical edits, lookups, summaries, simple tests",
         "weaknesses": "small context for large repos; weaker on multi-file design and subtle bugs",
@@ -155,7 +147,7 @@ MODEL_PROFILES: Mapping[str, Mapping[str, Any]] = {
         "strengths": "very cheap and fast; boilerplate and small scripted changes",
         "weaknesses": "limited depth; asks few clarifying questions; not for unfamiliar code",
     },
-    "gpt-6-sol": {
+    "gpt-6.1-sol": {
         "host": "codex", "tier": "medium", "relative_cost": "moderate",
         "strengths": "solid general coding, repo-wide edits and test writing; the Codex default",
         "weaknesses": "less careful than astra on ambiguous or high-risk work",
@@ -170,9 +162,9 @@ MODEL_PROFILES: Mapping[str, Mapping[str, Any]] = {
         "strengths": "included-cost coding model on the GLM plan; good everyday implementation",
         "weaknesses": "less careful than the top Claude and Codex models on hard or ambiguous work",
     },
-    "gemini-default": {
-        "host": "gemini", "tier": "medium", "relative_cost": "subscription",
-        "strengths": "included-cost model on the Google plan; fast, large context",
+    "gemini-3.8-flash": {
+        "host": "gemini", "tier": "low", "relative_cost": "subscription",
+        "strengths": "included-cost Flash model on the Google plan for entitled users; fast, large context; mechanical work",
         "weaknesses": "tool use and long agentic runs are less proven here than Claude or Codex",
     },
     "swe-2-high": {
@@ -199,6 +191,8 @@ class Inventory:
     hosts: Mapping[str, bool]
     host_usage: Mapping[str, str] = field(default_factory=dict)
     openrouter: bool = False
+    #: Hosts whose plan was confirmed by a successful live probe for this user (the private wrapper sets it).
+    probed: frozenset = frozenset()
 
     def __post_init__(self) -> None:
         for host, state in self.host_usage.items():
@@ -267,7 +261,12 @@ def plans_for(inventory: Inventory, *, unknown_usage: str = "included") -> tuple
         if not inventory.hosts.get(host):
             continue
         state = inventory.host_usage.get(host, "unknown")
-        if state == "included-oauth":
+        if host in DECLARABLE_HOSTS and (state != "included-oauth"
+                                         or (host in PROBE_REQUIRED_HOSTS and host not in inventory.probed)):
+            # paid by default: automatic only when declared included (and, for Gemini, live-probed for this user);
+            # otherwise it is not run natively and only competes at metered price.
+            mode, quota = "extra", "declared"
+        elif state == "included-oauth":
             mode, quota = "included", "declared"
         elif state == "extra-usage":
             mode, quota = "extra", "declared"
@@ -315,14 +314,19 @@ def build_handoff(usable: Sequence[str], tier: str = "max") -> dict[str, Any]:
         or_id: {"host": host, "model": model}
         for or_id, (host, model) in OPENROUTER_TO_NATIVE.items()
         if host in usable and order.index(NATIVE_MIN_TIER[model]) <= order.index(tier)
+        and NATIVE_ONLY_TIER.get(model, tier) == tier
     }
+    def reaches(model: str) -> bool:
+        return order.index(NATIVE_MIN_TIER.get(model, "max")) <= order.index(tier)
+
     devin = (
-        [{"patterns": list(patterns), "model": model} for patterns, model in DEVIN_EQUIVALENTS]
+        [{"patterns": list(patterns), "model": model} for patterns, model in DEVIN_EQUIVALENTS if reaches(model)]
         if "devin" in usable else []
     )
     patterns = [
         {"pattern": pattern, "host": host, "model": model}
-        for pattern, host, model in PATTERN_TO_NATIVE if host in usable
+        for pattern, host, model in PATTERN_TO_NATIVE
+        if host in usable and reaches(model) and NATIVE_ONLY_TIER.get(model, tier) == tier
     ]
     return {"native": native, "devin": devin, "patterns": patterns}
 
@@ -387,7 +391,10 @@ def decide(
     if tier not in policy.COST_TIERS:
         raise AutoRouteError(f"unsupported cost tier {tier!r}")
     out_providers = policy.providers_out(plan_list, {}, (), now=current)
-    usable = _usable_hosts(plan_list, inventory, current)
+    usable_any = _usable_hosts(plan_list, inventory, current)
+    # Automatic picks only use hosts that have a model at this tier (Gemini Flash is low-tier only). An explicit pin
+    # below is not tier-bound, so it checks the unfiltered list.
+    usable = [h for h in usable_any if tier in NATIVE_LADDER[h]]
     receipt: dict[str, Any] = {
         "policy": POLICY_ID,
         "cost_tier": tier,
@@ -432,7 +439,7 @@ def decide(
         if host is not None:
             if not inventory.hosts.get(host):
                 return _blocked(receipt, [f"pinned model needs the {host} CLI, which is not installed"], inventory)
-            runnable = host in usable
+            runnable = host in usable_any
             if not runnable and host not in authorized:
                 return _blocked(
                     receipt,
@@ -480,7 +487,7 @@ def decide(
 
     # 4. Explicitly authorized extra usage on a host the user is signed in to.
     for host in HOST_ORDER:
-        if inventory.hosts.get(host) and host in authorized:
+        if inventory.hosts.get(host) and host in authorized and tier in NATIVE_LADDER[host]:
             return native(host, "extra usage authorized for this run", extra=True)
 
     return _blocked(receipt, [], inventory)

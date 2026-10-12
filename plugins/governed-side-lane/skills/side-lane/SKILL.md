@@ -232,38 +232,47 @@ For the OpenRouter key, never ask for it in chat: tell the user to run
 terminal, where the prompt is hidden and the value goes straight to the OS
 credential store. Re-run `setup.py --check` afterward and report the result.
 
-## Choosing a model (Auto Router)
+## Choosing a model
 
-Run `side-lane auto-route --task "<one line>"` before staffing. For a task graph, route every
-node on its own with `side-lane auto-route --nodes nodes.json` (a JSON list of `{id, task}`): the
-Auto Router picks one model per request and does not split a task itself, so each node gets its
-own difficulty rating and its own pick. It uses only what
-this user can reach, in this order: an explicit model pin; a signed-in host with
-included usage (Claude or Codex, through its own CLI, no key needed); the
-OpenRouter Auto Router when a key is stored (metered, so only when nothing
-included can run the task, with hosts in extra usage excluded from its pool);
-otherwise `blocked` with the setup steps. Included usage is declared with
-`side-lane prefs set-usage`; an undeclared host is treated as included. The same
-policy backs Prompt it staffing and the `model-select` skill, so improvements
-reach all three. Extra usage is never used unless the user authorizes it for
-the run (`--authorize-extra <host>`). Without OpenRouter there is no router, so a
-`native` decision carries a `staffing` menu: every model the user can run on
-included usage, with strengths, weaknesses and relative cost. The coordinating
-model (already running, no extra spend) picks the cheapest one that fits the
-task from that menu, then confirms it with `--choose <model>`, which refuses
-anything not listed. The `default` is the tier-based fallback.
-With a key, `side-lane auto-route --probe --task "<one line, de-identified>"`
-rates the task's difficulty (Jev, about $0.00002) and sets the tier that caps the
-model pool; it sends that one line to OpenRouter. With a key and included usage the
-decision carries a `selection` block:
-call `side_lane.auto_route.probe_auto_router` (well under a cent) and the Auto
-Router picks the best model inside the providers that still have included usage;
-the returned `route` is a native hand-off (or a Devin equivalent for a very high
-coding pick when Devin is installed). A host in extra usage is not hidden from
-the Auto Router: its models compete on metered price like any other. Within a
-provider the cheaper model is the default (Claude haiku, sonnet 5.5, opus 5.5;
-Codex luna, sol), and the top model (fable, astra; the same price) is only for
-work that truly needs it.
+Choose the worker with the shared selector, not with rules of your own:
+`side-lane select --task "<one line>" --kind coding` (kinds: `mechanical`/`trivial` are low,
+`service_ops`/`routine` are medium, `coding`/`debugging` are high, `cross_system` is xhigh;
+`--tier low|medium|high|xhigh` overrides).
+Tier comes first, then the work is **spread evenly** across the reviewed, comparable models in that
+tier that you can reach with included usage. Your own harness's models are in that spread like any
+other, so a Codex coordinator hands work to Claude or Devin workers as readily as to Codex,
+and the reverse. A direct GLM key (medium) and the Gemini CLI (low, `gemini-3.8-flash`) are paid by default: each joins
+the spread only when you have declared its plan includes usage (`side-lane prefs set-usage --host glm|gemini --state
+included-oauth`), otherwise it runs only when pinned with metered use allowed. Gemini additionally needs a successful live
+probe for you (Google sign-in plus Cloud project access), so a declaration alone never selects it: use a pin unless your
+setup supplies live probe results. Tiers are preferences, never limits on what a worker may do.
+
+- **Task graphs:** route every node on its own: `side-lane select --nodes nodes.json`
+  (`[{id, task, kind?, tier?, pin_provider?, pin_model?}]`).
+- **Follow-ups:** pass the same `--thread-id` and `--previous selection.json` (for a graph, the earlier graph
+  output). A working route is kept for
+  continuity; it changes only if it becomes unavailable, you ask for another model, or you pass
+  `--task-changed`. The plan owner stays the thread's initiating user.
+- **Pins:** `--pin-provider` / `--pin-model` are honored. An unusable pin is reported, never replaced.
+- **No candidate:** the result is `no_eligible` with every exclusion and its reason (`exhausted`,
+  `auth_failed`, `transient`, `unknown`, `no_binding`, `plan_unverified`). The tier is never changed
+  silently. With `--allow-metered` and an OpenRouter key stored, same-tier metered OpenRouter is the
+  fallback and is labelled billed. Declare usage with `side-lane prefs set-usage`; an undeclared host
+  is treated as included.
+- **Receipts:** the selection is a decision, not proof a lane ran. Record what actually ran with
+  `side-lane receipt --selection selection.json --provider <p> --model <m> --route <route> --success|--failure
+  [--billing included_confirmed|metered_confirmed] [--usage '{"input_tokens": 1}'] [--switch-reason "..."]
+  [--append receipts.jsonl]` (`--node-id <id>` for a graph). It copies the selected route from the selection,
+  keeps billing `unverified` unless you have evidence, refuses credential-like usage, and refuses a run that
+  differs from the selection without a `--switch-reason`. For an OpenRouter Auto run, pass the model Auto served
+  as `--model`; it is recorded as `auto_resolved` when it is inside the allowed set that was sent. Successful
+  sign-in does not prove included billing.
+  After a limit-looking failure, reselect with `--previous` and say why. Before retrying after a
+  failover, read back any external write that may have completed; never repeat one.
+
+`side-lane auto-route` (the OpenRouter Auto Router probe, 16 output tokens, de-identified digest only)
+remains as an experimental selection strategy for comparison and for the metered path. It is not the
+default and must not override the result of `select`.
 
 ## Execute-lane permissions
 

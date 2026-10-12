@@ -66,7 +66,7 @@ class DecideTests(unittest.TestCase):
     def test_the_tier_caps_which_native_models_the_router_may_pick(self):
         both = ["claude", "codex"]
         low = set(ar.build_handoff(both, "low")["native"])
-        self.assertEqual(low, {"anthropic/claude-haiku-4.5", "openai/gpt-6-luna"})
+        self.assertEqual(low, {"anthropic/claude-haiku-5.5", "openai/gpt-6-luna"})
         high = set(ar.build_handoff(both, "high")["native"])
         self.assertIn("anthropic/claude-opus-5.5", high)
         self.assertNotIn("anthropic/claude-fable-5.1", high)
@@ -102,17 +102,17 @@ class DecideTests(unittest.TestCase):
 
     def test_cost_tier_picks_native_model_and_words_override(self):
         i = inv(claude=True, usage={"claude": "included-oauth"})
-        self.assertEqual(self.decide(i, "use the cheapest model")["model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(self.decide(i, "use the cheapest model")["model"], "claude-haiku-5-5")
         self.assertEqual(self.decide(i, "use the best model please")["model"], "claude-fable-5-1")
         c = inv(codex=True, usage={"codex": "included-oauth"})
-        self.assertEqual(self.decide(c)["model"], "gpt-6-sol")  # astra only when really needed
+        self.assertEqual(self.decide(c)["model"], "gpt-6.1-sol")  # astra only when really needed
         self.assertEqual(self.decide(c, "use the best model please")["model"], "gpt-6-astra")
         self.assertEqual(self.decide(c, "use the cheapest model")["model"], "gpt-6-luna")
 
     def test_pin_wins_and_respects_access(self):
         i = inv(claude=True, usage={"claude": "included-oauth"})
         self.assertEqual(self.decide(i, pinned_model="claude-opus-5")["action"], "pinned")
-        self.assertEqual(self.decide(i, pinned_model="gpt-6-sol")["action"], "blocked")
+        self.assertEqual(self.decide(i, pinned_model="gpt-6.1-sol")["action"], "blocked")
         self.assertEqual(self.decide(i, pinned_model="deepseek/deepseek-v3.2")["action"], "blocked")
         d = self.decide(inv(openrouter=True), pinned_model="deepseek/deepseek-v3.2")
         self.assertEqual((d["action"], d["metered"]), ("pinned", True))
@@ -144,7 +144,7 @@ class StaffingTests(unittest.TestCase):
     def test_candidates_cover_only_reachable_included_hosts_with_notes(self):
         d = self.native()
         models = [c["model"] for c in d["staffing"]["candidates"]]
-        self.assertEqual(models, ["claude-haiku-4-5-20251001", "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1"])
+        self.assertEqual(models, ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1"])
         self.assertTrue(all(c["strengths"] and c["weaknesses"] for c in d["staffing"]["candidates"]))
         self.assertEqual(d["staffing"]["default"], d["model"])
 
@@ -156,7 +156,7 @@ class StaffingTests(unittest.TestCase):
         d = self.native()
         self.assertEqual(ar.validate_choice(d, "claude-opus-5-5")["model"], "claude-opus-5-5")
         with self.assertRaises(ar.AutoRouteError):
-            ar.validate_choice(d, "gpt-6-sol")  # codex not installed
+            ar.validate_choice(d, "gpt-6.1-sol")  # codex not installed
         with self.assertRaises(ar.AutoRouteError):
             ar.validate_choice({"action": "blocked"}, "claude-opus-5")
 
@@ -229,7 +229,8 @@ class ProbeTests(unittest.TestCase):
                                  transport=lambda b, h: {"model": "deepseek/deepseek-v3.2"})
 
     def test_very_high_coding_models_map_to_the_devin_equivalent(self):
-        d = self.extra_with_devin()
+        i = ar.Inventory({"claude": True, "codex": False, "devin": True}, {"claude": "extra-usage"}, True)
+        d = ar.decide(i, "summarize this", now=NOW, tier_override="xhigh")
         for served, expected in (("anthropic/claude-fable-5.1", "swe-2-max"),
                                  ("openai/gpt-6-astra", "swe-2-max"),
                                  ("anthropic/claude-opus-5.5", "swe-2-high")):
@@ -240,7 +241,7 @@ class ProbeTests(unittest.TestCase):
                                      transport=lambda b, h: {"model": "deepseek/deepseek-v3.2"})
         # Devin is the included host, so a non-very-high pick stays on Devin, not metered.
         self.assertEqual((other["route"]["action"], other["route"]["model"], other["route"]["metered"]),
-                         ("devin-default", "swe-2-medium", False))
+                         ("devin-default", "swe-2-max", False))
 
     def test_plain_gpt_6_sol_maps_to_devin_medium_when_nothing_is_included(self):
         d = self.extra_with_devin()
@@ -268,11 +269,18 @@ class ProbeTests(unittest.TestCase):
 
 class GlmGeminiAndNodesTests(unittest.TestCase):
     def test_glm_and_gemini_picks_run_on_their_own_plans(self):
-        handoff = ar.build_handoff(["glm", "gemini"], "medium")
-        glm = ar.resolve_served(handoff, "z-ai/glm-5.3")
+        handoff = ar.build_handoff(["glm", "gemini"], "low")
+        glm = ar.resolve_served(ar.build_handoff(["glm", "gemini"], "medium"), "z-ai/glm-5.3")
         self.assertEqual((glm["action"], glm["host"], glm["model"], glm["metered"]), ("native-handoff", "glm", "glm-5.3", False))
         gem = ar.resolve_served(handoff, "google/gemini-3.8-flash")
-        self.assertEqual((gem["host"], gem["model"]), ("gemini", "gemini-default"))
+        self.assertEqual((gem["host"], gem["model"]), ("gemini", "gemini-3.8-flash"))
+        # no other Google model is substituted with Flash
+        self.assertEqual(ar.resolve_served(handoff, "google/gemini-3.5-flash")["action"], "openrouter-exact")
+        self.assertEqual(ar.resolve_served(handoff, "google/gemini-3.1-pro-preview")["action"], "openrouter-exact")
+        # Flash is a low-tier model: it is not handed off at any other tier
+        for tier in ("medium", "high", "xhigh", "max"):
+            above = ar.build_handoff(["glm", "gemini"], tier)
+            self.assertEqual(ar.resolve_served(above, "google/gemini-3.8-flash")["action"], "openrouter-exact", tier)
         self.assertEqual(ar.resolve_served(handoff, "deepseek/deepseek-v4.1-flash")["action"], "openrouter-exact")
         # without the plans a glm pick is just a metered OpenRouter model
         self.assertEqual(ar.resolve_served(ar.build_handoff(["claude"], "medium"), "z-ai/glm-5.3")["action"], "openrouter-exact")
@@ -284,9 +292,69 @@ class GlmGeminiAndNodesTests(unittest.TestCase):
         self.assertEqual(d["selection"]["turn_settings"]["allowed_models"], ["z-ai/glm-*"])
 
     def test_pins_for_glm_and_gemini(self):
-        i = ar.Inventory({"glm": True, "gemini": True}, {"glm": "included-oauth", "gemini": "included-oauth"}, False)
+        i = ar.Inventory({"glm": True, "gemini": True}, {"glm": "included-oauth", "gemini": "included-oauth"}, False,
+                         probed=frozenset({"gemini"}))
         self.assertEqual(ar.decide(i, "x", pinned_model="glm-5.3", now=NOW)["action"], "pinned")
-        self.assertEqual(ar.decide(i, "x", pinned_model="gemini-default", now=NOW)["host"], "gemini")
+        self.assertEqual(ar.decide(i, "x", pinned_model="gemini-3.8-flash", now=NOW)["host"], "gemini")
+        # a paid-by-default plan that is not declared/probed needs the usual explicit authorization for a pin
+        bare = ar.Inventory({"glm": True, "gemini": True}, {}, False)
+        for model in ("glm-5.3", "gemini-3.8-flash"):
+            self.assertEqual(ar.decide(bare, "x", pinned_model=model, now=NOW)["action"], "blocked", model)
+        host = "gemini"
+        authorized = ar.decide(bare, "x", pinned_model="gemini-3.8-flash", authorize_extra_hosts=[host], now=NOW)
+        self.assertEqual((authorized["action"], authorized["metered"]), ("pinned", True))
+    def test_gemini_is_only_offered_at_the_low_tier(self):
+        i = ar.Inventory({"claude": False, "codex": False, "gemini": True}, {"gemini": "included-oauth"}, False,
+                         probed=frozenset({"gemini"}))
+        low = ar.decide(i, "use the cheapest model", now=NOW)
+        self.assertEqual((low["action"], low["host"], low["model"]), ("native", "gemini", "gemini-3.8-flash"))
+        for words in ("use the best model", "fix the failing test"):
+            above = ar.decide(i, words, now=NOW)
+            self.assertNotEqual(above.get("host"), "gemini", words)
+            self.assertEqual(above["action"], "blocked", words)
+        self.assertEqual(ar.NATIVE_LADDER["gemini"], {"low": "gemini-3.8-flash"})
+
+    def test_gemini_and_glm_are_never_automatic_without_a_declaration_and_gemini_needs_a_probe(self):
+        for hosts, usage in (({"claude": False, "codex": False, "gemini": True}, {}),
+                             ({"claude": False, "codex": False, "gemini": True}, {"gemini": "included-oauth"}),  # not probed
+                             ({"claude": False, "codex": False, "glm": True}, {})):
+            d = ar.decide(ar.Inventory(hosts, usage, False), "use the cheapest model", now=NOW)
+            self.assertNotIn(d.get("host"), ("gemini", "glm"), (hosts, usage))
+            self.assertEqual(d["action"], "blocked", (hosts, usage))
+        glm = ar.decide(ar.Inventory({"claude": False, "codex": False, "glm": True}, {"glm": "included-oauth"}, False),
+                        "fix the failing test", now=NOW)
+        self.assertEqual((glm["host"], glm["model"]), ("glm", "glm-5.3"))  # declared GLM is automatic (medium)
+
+    def test_the_ladder_is_the_shared_mapping_so_the_two_cannot_disagree(self):
+        from side_lane.model_selection import load
+        table = load()
+        for host, ladder in ar.NATIVE_LADDER.items():
+            for tier, model in ladder.items():
+                src = "xhigh" if tier == "max" else tier
+                first = next(c for c in table.for_tier(src) if c.provider == host and (c.plan == "included" or c.declarable_included))
+                self.assertEqual(model, first.model, (host, tier))
+        self.assertEqual(ar.NATIVE_LADDER["glm"], {"medium": "glm-5.3"})
+        self.assertEqual(ar.NATIVE_LADDER["devin"], {"medium": "swe-2-medium", "high": "swe-2-high",
+                                                     "xhigh": "swe-2-max", "max": "swe-2-max"})
+        self.assertNotIn("low", ar.NATIVE_LADDER["devin"])
+        self.assertEqual(ar.NATIVE_LADDER["claude"]["xhigh"], "claude-fable-5-1")
+        self.assertEqual(ar.NATIVE_LADDER["codex"]["xhigh"], "gpt-6-astra")
+        self.assertEqual(ar.NATIVE_MIN_TIER["claude-fable-5-1"], "xhigh")
+        self.assertEqual(ar.PROBE_REQUIRED_HOSTS, frozenset({"gemini"}))
+        self.assertEqual(ar.DECLARABLE_HOSTS, frozenset({"gemini", "glm"}))
+        self.assertEqual({k: v for k, v in ar.OPENROUTER_TO_NATIVE.items() if v[0] == "gemini"},
+                         {"google/gemini-3.8-flash": ("gemini", "gemini-3.8-flash")})
+
+    def test_the_ladder_only_names_models_the_catalog_can_launch(self):
+        import json
+        from pathlib import Path
+        catalog = json.loads((Path(__file__).parents[1] / "config" / "models.json").read_text())
+        launchable = {m for p in catalog.get("providers", catalog).values() for mode in p.get("routes", {}).values()
+                      for host in mode.values() for m in host.get("models", [])}
+        for host, ladder in ar.NATIVE_LADDER.items():
+            if host in ("claude", "codex"):  # devin and gemini routes are not in the public governed catalog
+                for model in ladder.values():
+                    self.assertIn(model, launchable, f"{host}: {model}")
 
     def test_nodes_file_validation(self):
         import tempfile
@@ -319,7 +387,7 @@ class GlmGeminiAndNodesTests(unittest.TestCase):
                             read_key=lambda: "k")
         self.assertEqual(rc, 0)
         nodes = {n["id"]: n["decision"] for n in json.loads(out.getvalue())["nodes"]}
-        self.assertEqual(nodes["small"]["model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(nodes["small"]["model"], "claude-haiku-5-5")
         self.assertEqual(nodes["big"]["model"], "claude-fable-5-1")
 
     def test_task_and_nodes_are_mutually_exclusive(self):
@@ -371,6 +439,20 @@ class PlansTests(unittest.TestCase):
     def test_bad_usage_state_rejected(self):
         with self.assertRaises(ar.AutoRouteError):
             ar.Inventory({"claude": True}, {"claude": "free"})
+
+
+class SparseTierRegressionTests(unittest.TestCase):
+    def test_handoff_respects_tier(self):
+        low = ar.build_handoff(["glm", "devin"], "low")
+        self.assertEqual(low["patterns"], [])
+        self.assertEqual(low["devin"], [])
+        high = ar.build_handoff(["devin"], "high")
+        self.assertNotIn("swe-2-max", [e["model"] for e in high["devin"]])
+
+    def test_authorized_extra_skips_hosts_without_tier_model(self):
+        inv = ar.Inventory({"gemini": True}, {}, False)
+        out = ar.decide(inv, "task", authorize_extra_hosts=["gemini"], plans=())
+        self.assertEqual(out["action"], "blocked")
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import os
 import json
+import math
 from contextlib import suppress
 from pathlib import Path
 import re
@@ -85,6 +86,37 @@ FIRST_WAVE_ENDPOINTS = {
 # below; every OpenRouter model is otherwise an ordinary anthropic-compatible
 # Bearer route and needs no other special-casing here.
 OPENROUTER_PROVIDER = "openrouter"
+#: OpenRouter's auto-router id. The serving model is chosen by OpenRouter per
+#: request, so this one id has no exact-identity contract: the adapter records
+#: the model(s) each response attested (``attested_models``/``resolved_model``)
+#: and fails closed when none, or a malformed one, is attested.
+OPENROUTER_AUTO_MODEL = "openrouter/auto"
+#: An OpenRouter *preset* (account-level routing config, e.g. a GLM-preferring
+#: provider order) is addressed as ``@preset/<slug>`` in the model field. It may
+#: stand in for ``openrouter/auto`` only: the request model differs from the
+#: requested identity by exactly this documented form, never silently.
+OPENROUTER_PRESET_RUNTIME_RE = re.compile(r"@preset/[a-z0-9][a-z0-9-]{0,63}")
+#: One contract for an OpenRouter model id, requested or served: a lowercase
+#: vendor slug, ``/``, a model slug; at most ``OPENROUTER_MODEL_ID_MAX_CHARS``
+#: characters; no ``.``/``..`` path segment. A served-model attestation that
+#: does not satisfy it is malformed and fails closed.
+OPENROUTER_MODEL_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]*/[A-Za-z0-9._:-]+")
+OPENROUTER_MODEL_ID_MAX_CHARS = 128
+
+
+def is_openrouter_model_id(model: object) -> bool:
+    """Whether ``model`` satisfies the OpenRouter model-id contract above."""
+
+    if not isinstance(model, str) or len(model) > OPENROUTER_MODEL_ID_MAX_CHARS:
+        return False
+    if OPENROUTER_MODEL_ID_RE.fullmatch(model) is None:
+        return False
+    return not any(part in {".", ".."} for part in model.split("/"))
+
+
+#: Claude Code stamps this on locally fabricated assistant messages (errors,
+#: interrupted turns); it is not a served model.
+SYNTHETIC_MODELS = frozenset({"<synthetic>", "synthetic"})
 
 #: The two execute-lane tool profiles.  ``standard`` is the PUBLIC default and
 #: keeps every existing lane's argv byte-identical: the literal per-command
@@ -1425,7 +1457,11 @@ def _route_metadata(
     mode: str,
 ) -> tuple[str, str, str, bool]:
     runtime_model = _nonempty(model_config.get("runtime_model"), "runtime_model")
-    if runtime_model != model:
+    if runtime_model != model and not (
+        provider == OPENROUTER_PROVIDER
+        and model == OPENROUTER_AUTO_MODEL
+        and OPENROUTER_PRESET_RUNTIME_RE.fullmatch(runtime_model)
+    ):
         raise ClaudeAdapterError("model configuration would silently substitute a model")
     protocol = _nonempty(model_config.get("protocol"), "protocol")
     gateway = _nonempty(provider_config.get("gateway"), "gateway")
@@ -1462,6 +1498,18 @@ def _route_metadata(
                     "routed provider must not claim an exact model identity contract"
                 )
             validate_routing_policy_contract(provider, model, model_config)
+        elif provider == OPENROUTER_PROVIDER and model == OPENROUTER_AUTO_MODEL:
+            # The auto-router chooses the serving model, so an exact identity
+            # contract (which would pin the alias as the answer) is refused;
+            # the attested served model is recorded after the run instead.
+            if isinstance(model_config.get("identity_contract"), Mapping):
+                raise ClaudeAdapterError(
+                    "openrouter/auto must not claim an exact model identity contract"
+                )
+            if isinstance(model_config.get(ROUTING_POLICY_CONTRACT_KEY), Mapping):
+                raise ClaudeAdapterError(
+                    "routing policy contracts are reserved for routed providers"
+                )
         elif provider != "glm":
             if isinstance(model_config.get(ROUTING_POLICY_CONTRACT_KEY), Mapping):
                 raise ClaudeAdapterError(
@@ -2615,6 +2663,28 @@ def _launch_worker(
         elif resolved_model != model:
             completed = subprocess.CompletedProcess(command, 65, stdout, stderr)
             stderr = (stderr + f"\nidentity-mismatch: requested {model!r}, attested {resolved_model!r}").lstrip()
+    if provider == OPENROUTER_PROVIDER:
+        usage = _with_openrouter_cost(usage, stdout)
+    if provider == OPENROUTER_PROVIDER and model == OPENROUTER_AUTO_MODEL:
+        # Auto-router attestation: the stream echoes the requested alias (and
+        # a preset slug) in frames such as init; those are not evidence of what
+        # served the request, so they are ignored. What remains is the set of
+        # models OpenRouter itself reported. Missing or malformed attestation
+        # fails closed; any well-formed served model is recorded, never
+        # promoted to a qualification claim.
+        served = frozenset(
+            name for name in attested_models
+            if name not in {model, runtime_model} and name not in SYNTHETIC_MODELS
+        )
+        attested_models = served
+        resolved_model = next(iter(served)) if len(served) == 1 else None
+        if int(completed.returncode) == 0:
+            if not served:
+                completed = subprocess.CompletedProcess(command, 65, stdout, stderr)
+                stderr = (stderr + "\nrouting-unverified: openrouter/auto response did not attest a served model").lstrip()
+            elif not all(is_openrouter_model_id(name) for name in served):
+                completed = subprocess.CompletedProcess(command, 65, stdout, stderr)
+                stderr = (stderr + "\nrouting-unverified: openrouter/auto attested a malformed served model id").lstrip()
     if int(completed.returncode) == 0 and provider in ROUTED_PROVIDERS:
         # Routed-contract attestation: the stream must attest at least one
         # actual upstream model and every attested model must fall inside the
@@ -2676,6 +2746,78 @@ def _launch_worker(
         ),
         usage=usage,
     )
+
+
+def _finite_cost(value: object) -> float | None:
+    """``value`` as a finite non-negative USD float, else ``None``.
+
+    ``json.loads`` accepts arbitrarily large integer literals, and ``float()``
+    of one raises ``OverflowError``; an external cost that cannot be converted
+    is simply an unavailable cost, never a crash in receipt generation.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+def _openrouter_stream_cost(stdout: str) -> tuple[float | None, int]:
+    """OpenRouter's own per-message ``usage.cost`` summed from a stream.
+
+    Claude Code's ``total_cost_usd`` prices by Anthropic model name, so it is
+    wrong for every other model and is never used. This reads only the cost
+    OpenRouter reported (``usage.cost`` on each assistant message, counted once
+    per message id; the CLI repeats a message's usage on every content block).
+    Returns ``(total, messages)``; ``total`` is ``None`` unless EVERY usage-
+    bearing message carried a finite non-negative cost, so a partial sum is
+    never presented as the run's cost. Nothing is estimated.
+    """
+
+    costs: dict[str, float | None] = {}
+    for line_number, line in enumerate(stdout.splitlines()):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = event.get("message") if isinstance(event, Mapping) else None
+        usage = message.get("usage") if isinstance(message, Mapping) else None
+        if not isinstance(usage, Mapping):
+            continue
+        message_id = message.get("id")
+        identity = message_id if isinstance(message_id, str) and message_id else f"line:{line_number}"
+        value = _finite_cost(usage.get("cost"))
+        valid = value is not None
+        if valid:
+            previous = costs.get(identity)
+            costs[identity] = max(value, previous) if previous is not None else value
+        else:
+            costs.setdefault(identity, None)
+    if not costs or any(value is None for value in costs.values()):
+        return None, len(costs)
+    return sum(value for value in costs.values() if value is not None), len(costs)
+
+
+def _with_openrouter_cost(usage: dict[str, Any] | None, stdout: str) -> dict[str, Any] | None:
+    """Attach OpenRouter-reported cost to ``usage`` (openrouter runs only)."""
+
+    total, messages = _openrouter_stream_cost(stdout)
+    # The generic ``cost`` key is stripped on every OpenRouter path: a partial
+    # per-message sum (some messages carried a cost, some did not) must never
+    # surface as the run's cost; the only cost reported is the all-or-nothing
+    # ``openrouter_cost_usd`` below.
+    merged = {k: v for k, v in usage.items() if k != "cost"} if isinstance(usage, Mapping) else {}
+    if total is not None and not math.isfinite(total):
+        total = None
+    if total is None:
+        return merged if isinstance(usage, Mapping) else usage
+    merged["openrouter_cost_usd"] = round(total, 8)
+    merged["openrouter_cost_source"] = "openrouter_reported"
+    merged["openrouter_cost_messages"] = messages
+    return merged
 
 
 def _stream_metadata(stdout: str) -> tuple[str | None, dict[str, Any] | None, frozenset[str]]:

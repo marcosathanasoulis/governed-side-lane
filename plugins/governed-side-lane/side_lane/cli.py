@@ -16,6 +16,8 @@ import sys
 from typing import Any, Mapping, Sequence
 
 from side_lane import auto_route, evaluation, preferences, report_stop_hook, routing, selector_policy
+from side_lane.model_selection import local as model_selection_local
+from side_lane.model_selection import receipt as model_selection_receipt
 from side_lane.auth import AuthError, auth_status, require_native_oauth
 from side_lane.capabilities import (
     CODEX_CONNECTOR_NAME_CAPABILITIES,
@@ -54,8 +56,11 @@ from side_lane.skill_bundle import SkillBundleError, catalog_note, deliver_skill
 from side_lane.adapters.claude import (
     EXECUTE_PROFILES,
     LOCAL_DEVELOPER_PROFILE,
+    OPENROUTER_MODEL_ID_MAX_CHARS,
+    OPENROUTER_MODEL_ID_RE,
     STANDARD_PROFILE,
     ClaudeAdapterError,
+    is_openrouter_model_id,
     require_report_only_budget,
 )
 from side_lane.adapters.codex import CodexAdapterError
@@ -273,7 +278,22 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     return config
 
 
-ANY_MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,60}/[A-Za-z0-9][A-Za-z0-9._:+-]{0,100}")
+#: OpenRouter model ids are an open set. One strict shape is accepted for an
+#: ``any_model`` provider, shared with the adapter's served-model attestation
+#: check (``side_lane.adapters.claude.is_openrouter_model_id``): a lowercase
+#: vendor slug, ``/``, a model slug; no whitespace, no ``.``/``..`` segment, at
+#: most 128 characters.
+ANY_MODEL_ID_RE = OPENROUTER_MODEL_ID_RE
+ANY_MODEL_ID_MAX_CHARS = OPENROUTER_MODEL_ID_MAX_CHARS
+#: OpenRouter's auto-router. The model that serves each request is chosen by
+#: OpenRouter, so its identity is *attested per response*, never pinned.
+OPENROUTER_AUTO_MODEL = "openrouter/auto"
+
+
+def is_any_model_id(model: object) -> bool:
+    """Whether ``model`` is a well-formed open-set (OpenRouter) model id."""
+
+    return is_openrouter_model_id(model)
 
 
 def select_route(
@@ -286,17 +306,20 @@ def select_route(
     if route is None:
         raise SideLaneError(f"unsupported route: {host}/{mode}/{provider}")
     # A provider flagged ``any_model`` (OpenRouter) can run any model on its list: the
-    # Auto Router may pick one that is not individually configured. The id must be a
-    # well-formed provider/model slug; its identity contract is pinned to that exact slug.
+    # id need not be individually configured. It must be a well-formed
+    # provider/model slug; its identity contract is derived from that exact slug,
+    # except for ``openrouter/auto`` whose served model is attested, not pinned.
+    any_model = provider_config.get("any_model") is True
     unlisted_any_model = (
-        model not in route["models"]
-        and provider_config.get("any_model") is True
-        and isinstance(model, str)
-        and ANY_MODEL_ID_RE.fullmatch(model) is not None
+        model not in route["models"] and any_model and is_any_model_id(model)
     )
     if model not in route["models"] and not unlisted_any_model:
         raise SideLaneError(
             f"model {model!r} is not allowed for {host}/{mode}/{provider}"
+        )
+    if any_model and not is_any_model_id(model):
+        raise SideLaneError(
+            f"model {model!r} is not a well-formed {provider} model id"
         )
     model_config: dict[str, Any] = {
         "runtime_model": model,
@@ -314,16 +337,35 @@ def select_route(
     ):
         if key in route:
             model_config[key] = route[key]
+    configs = route.get("model_configs", {})
     if unlisted_any_model:
-        template = route.get("model_configs", {}).get(route["models"][0], {})
-        unlisted = {key: value for key, value in template.items() if key not in {"identity_contract", "qualification"}}
-        unlisted["identity_contract"] = {
-            "requested_model": model, "resolved_model": model, "settings_precedence": "verified",
-        }
-        unlisted["qualification"] = {"verified": False, "kind": "auto-router-selected"}
+        # The reviewed template carries the route's transport qualification and
+        # defaults (timeout, execution location). An unlisted model inherits the
+        # template's TRANSPORT qualification only when that template is itself
+        # verified; otherwise it stays unqualified and the adapter refuses it.
+        template_name = (
+            OPENROUTER_AUTO_MODEL if OPENROUTER_AUTO_MODEL in configs else route["models"][0]
+        )
+        template = configs.get(template_name, {})
+        unlisted = {key: value for key, value in template.items() if key not in {"identity_contract", "qualification", "runtime_model"}}
+        template_qualification = template.get("qualification")
+        if isinstance(template_qualification, Mapping) and template_qualification.get("verified") is True:
+            unlisted["qualification"] = {**template_qualification, "inherited_from": template_name}
+        else:
+            unlisted["qualification"] = {"verified": False, "kind": "auto-router-selected"}
         model_config.update(unlisted)
     else:
-        model_config.update(route.get("model_configs", {}).get(model, {}))
+        model_config.update(configs.get(model, {}))
+    if any_model:
+        # Identity is always derived from the model actually requested, so a
+        # cloned or inherited template entry can never carry another model's
+        # contract. ``openrouter/auto`` carries NONE: OpenRouter picks the
+        # serving model per request and the adapter records what it attested.
+        model_config.pop("identity_contract", None)
+        if model != OPENROUTER_AUTO_MODEL:
+            model_config["identity_contract"] = {
+                "requested_model": model, "resolved_model": model, "settings_precedence": "verified",
+            }
     billable = model_config["billable"]
     if not isinstance(billable, bool):
         raise SideLaneError("model billable metadata must be boolean")
@@ -638,6 +680,12 @@ def make_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--input", required=True)
     auto_route_parser = sub.add_parser("auto-route", allow_abbrev=False)
     auto_route.add_arguments(auto_route_parser)
+    select_parser = sub.add_parser("select", allow_abbrev=False,
+                                   help="shared model selection: tier first, then spread across included routes")
+    model_selection_local.add_arguments(select_parser)
+    receipt_parser = sub.add_parser("receipt", allow_abbrev=False,
+                                    help="record what actually ran, validated against the selection that chose it")
+    model_selection_receipt.add_arguments(receipt_parser)
     prefs = sub.add_parser("prefs", allow_abbrev=False)
     prefs_sub = prefs.add_subparsers(dest="prefs_command", required=True)
     prefs_show = prefs_sub.add_parser("show", allow_abbrev=False)
@@ -4714,6 +4762,10 @@ def run(argv: Sequence[str] | None = None) -> int:
         return _evaluate(args.input)
     if args.command == "auto-route":
         return auto_route.run(args)
+    if args.command == "select":
+        return model_selection_local.run(args)
+    if args.command == "receipt":
+        return model_selection_receipt.run(args)
     if args.command == "prefs":
         if args.prefs_command == "show":
             saved = preferences.load_preferences()

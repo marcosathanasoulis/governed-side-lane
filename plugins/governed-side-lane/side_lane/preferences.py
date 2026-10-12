@@ -20,7 +20,8 @@ import platform
 import tempfile
 from typing import Mapping
 
-SUPPORTED_HOSTS = frozenset({"claude", "codex"})
+#: ``glm`` (a direct-API key) and ``gemini`` (a plan for entitled users) are the plans a user can declare included.
+SUPPORTED_HOSTS = frozenset({"claude", "codex", "glm", "gemini"})
 SUPPORTED_STATES = frozenset({"included-oauth", "extra-usage", "unknown"})
 PREFERENCES_FILENAME = "preferences.json"
 PREFERENCES_DIR_NAME = "governed-side-lane"

@@ -61,6 +61,18 @@ class PreferencesStoreTests(unittest.TestCase):
             preferences.save_usage("claude", "included-oauth", path)
             self.assertEqual(preferences.load_preferences(path), {"claude": "included-oauth"})
 
+    def test_glm_usage_can_be_declared_and_does_not_disturb_auto_route(self) -> None:
+        from side_lane import auto_route
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "preferences.json"
+            preferences.save_usage("glm", "included-oauth", path)
+            usage = preferences.load_preferences(path)
+            self.assertEqual(usage, {"glm": "included-oauth"})
+            inventory = auto_route.Inventory(hosts={"claude": True, "codex": False}, host_usage=usage)
+            decision = auto_route.decide(inventory, "fix the failing test", now=1_800_000_000.0)
+            self.assertEqual((decision["action"], decision["host"]), ("native", "claude"))
+
     def test_unsupported_host_or_state_refuses(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "preferences.json"

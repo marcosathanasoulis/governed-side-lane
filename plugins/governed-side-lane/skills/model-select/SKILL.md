@@ -21,18 +21,15 @@ published package version.
   native host the user has declared to be in extra usage), to decide which
   model to use and confirm the user is fine with the expected cost.
 
-## 0. Start from the Auto Router decision
+## 0. Start from the shared selection
 
-`side-lane auto-route --task "<one line>"` applies the shared policy first:
-pin, then included OAuth usage on a host the user is signed in to, then the
-OpenRouter Auto Router (metered, only when nothing included can run the task),
-else `blocked` with setup steps. A `native` decision includes a `staffing` menu
-for the coordinator to choose from when there is no OpenRouter. Use this skill's ranking when the user wants to
-compare routes in detail or the decision is `auto` and they want a cost view.
-OpenRouter is optional: without a key everything works on the user's own hosts,
-and you may mention once that a free OpenRouter account (key stored through the
-setup wizard, never pasted into chat) lets the Auto Router pick cheaper models
-when included usage is out.
+`side-lane select --task "<one line>" --kind coding` applies the shared contract first: tier
+(medium, high, xhigh), then an even spread across the comparable included models the user can reach,
+with same-tier metered OpenRouter only as a labelled, billed fallback when allowed. A pin is honored and
+never silently replaced. Use this skill's ranking when the user wants to compare routes in detail or the
+result is the metered fallback and they want a cost view. OpenRouter is optional: without a key
+everything works on the user's own hosts, and you may mention once that a free OpenRouter account (key
+stored through the setup wizard, never pasted into chat) gives a metered fallback when included usage is out.
 
 ## 1. Gather inputs without guessing
 
