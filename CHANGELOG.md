@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.0 - 2026-10-13
+
+- Extra usage is never used. `side-lane auto-route` no longer has `--authorize-extra`, an explicit pin to a host with no included usage is blocked (not run metered), and the `extra-usage` declared state remains only as an exclusion for people who have it on. With extra usage off, a probe that succeeds ran on included usage and a failure means none is left. Metered OpenRouter stays a separate, labelled route.
+
 ## 0.8.0 - 2026-10-12
 
 - One shared model-selection contract for Prompt it and Side Lane (`side_lane.model_selection`, stdlib only). `side-lane select --task "<one line>" --kind coding` picks the worker: **tier first** (medium for routine service operations, high for substantial coding or debugging, xhigh for unusually complex cross-system work), then work is **spread evenly** across the reviewed, comparable models you can reach on included usage, your own harness's family included. An explicit provider or model request is honored and never silently replaced; a tier is never changed silently; same-tier metered OpenRouter is a labelled, billed fallback only when allowed. Task graphs route every node on its own (`--nodes`), and follow-ups keep their route and plan owner (`--thread-id`, `--previous`) unless the route becomes unavailable, a different model is requested, or the task materially changed.

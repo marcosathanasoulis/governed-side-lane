@@ -44,7 +44,7 @@ class DecideTests(unittest.TestCase):
     def test_extra_usage_is_never_used_silently(self):
         d = self.decide(ar.Inventory({"claude": True, "codex": False}, {"claude": "extra-usage"}, False))
         self.assertEqual(d["action"], "blocked")
-        self.assertTrue(any("extra usage" in s for s in d["next_steps"]))
+        self.assertTrue(any("no included usage" in s for s in d["next_steps"]))
 
     def test_extra_usage_with_key_goes_to_auto_and_claude_competes_on_metered_price(self):
         i = ar.Inventory({"claude": True, "codex": False}, {"claude": "extra-usage"}, True)
@@ -79,11 +79,6 @@ class DecideTests(unittest.TestCase):
         i = ar.Inventory({"claude": False, "codex": False, "devin": True}, {}, False)
         d = self.decide(i)
         self.assertEqual((d["action"], d["host"], d["model"]), ("native", "devin", "swe-2-medium"))
-
-    def test_explicit_extra_authorization_allows_native_when_no_key(self):
-        i = ar.Inventory({"claude": True, "codex": False}, {"claude": "extra-usage"}, False)
-        d = self.decide(i, authorize_extra_hosts=["claude"])
-        self.assertEqual((d["action"], d["metered"]), ("native", True))
 
     def test_included_beats_openrouter(self):
         d = self.decide(inv(claude=True, openrouter=True, usage={"claude": "included-oauth"}))
@@ -159,12 +154,6 @@ class StaffingTests(unittest.TestCase):
             ar.validate_choice(d, "gpt-6.1-sol")  # codex not installed
         with self.assertRaises(ar.AutoRouteError):
             ar.validate_choice({"action": "blocked"}, "claude-opus-5")
-
-    def test_extra_usage_native_has_no_staffing_menu(self):
-        i = ar.Inventory({"claude": True, "codex": False}, {"claude": "extra-usage"}, False)
-        d = ar.decide(i, "x", authorize_extra_hosts=["claude"], now=NOW)
-        self.assertNotIn("staffing", d)
-
 
 class ProbeTests(unittest.TestCase):
     def auto_decision(self):
@@ -296,13 +285,10 @@ class GlmGeminiAndNodesTests(unittest.TestCase):
                          probed=frozenset({"gemini"}))
         self.assertEqual(ar.decide(i, "x", pinned_model="glm-5.3", now=NOW)["action"], "pinned")
         self.assertEqual(ar.decide(i, "x", pinned_model="gemini-3.8-flash", now=NOW)["host"], "gemini")
-        # a paid-by-default plan that is not declared/probed needs the usual explicit authorization for a pin
+        # a paid-by-default plan that is not declared/probed cannot run, even when pinned (extra usage is never used)
         bare = ar.Inventory({"glm": True, "gemini": True}, {}, False)
         for model in ("glm-5.3", "gemini-3.8-flash"):
             self.assertEqual(ar.decide(bare, "x", pinned_model=model, now=NOW)["action"], "blocked", model)
-        host = "gemini"
-        authorized = ar.decide(bare, "x", pinned_model="gemini-3.8-flash", authorize_extra_hosts=[host], now=NOW)
-        self.assertEqual((authorized["action"], authorized["metered"]), ("pinned", True))
     def test_gemini_is_only_offered_at_the_low_tier(self):
         i = ar.Inventory({"claude": False, "codex": False, "gemini": True}, {"gemini": "included-oauth"}, False,
                          probed=frozenset({"gemini"}))
@@ -449,10 +435,12 @@ class SparseTierRegressionTests(unittest.TestCase):
         high = ar.build_handoff(["devin"], "high")
         self.assertNotIn("swe-2-max", [e["model"] for e in high["devin"]])
 
-    def test_authorized_extra_skips_hosts_without_tier_model(self):
-        inv = ar.Inventory({"gemini": True}, {}, False)
-        out = ar.decide(inv, "task", authorize_extra_hosts=["gemini"], plans=())
-        self.assertEqual(out["action"], "blocked")
+    def test_extra_usage_is_never_used_and_the_option_is_gone(self):
+        inv = ar.Inventory({"claude": True}, {"claude": "extra-usage"}, False)
+        self.assertEqual(ar.decide(inv, "task", now=NOW)["action"], "blocked")
+        self.assertEqual(ar.decide(inv, "x", pinned_model="claude-opus-5-5", now=NOW)["action"], "blocked")
+        with self.assertRaises(TypeError):
+            ar.decide(inv, "task", authorize_extra_hosts=["claude"])
 
 
 if __name__ == "__main__":

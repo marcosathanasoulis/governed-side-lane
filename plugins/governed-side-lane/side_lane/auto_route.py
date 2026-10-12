@@ -360,7 +360,6 @@ def decide(
     query: str,
     *,
     pinned_model: str | None = None,
-    authorize_extra_hosts: Iterable[str] = (),
     plans: Sequence[policy.DeclaredPlan] | None = None,
     unknown_usage: str = "included",
     settings: policy.AutoRouterSettings | None = None,
@@ -384,7 +383,6 @@ def decide(
     current = time.time() if now is None else now
     settings = settings or policy.AutoRouterSettings(default_cost_tier=LOCAL_DEFAULT_COST_TIER)
     plan_list = tuple(plans) if plans is not None else plans_for(inventory, unknown_usage=unknown_usage)
-    authorized = set(authorize_extra_hosts)
     tier = tier_override or policy.cost_tier_for(
         query, default=settings.default_cost_tier, complexity=settings.complexity_tiers
     )
@@ -407,7 +405,6 @@ def decide(
         "plans": policy.plans_summary(plan_list, current),
         "providers_out": list(out_providers),
         "usable_included_hosts": usable,
-        "authorized_extra_hosts": sorted(authorized),
     }
 
     def turn_for(allowed: Sequence[str] = (), excluded_providers: Sequence[str] = ()) -> dict[str, Any]:
@@ -420,17 +417,16 @@ def decide(
             base = dataclasses.replace(base, allowed_models=tuple(allowed))
         return base.to_context()
 
-    def native(host: str, reason: str, extra: bool = False) -> dict[str, Any]:
+    def native(host: str, reason: str) -> dict[str, Any]:
         result: dict[str, Any] = {
             "action": "native", "host": host, "model": NATIVE_LADDER[host][tier],
-            "metered": extra, "reason": reason, "receipt": receipt,
+            "metered": False, "reason": reason, "receipt": receipt,
         }
-        if not extra:
-            result["staffing"] = {
-                "mode": "coordinator-choice", "default": result["model"],
-                "instructions": STAFFING_INSTRUCTIONS,
-                "candidates": staffing_candidates(inventory, plan_list, current),
-            }
+        result["staffing"] = {
+            "mode": "coordinator-choice", "default": result["model"],
+            "instructions": STAFFING_INSTRUCTIONS,
+            "candidates": staffing_candidates(inventory, plan_list, current),
+        }
         return result
 
     # 1. Pin wins.
@@ -440,14 +436,14 @@ def decide(
             if not inventory.hosts.get(host):
                 return _blocked(receipt, [f"pinned model needs the {host} CLI, which is not installed"], inventory)
             runnable = host in usable_any
-            if not runnable and host not in authorized:
+            if not runnable:
                 return _blocked(
                     receipt,
-                    [f"{host} has no included usage; authorize extra usage for this run to use {pinned_model}"],
+                    [f"{host} has no included usage, so {pinned_model} cannot run (extra usage is never used)"],
                     inventory,
                 )
             return {"action": "pinned", "host": host, "model": pinned_model,
-                    "metered": not runnable, "reason": "explicit pin", "receipt": receipt}
+                    "metered": False, "reason": "explicit pin", "receipt": receipt}
         if not inventory.openrouter:
             return _blocked(receipt, ["pinned OpenRouter model needs an OpenRouter key"], inventory)
         if not policy.SERVED_MODEL_RE.fullmatch(pinned_model):
@@ -485,11 +481,6 @@ def decide(
             "handoff": handoff, "receipt": receipt,
         }
 
-    # 4. Explicitly authorized extra usage on a host the user is signed in to.
-    for host in HOST_ORDER:
-        if inventory.hosts.get(host) and host in authorized and tier in NATIVE_LADDER[host]:
-            return native(host, "extra usage authorized for this run", extra=True)
-
     return _blocked(receipt, [], inventory)
 
 
@@ -499,7 +490,7 @@ def _blocked(receipt: dict[str, Any], reasons: list[str], inventory: Inventory) 
         steps.append("install and sign in to the Claude Code or Codex CLI")
     for host in HOST_ORDER:
         if inventory.hosts.get(host) and inventory.host_usage.get(host) == "extra-usage":
-            steps.append(f"{host} is in extra usage; authorize it for this run or wait for the allowance to reset")
+            steps.append(f"{host} has no included usage left; wait for the allowance to reset")
     if not inventory.openrouter:
         steps.append("optional: add an OpenRouter key (setup wizard, hidden prompt) to use the Auto Router")
     return {
@@ -730,8 +721,6 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
                         help="JSON list of {id, task, pin?}: route every node of a task graph on its own "
                         "(own difficulty rating, own pick), instead of one decision for the whole job")
     parser.add_argument("--pin", default=None, help="explicit model id; wins over everything")
-    parser.add_argument("--authorize-extra", action="append", default=[], choices=HOST_ORDER,
-                        help="allow extra (metered) usage on this host for this run")
     parser.add_argument("--unknown-usage", choices=("included", "excluded"), default="included")
     parser.add_argument("--plans", type=Path, default=None, help="declared-plans JSON (see config/examples)")
     parser.add_argument("--probe", action="store_true",
@@ -748,7 +737,6 @@ def route_task(
     plans: Sequence[policy.DeclaredPlan] | None,
     read_key: Callable[[], str],
     pin: str | None = None,
-    authorize_extra: Iterable[str] = (),
     unknown_usage: str = "included",
     probe: bool = False,
 ) -> dict[str, Any]:
@@ -762,7 +750,7 @@ def route_task(
         except (AutoRouteError, OSError, ValueError) as exc:
             print(f"note: difficulty rating unavailable ({type(exc).__name__}); using the default tier", file=sys.stderr)
     decision = decide(
-        inventory, task, pinned_model=pin, authorize_extra_hosts=authorize_extra,
+        inventory, task, pinned_model=pin,
         plans=plans or None, unknown_usage=unknown_usage, tier_override=tier,
     )
     if rated:
@@ -802,7 +790,7 @@ def run(args: argparse.Namespace, inventory: Inventory | None = None,
         def read_key() -> str:
             return credentials.read_credential(model_select.OPENROUTER_CREDENTIAL_SERVICE)
 
-    common = dict(inventory=inventory, plans=plans, read_key=read_key, authorize_extra=args.authorize_extra,
+    common = dict(inventory=inventory, plans=plans, read_key=read_key,
                   unknown_usage=args.unknown_usage, probe=args.probe)
     if args.nodes:
         try:
