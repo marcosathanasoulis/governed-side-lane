@@ -78,12 +78,11 @@ def _metered(request: Request, table: TierTable, tier: str, owner: Owner | None,
                 "source": obs.source if obs else None, "note": note}
     if state in UNUSABLE:
         return None, f"openrouter_{state}", evidence
-    allowed = orr.allowed_for_tier(table.for_tier(tier))
-    if not allowed:  # never widen to the tier band alone: an empty reviewed set is reported
-        return None, "no_eligible_models", evidence
+    # Owner policy: there is no fixed OpenRouter pool. Auto picks the right model for the cost tier and the
+    # prompt, any model it serves (free ones included) is acceptable, and the served model is reported in the receipt.
     return {"model": orr.AUTO_MODEL, "plugin": orr.PLUGIN_ID[orr.AUTO_MODEL], "cost_tier": tier,
-            "allowed_models": allowed, "billed": True, "binding_ref": binding.ref,
-            "note": "metered inference; the served model is reported in the execution receipt"}, None, evidence
+            "billed": True, "binding_ref": binding.ref,
+            "note": "metered inference; Auto picks any model for the tier; the served model is reported in the execution receipt"}, None, evidence
 
 
 def _resolve_owner(request: Request, prev: Mapping[str, Any] | None) -> tuple[Owner | None, str, str | None]:

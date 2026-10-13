@@ -210,7 +210,7 @@ class MeteredAndOpenRouterTests(unittest.TestCase):
         self.assertEqual((s.route, s.tier), ("metered_openrouter", "xhigh"))
         self.assertTrue(s.openrouter["billed"])
         self.assertEqual(s.openrouter["cost_tier"], "xhigh")
-        self.assertEqual(set(s.openrouter["allowed_models"]), {"anthropic/claude-fable-5.1", "openai/gpt-6-astra"})
+        self.assertNotIn("allowed_models", s.openrouter)  # no fixed pool: Auto picks any model for the tier
 
     def test_metered_not_allowed_means_no_eligible_not_silent_spend(self):
         s = ms.select(request(allow_metered=False, availability=[obs(p, "exhausted") for p in ("claude", "codex", "devin")], tier="medium"), TABLE, now=NOW)
@@ -421,12 +421,12 @@ class ReproducedGapTests(unittest.TestCase):
         for tier in ms.TIERS:
             self.assertTrue(orr.allowed_for_tier(TABLE.for_tier(tier)), tier)
 
-    def test_an_empty_reviewed_set_is_reported_never_widened(self):
+    def test_metered_fallback_needs_no_reviewed_slugs(self):
         bare = ms.TierTable(TABLE.version, tuple(c.__class__(**{**c.__dict__, "openrouter_slug": None}) for c in TABLE.entries))
         s = ms.select(request(tier="high", availability=[obs(p, "exhausted") for p in ("claude", "codex", "devin")]),
                       bare, now=NOW)
-        self.assertEqual(s.status, "no_eligible")
-        self.assertIn("no_eligible_models", s.reason)
+        self.assertEqual(s.route, "metered_openrouter")
+        self.assertNotIn("allowed_models", s.openrouter)
 
     def test_model_only_pin_evaluates_every_same_tier_match(self):
         # glm-5.3 has a direct (metered) and a hosted entry; with only metered use allowed and the direct

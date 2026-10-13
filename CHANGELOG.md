@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.1 - 2026-10-13
+
+- No fixed OpenRouter pool. The metered fallback sends only the cost tier (no `allowed_models`); OpenRouter Auto picks whichever model suits the tier and the prompt, free models included, and the receipt records the served model as `auto_resolved`. A selection that does carry an `allowed_models` list is still enforced and must be well formed.
+
 ## 0.9.0 - 2026-10-13
 
 - Extra usage is never used. `side-lane auto-route` no longer has `--authorize-extra`, an explicit pin to a host with no included usage is blocked (not run metered), and the `extra-usage` declared state remains only as an exclusion for people who have it on. With extra usage off, a probe that succeeds ran on included usage and a failure means none is left. Metered OpenRouter stays a separate, labelled route.

@@ -113,13 +113,21 @@ def build(selection: Mapping[str, Any], *, provider: str, model: str, route: str
     meta = selection.get("openrouter")
     if meta is not None and not isinstance(meta, Mapping):
         raise ContractError("selection.openrouter must be an object")
-    allowed = (meta or {}).get("allowed_models")
-    allow_list_ok = (isinstance(allowed, list) and bool(allowed)
-                     and all(isinstance(p, str) and p.strip() for p in allowed))  # fail closed on a malformed list
+    # No ``allowed_models`` key means no restriction (Auto may serve any model for the tier). A key that is present
+    # must hold a well-formed non-empty list (fail closed on a tampered one), and the served model must match it.
+    restricted = isinstance(meta, Mapping) and "allowed_models" in meta
+    allowed = meta.get("allowed_models") if restricted else None
+    if restricted:
+        allow_list_ok = (isinstance(allowed, list) and bool(allowed)
+                         and all(isinstance(p, str) and p.strip() for p in allowed))
+        if not allow_list_ok:  # a tampered list is rejected outright; a switch reason cannot legitimize it
+            raise ContractError("selection.openrouter.allowed_models must be a non-empty list of model patterns")
+    else:
+        allow_list_ok = isinstance(meta, Mapping)  # the selection must carry its OpenRouter block
     auto = (selection.get("route") == "metered_openrouter" and selection.get("model") in AUTO_MODELS
             and route == "metered_openrouter" and provider == selection.get("provider")
             and is_served_model_id(model) and model not in AUTO_MODELS
-            and allow_list_ok and any(fnmatchcase(model, pat) for pat in allowed))
+            and allow_list_ok and (not restricted or any(fnmatchcase(model, pat) for pat in allowed)))
     receipt = ExecutionReceipt(
         selection_id=selection_id, provider=provider, model=model, route=route,
         success=success, billing_evidence=billing, observed_usage=clean_usage(usage), switch_reason=switch_reason,

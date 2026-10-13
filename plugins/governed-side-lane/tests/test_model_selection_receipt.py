@@ -128,7 +128,7 @@ class ReviewTests(unittest.TestCase):
         sel = self.metered()
         self.assertEqual((sel["route"], sel["model"]), ("metered_openrouter", "openrouter/auto"))
         served = "anthropic/claude-sonnet-5.5"
-        self.assertIn(served, sel["openrouter"]["allowed_models"])
+        self.assertNotIn("allowed_models", sel["openrouter"])  # unrestricted: any served model is acceptable
         code, r = run(sel, "--provider", "openrouter", "--model", served, "--route", "metered_openrouter", "--success",
                       "--billing", "metered_confirmed")
         self.assertEqual(code, 0)
@@ -136,8 +136,16 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(r["model"], served)
         self.assertEqual(r["selected"]["model"], "openrouter/auto")  # the selection is kept as it was
 
-    def test_an_auto_served_model_outside_the_allowed_set_still_needs_a_reason(self):
+    def test_any_well_formed_served_model_is_accepted_when_no_list_was_sent(self):
         sel = self.metered()
+        args = ("--provider", "openrouter", "--model", "vendor/some-free-model:free", "--route", "metered_openrouter",
+                "--success")
+        code, r = run(sel, *args)
+        self.assertEqual((code, r["auto_resolved"]), (0, True))
+
+    def test_a_served_model_outside_an_explicit_list_still_needs_a_reason(self):
+        sel = self.metered()
+        sel["openrouter"]["allowed_models"] = ["anthropic/*"]
         args = ("--provider", "openrouter", "--model", "mystery/model", "--route", "metered_openrouter", "--success")
         self.assertEqual(run(sel, *args)[0], 2)
         code, r = run(sel, *args, "--switch-reason", "Auto served a model outside the sent allow-list")
@@ -156,6 +164,17 @@ class ReviewTests(unittest.TestCase):
             wrong_provider.validate()
 
 
+class MalformedListTests(unittest.TestCase):
+    def test_a_switch_reason_cannot_legitimize_a_tampered_allow_list(self):
+        down = [{"provider": "claude", "state": "exhausted", "checked_at": NOW}]
+        for bad in ([], None, "anthropic/*", [""], [1]):
+            sel = selection(availability=down, tier="medium")
+            sel["openrouter"]["allowed_models"] = bad
+            args = ("--provider", "openrouter", "--model", "anthropic/claude-sonnet-5.5", "--route",
+                    "metered_openrouter", "--success", "--switch-reason", "x")
+            self.assertEqual(run(sel, *args)[0], 2, bad)
+
+
 class SecondReviewTests(unittest.TestCase):
     def auto_selection(self):
         down = [{"provider": "claude", "state": "exhausted", "checked_at": NOW}]
@@ -164,7 +183,7 @@ class SecondReviewTests(unittest.TestCase):
     def args(self, model):
         return ("--provider", "openrouter", "--model", model, "--route", "metered_openrouter", "--success")
 
-    def test_auto_resolution_needs_a_validated_non_empty_allow_list(self):
+    def test_a_present_allow_list_must_be_validated_and_non_empty(self):
         for bad in (None, [], "anthropic/*", [""], [1], {"a": 1}):
             sel = self.auto_selection()
             sel["openrouter"]["allowed_models"] = bad

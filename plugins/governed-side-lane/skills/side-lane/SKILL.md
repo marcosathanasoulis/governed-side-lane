@@ -256,8 +256,9 @@ setup supplies live probe results. Tiers are preferences, never limits on what a
 - **Pins:** `--pin-provider` / `--pin-model` are honored. An unusable pin is reported, never replaced.
 - **No candidate:** the result is `no_eligible` with every exclusion and its reason (`exhausted`,
   `auth_failed`, `transient`, `unknown`, `no_binding`, `plan_unverified`). The tier is never changed
-  silently. With `--allow-metered` and an OpenRouter key stored, same-tier metered OpenRouter is the
-  fallback and is labelled billed. Declare usage with `side-lane prefs set-usage`; an undeclared host
+  silently. With `--allow-metered` and an OpenRouter key stored, metered OpenRouter at the same cost tier is the
+  fallback and is labelled billed. There is no fixed pool: Auto picks whichever model suits the tier and the prompt
+  (free models included), and the receipt records the model it served. Declare usage with `side-lane prefs set-usage`; an undeclared host
   is treated as included.
 - **Receipts:** the selection is a decision, not proof a lane ran. Record what actually ran with
   `side-lane receipt --selection selection.json --provider <p> --model <m> --route <route> --success|--failure
@@ -265,7 +266,7 @@ setup supplies live probe results. Tiers are preferences, never limits on what a
   [--append receipts.jsonl]` (`--node-id <id>` for a graph). It copies the selected route from the selection,
   keeps billing `unverified` unless you have evidence, refuses credential-like usage, and refuses a run that
   differs from the selection without a `--switch-reason`. For an OpenRouter Auto run, pass the model Auto served
-  as `--model`; it is recorded as `auto_resolved` when it is inside the allowed set that was sent. Successful
+  as `--model`; it is recorded as `auto_resolved` when it is a well-formed served model id (the default: no list is sent) or, if the selection carries an explicit `allowed_models` list, when it matches that list. Successful
   sign-in does not prove included billing.
   After a limit-looking failure, reselect with `--previous` and say why. Before retrying after a
   failover, read back any external write that may have completed; never repeat one.
